@@ -68,33 +68,34 @@ style.ABS, style.REL, style.AUTO = 1, 2, 3
 -- it stood in for says. Without this a hover style would have to say everything again, size and
 -- padding included, and one that only named a background would take the whole screen.
 local P = {
-	width = 1,
-	height = 2,
-	gap = 4,
-	z = 8,
-	padding = 16,
-	margin = 32,
-	offset = 64,
-	border = 128,
-	bg = 256,
-	fg = 512,
-	texture = 1024,
-	font = 2048,
-	direction = 4096,
-	align = 8192,
-	justify = 16384,
-	position = 32768,
-	visible = 65536,
-	bright = 131072,
-	bar = 262144,
-	radius = 524288,
-	shadow = 1048576,
+	width = 1 << 0,
+	height = 1 << 1,
+	gap = 1 << 2,
+	z = 1 << 3,
+	padding = 1 << 4,
+	margin = 1 << 5,
+	offset = 1 << 6,
+	border = 1 << 7,
+	bg = 1 << 8,
+	fg = 1 << 9,
+	texture = 1 << 10,
+	font = 1 << 11,
+	direction = 1 << 12,
+	align = 1 << 13,
+	justify = 1 << 14,
+	position = 1 << 15,
+	visible = 1 << 16,
+	bright = 1 << 17,
+	bar = 1 << 18,
+	radius = 1 << 19,
+	shadow = 1 << 20,
 }
 
 style.PRESENT = P
 
--- What a style that named no width or height says, and what it is painted with.
-local PAINT = 2097152
+-- What a style that named no width or height says, and what it is painted with. It shares the
+-- word the bits above are in, so it is the one after them.
+local PAINT = 1 << 21
 
 --- One style, as the arena holds it: the fields the layout reads. The language server
 --- cannot see an ffi.cdef, so they are spelled out here, which is the only way to get
