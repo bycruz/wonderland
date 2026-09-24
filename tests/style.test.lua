@@ -225,3 +225,54 @@ test.it("an element can be named, for input focus", function()
 	test.equal(element.nameOf(el), "field")
 	test.equal(element.nameOf(div()), nil, "and an element with no name has none")
 end)
+
+test.it("text is drawn in the family and at the size a style names", function()
+	local named = sty():font("Inter"):text("lg")
+	local counted = sty():font("Inter"):text(18)
+
+	test.equal(style.intern(named), style.intern(counted), "a size from the scale is the pixels it is")
+
+	local other = sty():font("A Family Nobody Has"):text("lg")
+	test.truthy(style.intern(other) ~= style.intern(named), "and another family is another style")
+
+	local slot = style.intern(named)
+	local handle = style.at(slot).fontFamily
+
+	test.equal(style.familyAt(handle), "Inter", "which holds the name rather than a font: a style is bytes")
+	test.equal(style.at(slot).fontSize, 18, "at eighteen pixels")
+end)
+
+test.it("a size that is not on the scale is not a size", function()
+	local ok, err = pcall(function()
+		return sty():text("enormous")
+	end)
+
+	test.falsy(ok, "a name that is not a size is refused")
+	test.truthy(tostring(err):match("Not a text scale"), "and says so")
+
+	local badWeight, weightErr = pcall(function()
+		return sty():font("Inter", { weight = "heavyish" })
+	end)
+
+	test.falsy(badWeight, "and so is a weight that is not one")
+	test.truthy(tostring(weightErr):match("Not a font weight"), "and says so")
+end)
+
+test.it("a weight is taken by name or by number", function()
+	local byName = sty():font("Inter", { weight = "semibold" })
+	local byNumber = sty():font("Inter", { weight = 600 })
+
+	test.equal(style.intern(byName), style.intern(byNumber), "semibold is six hundred")
+
+	local slot = style.intern(byName)
+	test.equal(style.at(slot).fontWeight, 600)
+	test.equal(style.at(slot).fontItalic, 0, "and a style that says nothing about a slant is upright")
+end)
+
+test.it("says whether a line too wide for its box is cut", function()
+	local cut = sty():ellipsis()
+
+	test.equal(style.at(style.intern(cut)).ellipsis, 1, "a box that asked for it is cut")
+	test.falsy(style.at(style.intern(sty())) and style.at(style.intern(sty())).ellipsis ~= 0,
+		"and one that said nothing is not")
+end)

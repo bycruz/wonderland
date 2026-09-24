@@ -1,14 +1,19 @@
 -- The frame's vertices and indices, written straight into memory that can be handed to
--- the gpu.
+-- the gpu, and the runs of quads that share a picture.
 --
 -- This used to be a Lua array of numbers per frame with a copy into ffi memory at the
 -- end, which for a screen of text meant a table of forty thousand entries built and
 -- thrown away sixty times a second. One buffer is kept instead and written into.
 --
+-- A quad names the picture it samples, and the frame is drawn one bind group at a time:
+-- the quads of one picture are a run, drawn in one call, and the run after it is another.
+-- The runs are in the order the walk wrote the quads, so nothing about a screen is reordered
+-- to draw it -- which is what keeps a picture drawn over another one over it.
+--
 -- The vertex is the one the render plugin's descriptor declares, and it asserts the two
 -- agree so the pair cannot drift apart:
 --
---   position (3) | colour (4) | uv (2) | texture (1) | corners (4) | edge (2)
+--   position (3) | colour (4) | uv (2) | picture (1) | corners (4) | edge (2)
 --
 -- The corners are the four numbers a box is cut with: where this corner of the quad is from the
 -- middle of the box, and where the arc's own box starts, both in pixels measured across the
@@ -18,6 +23,10 @@
 -- with round corners wants; a wider one is a shadow, whose edge is spread out over its blur.
 -- A quad that is not cut at all says so in a band of nought, which is the number written for
 -- every quad that is not asked to be round.
+--
+-- The picture a quad samples is in the vertex as the id it was asked for by, because it is what
+-- the shader reads that picture's own bands from: where in its texture the picture is depends on
+-- how far down it a pixel is, and that is arithmetic the fragment does.
 local ffi = require("ffi")
 
 local batch = {}
@@ -31,8 +40,15 @@ local FLOATS_PER_VERTEX = 16
 local ROUND = 10
 local EDGE = 14
 
+-- What a run is, as the numbers it is: which picture it draws with, and the quad it starts at.
+-- Two numbers a run, in one array, because a run is looked at once per draw call and a struct
+-- would be a second type for the same two.
+local RUN_TEXTURE, RUN_FIRST = 0, 1
+local RUN_NUMBERS = 2
+
 local quadArray = ffi.typeof("float[?]")
 local indexArray = ffi.typeof("uint32_t[?]")
+local runArray = ffi.typeof("uint32_t[?]")
 
 --- Quads to make room for before a frame has asked for any.
 local DEFAULT_CAPACITY = 1024
@@ -40,6 +56,8 @@ local DEFAULT_CAPACITY = 1024
 ---@class wonderland.QuadBatch
 ---@field vertices ffi.cdata* # float*, four vertices per quad
 ---@field indices ffi.cdata* # uint32_t*, six indices per quad
+---@field runs ffi.cdata* # uint32_t*, the texture and first quad of each run
+---@field runCount number # How many runs this frame has
 ---@field quads number # How many are in it
 ---@field capacity number # How many fit before it grows
 ---@field scaleX number # How many pixels one of a quad's x coordinates is worth
@@ -55,6 +73,9 @@ function batch.new(capacity)
 	return setmetatable({
 		vertices = quadArray(capacity * VERTICES_PER_QUAD * FLOATS_PER_VERTEX),
 		indices = indexArray(capacity * INDICES_PER_QUAD),
+		runs = runArray(capacity * RUN_NUMBERS),
+		runCount = 0,
+		texture = nil,
 		quads = 0,
 		capacity = capacity,
 		scaleX = 1,
@@ -86,18 +107,67 @@ function QuadBatch:reserve(quads)
 
 	local vertices = quadArray(capacity * VERTICES_PER_QUAD * FLOATS_PER_VERTEX)
 	local indices = indexArray(capacity * INDICES_PER_QUAD)
+	local runs = runArray(capacity * RUN_NUMBERS)
 
 	-- What has been written so far is still part of this frame.
 	ffi.copy(vertices, self.vertices, self.quads * VERTICES_PER_QUAD * FLOATS_PER_VERTEX * ffi.sizeof("float"))
 	ffi.copy(indices, self.indices, self.quads * INDICES_PER_QUAD * ffi.sizeof("uint32_t"))
+	ffi.copy(runs, self.runs, self.runCount * RUN_NUMBERS * ffi.sizeof("uint32_t"))
 
 	self.vertices = vertices
 	self.indices = indices
+	self.runs = runs
 	self.capacity = capacity
 end
 
 function QuadBatch:reset()
 	self.quads = 0
+	self.runCount = 0
+	self.texture = nil
+end
+
+--- Every quad from here on is drawn with another picture, so the run the last one was in ends
+--- and another starts. A quad that samples what the one before it did joins that run, which is
+--- what makes a line of text one draw call rather than one per glyph.
+---@param texture number
+function QuadBatch:startRun(texture)
+	if self.runCount >= self.capacity then
+		self:reserve(self.capacity + 1)
+	end
+
+	local at = self.runCount * RUN_NUMBERS
+
+	self.runs[at + RUN_TEXTURE] = texture
+	self.runs[at + RUN_FIRST] = self.quads
+	self.runCount = self.runCount + 1
+	self.texture = texture
+end
+
+--- Throws away the quads past a point, and the runs that were only theirs: a frame is drawn
+--- again with the caret taken out, and what is left of it is what the gpu is given.
+---@param quads number
+function QuadBatch:truncate(quads)
+	if quads >= self.quads then
+		return
+	end
+
+	self.quads = quads
+
+	-- A run that starts at or past the end of the frame is gone, and the one before it is what
+	-- the next quad written will join if it samples the same picture.
+	while self.runCount > 0 do
+		local at = (self.runCount - 1) * RUN_NUMBERS
+
+		if self.runs[at + RUN_FIRST] < quads then
+			self.texture = self.runs[at + RUN_TEXTURE]
+
+			return
+		end
+
+		self.runCount = self.runCount - 1
+	end
+
+	self.texture = nil
 end
 
 --- A vertex of one quad: the corner, then what every corner of the quad shares.
@@ -144,15 +214,14 @@ end
 ---@param g number
 ---@param b number
 ---@param a number
----@param texture number
 ---@param cornerX number
 ---@param cornerY number
 ---@param innerX number
 ---@param innerY number
 ---@param radius number
 ---@param band number
-local function putRound(vertices, index, x, y, u, v, z, r, g, b, a, texture, cornerX, cornerY, innerX, innerY,
-	radius, band)
+local function putRound(vertices, index, x, y, u, v, z, r, g, b, a, texture, cornerX, cornerY, innerX,
+	innerY, radius, band)
 	put(vertices, index, x, y, u, v, z, r, g, b, a, texture)
 
 	vertices[index + ROUND] = cornerX
@@ -190,7 +259,7 @@ end
 ---@param g number
 ---@param b number
 ---@param a number
----@param texture number # Which layer of the texture array it samples
+---@param texture number # Which picture it samples, which is what the run it is in is drawn with
 ---@param u0 number?
 ---@param v0 number?
 ---@param u1 number?
@@ -198,6 +267,10 @@ end
 function QuadBatch:quad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0, u1, v1)
 	if self.quads >= self.capacity then
 		self:reserve(self.capacity + 1)
+	end
+
+	if texture ~= self.texture then
+		self:startRun(texture)
 	end
 
 	local vertices = self.vertices
@@ -219,8 +292,8 @@ end
 --- It is a call of its own rather than an argument of `quad` because of how rare it is: a round
 --- box is a box with a background, and the quads it is drawn among are glyphs, which are never
 --- round. Two shapes at one call site is a trace that is left and entered again for every one of
---- them -- the pointer path compiles, then the next glyph throws it away -- and a site that does
---- that often enough is one the recorder stops compiling at all.
+--- them -- the pointer path compiles, then the next glyph throws it away -- and a site that
+--- does that often enough is one the recorder stops compiling at all.
 ---
 --- Everything about the corners is in pixels: the radius, and the box they are round in, which is
 --- passed only when a clip cut the quad down to less than the box it was asked for -- the corners
@@ -249,6 +322,10 @@ function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u
 	boxTop, boxRight, boxBottom, band)
 	if self.quads >= self.capacity then
 		self:reserve(self.capacity + 1)
+	end
+
+	if texture ~= self.texture then
+		self:startRun(texture)
 	end
 
 	local vertices = self.vertices
@@ -308,5 +385,7 @@ end
 batch.VERTICES_PER_QUAD = VERTICES_PER_QUAD
 batch.INDICES_PER_QUAD = INDICES_PER_QUAD
 batch.FLOATS_PER_VERTEX = FLOATS_PER_VERTEX
+batch.RUN_NUMBERS = RUN_NUMBERS
+batch.RUN_TEXTURE, batch.RUN_FIRST = RUN_TEXTURE, RUN_FIRST
 
 return batch

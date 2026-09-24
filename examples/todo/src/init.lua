@@ -153,7 +153,19 @@ function App:view(window)
 			div():style(HEADING):children("Todos"),
 			div():style(COUNT):children(leftOver(self.todos))
 		),
-		div():style(PANE):scroll(self.offset):children(children),
+		div():style(PANE)
+			:scroll(self.offset)
+			:children(children)
+			-- The wheel over the list, and the list's own bar being dragged, are one call: what a
+			-- wheel asks for is a distance and what a bar asks for is a place, and one of the two
+			-- is always nothing. The offset is this app's, so the app is what clamps it.
+			:onScroll(function(by, to)
+				if to then
+					return { type = "scrollTo", to = to }
+				end
+
+				return { type = "scroll", by = (by or 0) * ROW_STEP }
+			end),
 		div()
 			:style(FIELD)
 			:input({
@@ -164,17 +176,6 @@ function App:view(window)
 			})
 			:children(typed)
 	)
-end
-
---- The wheel is a message like anything else: a notch is a row. What an event does is say what
---- happened, and what a message does is change the state -- which is also what asks for the frame
---- that shows it, since the view is a function of the state and nothing else would repaint.
----@param event winit.Event
----@return any?
-function App:event(event)
-	if event.name == "mouseScroll" then
-		return { type = "scroll", by = event.dy * ROW_STEP }
-	end
 end
 
 ---@param message any
@@ -200,6 +201,11 @@ function App:update(message, window)
 		local _, most = extent(self, window)
 
 		self.offset = math.max(0, math.min(most, self.offset + message.by))
+	elseif kind == "scrollTo" then
+		-- Where the bar was dragged to, which is a place in the list rather than a distance.
+		local _, most = extent(self, window)
+
+		self.offset = math.max(0, math.min(most, message.to))
 	elseif kind == "toggle" then
 		local todo = find(self.todos, message.id)
 

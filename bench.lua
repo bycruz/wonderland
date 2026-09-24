@@ -115,8 +115,9 @@ local function measure(name, view)
 
 	collectgarbage("restart")
 
-	print(string.format("  %-26s %7.3f ms   %8.1f KB   %d quads", name, best, allocated / (ROUNDS * BATCHES),
-		assert(screen.plugins.render:getContext(window)).nIndices / 6))
+	print(string.format("  %-26s %7.3f ms   %8.1f KB   %d quads   %d runs", name, best,
+		allocated / (ROUNDS * BATCHES), assert(screen.plugins.render:getContext(window)).quads,
+		assert(screen.plugins.render:getContext(window)).runCount))
 
 	screen:close()
 end

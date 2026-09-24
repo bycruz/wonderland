@@ -7,6 +7,8 @@ out gl_PerVertex {
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aColor;
 layout(location = 2) in vec2 aTexCoord;
+// Which picture this quad samples, by the id the vertex buffer was written with: the picture's own
+// bands are looked up by it, and the draw call it is in is bound with its texture.
 layout(location = 3) in float aTexIndex;
 // A corner of a box that is cut round: where this corner is from the middle of the box, and where
 // the arcs sit inside it. Both are in pixels across the window and down it, which is what makes a

@@ -25,6 +25,7 @@
 local app = require("wonderland.app")
 local element = require("wonderland.element")
 local style = require("wonderland.style")
+local time = require("wonderland.time")
 local Assets = require("wonderland.util.assets")
 
 ---@class wonderland
@@ -35,6 +36,7 @@ local Assets = require("wonderland.util.assets")
 ---@field Element wonderland.Element
 ---@field Assets wonderland.Assets # The class pictures are loaded through, for one wired by hand
 ---@field headless wonderland.headless
+---@field time wonderland.time.Time # Seconds on a clock that only goes forwards
 ---@field app fun(title: string?): wonderland.App
 ---@field run fun(app: wonderland.App)
 local wonderland = {
@@ -46,6 +48,7 @@ local wonderland = {
 	Element = element.Element,
 	Assets = Assets,
 	headless = require("wonderland.headless"),
+	time = time,
 	app = app.new,
 	run = app.run,
 }

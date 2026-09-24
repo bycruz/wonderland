@@ -17,10 +17,7 @@ function App:init()
 end
 
 function App:view(window, assets)
-	-- A gif is drawn a frame at a time: what the asset manager hands back is the frame the clock is
-	-- on, which is a texture and the part of it to draw. Asking for it again on the next repaint
-	-- costs a lookup, and the screen is asked for again when the frame after this one is due.
-	local dance = assets:gif("assets/spinner.gif")
+	local dance = assets:gif("assets/test.gif")
 	local frame = dance:current()
 	local times = self.clicks == 1 and "time" or "times"
 

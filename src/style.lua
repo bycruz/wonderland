@@ -48,6 +48,14 @@ ffi.cdef [[
 		uint32_t flags;   // which of the fields that have no neutral value were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
 
+		// How text in the element is drawn, which is not a thing painted on the box but a thing
+		// its contents inherit: the family is a handle into the table of family names, and a size,
+		// a weight or a slant of nought is one the element above it says rather than none.
+		uint32_t fontFamily;
+		double fontSize;
+		uint32_t fontWeight;
+		uint8_t fontItalic, ellipsis;
+
 		// Everything above is what a node is made of, in the order a node holds it, so a node
 		// copies a style into itself in one go. Everything below is only ever looked at when a
 		// box scrolls, which is why it is kept out of that copy -- and out of the nodes.
@@ -89,6 +97,11 @@ local P = {
 	bar = 1 << 18,
 	radius = 1 << 19,
 	shadow = 1 << 20,
+	fontFamily = 1 << 22,
+	fontSize = 1 << 23,
+	fontWeight = 1 << 24,
+	fontItalic = 1 << 25,
+	ellipsis = 1 << 26,
 }
 
 style.PRESENT = P
@@ -150,6 +163,11 @@ local PAINT = 1 << 21
 ---@field shadowX number
 ---@field shadowY number
 ---@field shadowBlur number
+---@field fontFamily number
+---@field fontSize number
+---@field fontWeight number
+---@field fontItalic number
+---@field ellipsis number
 ---@field shadowR number
 ---@field shadowG number
 ---@field shadowB number
@@ -218,7 +236,12 @@ local PAINT = 1 << 21
 ---@field bgImage Texture?
 ---@field bgImageUV wonderland.UV?
 ---@field fg wonderland.Color?
----@field font Font?
+---@field font Font? # An uploaded font, for an app that wired one up itself
+---@field fontFamily string? # The family text is drawn in: a name this machine resolves, or a file
+---@field fontSize number? # How tall text is drawn, in pixels: what `:text` names
+---@field fontWeight number? # 100 to 900, as a stylesheet counts it
+---@field fontItalic boolean?
+---@field ellipsis boolean? # Whether text too wide for its box is cut, with an ellipsis where it was
 
 --- One table carries both, and that is what an element holds.
 ---@class wonderland.Style: wonderland.VisualStyle, wonderland.LayoutStyle
@@ -252,7 +275,9 @@ local Style = {}
 ---@field offset fun(self: wonderland.StyleBuilder, x: number, y: number): wonderland.StyleBuilder
 ---@field bg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
 ---@field fg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
----@field font fun(self: wonderland.StyleBuilder, font: Font): wonderland.StyleBuilder
+---@field font fun(self: wonderland.StyleBuilder, name: string | Font, opts: { weight: number | string, italic: boolean }?): wonderland.StyleBuilder
+---@field text fun(self: wonderland.StyleBuilder, value: string | number): wonderland.StyleBuilder
+---@field ellipsis fun(self: wonderland.StyleBuilder): wonderland.StyleBuilder
 ---@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: wonderland.UV?): wonderland.StyleBuilder
 ---@field bright fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
 ---@field radius fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
@@ -555,11 +580,100 @@ function methods:bar(width, least, color)
 	return self
 end
 
---- Which uploaded texture text is drawn with.
----@param font Font
+-- The names a size is asked for by, and what they come to in pixels. The numbers are the ones a
+-- stylesheet is written in, so a screen whose text is named this way is the same screen whatever
+-- the sizes are, and one size is changed in one place.
+local TEXT_SCALES = {
+	xs = 12,
+	sm = 14,
+	base = 16,
+	lg = 18,
+	xl = 20,
+	["2xl"] = 24,
+	["3xl"] = 30,
+	["4xl"] = 36,
+	["5xl"] = 48,
+	["6xl"] = 60,
+}
+
+local FONT_WEIGHTS = {
+	thin = 100,
+	extralight = 200,
+	light = 300,
+	regular = 400,
+	normal = 400,
+	medium = 500,
+	semibold = 600,
+	bold = 700,
+	extrabold = 800,
+	black = 900,
+}
+
+--- The family text inside this element is drawn in, and how that family is drawn.
+---
+---   sty():font("Inter")
+---   sty():font("Inter", { weight = "semibold", italic = true })
+---   sty():font("assets/Brand.ttf")
+---
+--- A name this machine does not have is drawn in the machine's own sans rather than in nothing:
+--- see `wonderland.font.Registry`, which is what knows the names, and `wonderland.FontSpec`.
+--- What it changes is one thing about the text inside the element: the size, the weight and the
+--- slant stay what the nearest element above it that named them said.
+---@param name string | Font
+---@param opts { weight: number | string, italic: boolean }?
 ---@return wonderland.StyleBuilder
-function methods:font(font)
-	self.values.font = font
+function methods:font(name, opts)
+	if type(name) == "number" then
+		self.values.font = name
+	else
+		self.values.fontFamily = name
+	end
+
+	if opts ~= nil then
+		local weight = opts.weight
+
+		if weight ~= nil then
+			self.values.fontWeight = type(weight) == "string" and (FONT_WEIGHTS[weight:lower()]
+				or assert(tonumber(weight), "Not a font weight: " .. weight)) or weight
+		end
+
+		if opts.italic ~= nil then
+			self.values.fontItalic = opts.italic
+		end
+	end
+
+	self.version = self.version + 1
+	return self
+end
+
+--- How tall text inside this element is drawn: a name from the scale -- xs, sm, base, lg, xl, 2xl
+--- and up -- or a number of pixels.
+---
+---   sty():text("lg")
+---   sty():text(22)
+---@param value string | number
+---@return wonderland.StyleBuilder
+function methods:text(value)
+	local size = value
+
+	if type(value) == "string" then
+		size = TEXT_SCALES[value:lower()]
+		assert(size ~= nil, "Not a text scale: " .. value)
+	end
+
+	self.values.fontSize = size
+	self.version = self.version + 1
+	return self
+end
+
+--- Text too wide for the box it is in is cut, with an ellipsis where it was cut, rather than
+--- drawn past the box or squashed into it: what a title in a list of them is.
+---
+--- What it is cut to is the width the box came out, so it is the layout's answer rather than the
+--- style's -- see `wonderland.plugin.Layout`, which measures the line again for a box it fills.
+---@return wonderland.StyleBuilder
+function methods:ellipsis()
+	self.values.ellipsis = true
 	self.version = self.version + 1
 	return self
 end
@@ -607,6 +721,33 @@ local slots = 0
 -- stack of fields of a struct is what the check is for.
 local scratch = ffi.new("wl_style")
 ---@cast scratch wonderland.StyleSlot
+
+-- The family names styles name. A style is compared as bytes, so what a style holds of a family
+-- is a handle into this: two styles that name the same family are the same style, and the name
+-- itself is read once, where the text of an element is resolved into a font.
+local families, familyNames = {}, {}
+
+---@param name string
+---@return number
+function style.internFamily(name)
+	local known = familyNames[name]
+
+	if known ~= nil then
+		return known
+	end
+
+	local handle = #families + 1
+	families[handle] = name
+	familyNames[name] = handle
+
+	return handle
+end
+
+---@param handle number
+---@return string?
+function style.familyAt(handle)
+	return families[handle]
+end
 
 local SIZE = assert(ffi.sizeof("wl_style"))
 local scratchBytes = ffi.cast("const uint8_t *", scratch)
@@ -830,6 +971,34 @@ local function fill(fields)
 		scratch.shadowB = math.floor(color.b * 255 + 0.5)
 		scratch.shadowA = math.floor(color.a * 255 + 0.5)
 		flags = flags + P.shadow
+	end
+
+	-- Text is drawn in the family, at the size, at the weight and on the slant the nearest
+	-- element above it that named them says: a style that names one of these changes that one
+	-- thing about the text inside it, which is what a heading in the middle of a page is.
+	if fields.fontFamily ~= nil then
+		scratch.fontFamily = style.internFamily(fields.fontFamily)
+		flags = flags + P.fontFamily
+	end
+
+	if fields.fontSize ~= nil then
+		scratch.fontSize = fields.fontSize
+		flags = flags + P.fontSize
+	end
+
+	if fields.fontWeight ~= nil then
+		scratch.fontWeight = fields.fontWeight
+		flags = flags + P.fontWeight
+	end
+
+	if fields.fontItalic ~= nil then
+		scratch.fontItalic = fields.fontItalic and 1 or 0
+		flags = flags + P.fontItalic
+	end
+
+	if fields.ellipsis ~= nil then
+		scratch.ellipsis = fields.ellipsis and 1 or 0
+		flags = flags + P.ellipsis
 	end
 
 	-- A style with a background is one that paints, whether or not it said anything else: a

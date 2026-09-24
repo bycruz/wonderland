@@ -3,7 +3,7 @@
 local test = require("lde-test")
 local image = require("image")
 local wonderland = require("wonderland")
-local Atlas = require("wonderland.font.stbtt")
+local Atlas = require("wonderland.font.atlas")
 
 local div, text = wonderland.div, wonderland.text
 
@@ -189,8 +189,8 @@ test.skipIf(not canRender)("draws a glyph the same width wherever it lands", fun
 	test.equal(centredDrawn, drawnWidth, "a centred glyph keeps every column")
 
 	local atlas = assert(Atlas.fromPath({ characters = CHARACTERS, pixelHeight = 18 }, assert(fontPath)))
-	local quad = atlas:getCharUVs("w")
-	test.equal(drawnWidth, math.ceil(quad.width), "and it is as wide as the atlas says")
+	local glyph = atlas:getCharUVs("w")
+	test.equal(drawnWidth, math.ceil(glyph.width), "and it is as wide as the atlas says")
 end)
 
 -- The frame buffers start at a screenful and grow, and writing past the end of one used
@@ -222,7 +222,7 @@ test.skipIf(not canRender)("draws a screen bigger than the buffers it started wi
 	screen:draw()
 
 	local ctx = assert(screen.plugins.render:getContext(screen.window))
-	test.greater(ctx.nIndices, 4096 * 6, "the frame is past what the buffers start with")
+	test.greater(ctx.quads, 4096, "the frame is past what the buffers start with")
 
 	local pixels = assert(screen:getPixels())
 	screen:close()
@@ -1645,7 +1645,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked", fun
 	-- is drawn: read from the same run the screen draws, so a click and the caret it comes to are
 	-- measured against one thing rather than two.
 	local fontManager = assert(screen.plugins.render.sharedResources).fontManager
-	local run = fontManager:getBitmap(fontManager:getDefault()):getRun(value)
+	local run = assert(fontManager:getDefault()):getRun(value)
 
 	---@param line number
 	---@param column number
@@ -1718,7 +1718,7 @@ end)
 
 --- A picture of four pixels, one colour each in the order a file holds them -- red, green, blue and
 --- white, across and then down. Three channels, so what is drawn is a picture the upload had to
---- widen as well as place: a texture array holds rgba and nothing else.
+--- widen as well as place: a texture holds rgba and nothing else.
 ---@param path string
 local function writePicture(path)
 	local picture = image.new(2, 2, 3)
@@ -1730,6 +1730,111 @@ local function writePicture(path)
 
 	assert(picture:save(path))
 end
+
+--- A picture of one colour, written where the asset manager can read it back.
+---@param path string
+---@param width number
+---@param height number
+---@param color number[]
+local function writeColor(path, width, height, color)
+	local picture = image.new(width, height, 4)
+
+	picture:fill(color[1], color[2], color[3], color[4])
+	assert(picture:save(path))
+end
+
+test.skipIf(not canRender)("draws pictures of any size, each with the picture it was given", function()
+	local wide = os.tmpname() .. ".png"
+	local dot = os.tmpname() .. ".png"
+
+	-- One past what the texture array this used to be would have held at its widest, and one that
+	-- is nothing: what a screen of pictures costs is what the pictures are.
+	writeColor(wide, 640, 360, { 200, 40, 40, 255 })
+	writeColor(dot, 8, 8, { 40, 200, 40, 255 })
+
+	local screen = wonderland.headless.new(function(_, assets)
+		local big = assets:image(wide)
+		local small = assets:image(dot)
+
+		return div():style({ direction = "row", width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK })
+			:children({
+				div():style({ width = big.width, height = big.height, bgImage = big.texture, bgImageUV = big.uv }),
+				div():style({ width = small.width, height = small.height, bgImage = small.texture, bgImageUV = small.uv }),
+			})
+	end, { width = 660, height = 360, fontPath = assert(fontPath) })
+
+	screen:draw()
+	local pixels = assert(screen:getPixels())
+	local ctx = assert(screen.plugins.render:getContext(screen.window))
+	screen:close()
+
+	local r, g = pixelAt(pixels, 660, 320, 180)
+	test.equal(r, 200, "the large picture is drawn where the layout put it")
+	test.equal(g, 40)
+
+	local dr, dg = pixelAt(pixels, 660, 644, 4)
+	test.equal(dg, 200, "and the small one is beside it, with a draw call of its own")
+	test.equal(dr, 40)
+
+	local er, eg, eb = pixelAt(pixels, 660, 652, 300)
+	test.equal(er, 0, "and what neither of them covers is what was behind them")
+	test.equal(eg, 0)
+	test.equal(eb, 0)
+
+	test.greater(ctx.runCount, 2, "which is two runs of quads, one texture bound for each")
+
+	os.remove(wide)
+	os.remove(dot)
+end)
+
+-- A picture past what one upload holds is uploaded in bands, which are layers of one texture: the
+-- pixels have to come back out where they went in, across the seam between two of them.
+test.skipIf(not canRender)("draws a picture larger than one upload is, in bands", function()
+	local side = 2048
+	local path = os.tmpname() .. ".png"
+
+	-- A picture of four million pixels, which is two bands, and a ramp down it so that a row that
+	-- came back out at the wrong height reads as the wrong colour.
+	local picture = image.new(side, side, 4)
+
+	for row = 0, side - 1 do
+		local shade = math.floor(row / 8)
+		local pixels = picture.pixels
+
+		for column = 0, side - 1 do
+			local at = (row * side + column) * 4
+
+			pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3] = shade, shade, shade, 255
+		end
+	end
+
+	assert(picture:save(path))
+
+	local screen = wonderland.headless.new(function(_, assets)
+		local big = assets:image(path)
+
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children({
+			div():style({ width = big.width, height = big.height, bgImage = big.texture, bgImageUV = big.uv }),
+		})
+	end, { width = side, height = side, fontPath = assert(fontPath) })
+
+	screen:draw()
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	---@param row number
+	---@return number
+	local function shadeAt(row)
+		return (pixelAt(pixels, side, 40, row))
+	end
+
+	test.equal(shadeAt(0), 0, "the first row of the picture is the first row of the frame")
+	test.equal(shadeAt(1000), 125, "and a row of the first band is where it was")
+	test.equal(shadeAt(1024), 128, "the row the second band starts at is where it was as well")
+	test.equal(shadeAt(2047), 255, "and so is the last row of the picture")
+
+	os.remove(path)
+end)
 
 test.skipIf(not canRender)("draws a picture where the box it was given is, the right way up", function()
 	local path = os.tmpname() .. ".png"

@@ -67,6 +67,13 @@ ffi.cdef [[
 		uint32_t styleFlags;           // and which of that style's fields were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
 
+		// Text inside it is drawn in the family, at the size, at the weight and on the slant the
+		// nearest element above it that named them says: nought is one the element above says.
+		uint32_t fontFamily;
+		double fontSize;
+		uint32_t fontWeight;
+		uint8_t fontItalic, ellipsis;
+
 		// -- nothing above this line is the node's own: it is the style it was built from.
 
 		uint32_t style;                // the slot it was styled with
@@ -112,7 +119,8 @@ ffi.cdef [[
 -- load, so it is the library that refuses rather than a frame that comes out wrong.
 for _, field in ipairs({ "wantWidth", "wantHeight", "bgR", "borderR", "u0", "gap", "zIndex", "paddingTop",
 	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "shadowX",
-	"shadowBlur", "shadowA", "widthUnit", "paint" }) do
+	"shadowBlur", "shadowA", "widthUnit", "paint", "fontFamily", "fontSize", "fontWeight", "fontItalic",
+	"ellipsis" }) do
 	assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
 		"wl_node and wl_style disagree about " .. field .. ": the build copies one into the other")
 end
@@ -212,6 +220,11 @@ local layout = {}
 ---@field position number
 ---@field visible number
 ---@field paint number
+---@field fontFamily number
+---@field fontSize number
+---@field fontWeight number
+---@field fontItalic number
+---@field ellipsis number
 
 --- What a screen is laid out against. A real window has more than this and a headless
 --- screen has less; both are laid out by their size, the redraw flag is how the ui asks for

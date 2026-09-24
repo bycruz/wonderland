@@ -8,7 +8,6 @@
 --
 -- This is how a screen gets checked in a test, and how it gets rendered on a machine
 -- with no display at all.
-local Atlas = require("wonderland.font.stbtt")
 local WindowPlugin = require("wonderland.plugin.window")
 local RenderPlugin = require("wonderland.plugin.render")
 local TextPlugin = require("wonderland.plugin.text")
@@ -68,7 +67,7 @@ function headless.new(view, opts)
 	self.plugins.text = TextPlugin.new(self.plugins.render)
 	self.plugins.layout = LayoutPlugin.new(function(window)
 		return self.view(window, self.assets)
-	end, self.plugins.text)
+	end, self.plugins.text, self.plugins.render)
 	self.plugins.ui = UIPlugin.new(self.plugins.layout, self.plugins.render)
 
 	-- The same order the window shell asks the plugins in: an event goes down them, and the
@@ -102,14 +101,13 @@ function headless.new(view, opts)
 	-- What a view function loads pictures with, as an app is handed one when its window is made.
 	self.assets = assert(self.plugins.render.sharedResources).assets
 
-	if opts.fontPath then
-		local fontManager = assert(self.plugins.render.sharedResources).fontManager
-		local atlas, err = Atlas.fromPath({ pixelHeight = DEFAULT_PIXEL_HEIGHT, characters = CHARACTERS },
-			opts.fontPath)
-		assert(atlas, err)
+	local fontManager = assert(self.plugins.render.sharedResources).fontManager
 
-		fontManager:setDefault(fontManager:upload(atlas))
-	end
+	fontManager:setDefault({
+		family = opts.fontPath,
+		pixelHeight = DEFAULT_PIXEL_HEIGHT,
+		characters = CHARACTERS,
+	})
 
 	self.plugins.layout:register(self.window)
 

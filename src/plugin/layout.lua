@@ -1,10 +1,13 @@
 local bit = require("bit")
 local UILayout = require("wonderland.layout")
+local style = require("wonderland.style")
 local wonderlandElement = require("wonderland.element")
+local time = require("wonderland.time")
 
 -- The elements of this frame, by the index a node holds, and the values an element can
 -- only name: a handler, the string it draws. Both are the same arrays every repaint.
 local pointers = wonderlandElement.pointers
+local strings = wonderlandElement.strings
 local callbacks = wonderlandElement.callbacks
 local TEXT_INPUT = wonderlandElement.TEXT_INPUT
 local MULTILINE = wonderlandElement.MULTILINE
@@ -14,6 +17,8 @@ local SLIDE = wonderlandElement.SLIDE
 ---@class wonderland.plugin.Layout.Hit
 ---@field element wonderland.Element
 ---@field node wonderland.Node
+---@field index number # The node, by the place the screen keeps it in
+---@field depth number # How deep in the tree it is, which is what says which of two is innermost
 ---@field absX number
 ---@field absY number
 
@@ -83,6 +88,52 @@ local function findElementsAtPosition(screen, index, x, y, parentX, parentY, res
 	end
 end
 
+--- The chain of boxes a point is inside, from the one at the root to the innermost one that
+--- holds it: what a wheel is offered, and what a press on a scroll bar is measured against. A box
+--- that scrolls shows only what is inside it, so a point outside one is inside nothing it holds --
+--- which is the same answer a click gets.
+---@param screen wonderland.Layout.Screen
+---@param index number
+---@param x number
+---@param y number
+---@param parentX number
+---@param parentY number
+---@param depth number
+---@param into wonderland.plugin.Layout.Hit[]
+local function chainAtPosition(screen, index, x, y, parentX, parentY, depth, into)
+	local node = screen:node(index)
+	local absX, absY = parentX + node.x, parentY + node.y
+	local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
+
+	if inside then
+		into[#into + 1] = {
+			element = pointers[node.element],
+			node = node,
+			index = index,
+			depth = depth,
+			absX = absX,
+			absY = absY,
+		}
+	end
+
+	if node.scrolls ~= 0 and not inside then
+		return
+	end
+
+	for at = 0, node.childCount - 1 do
+		chainAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, depth + 1, into)
+	end
+end
+
+--- A scroll bar being dragged: the box it belongs to, how far into the thumb it was taken hold
+--- of, and what the box has to say about being scrolled.
+---@class wonderland.plugin.Layout.BarDrag
+---@field hit wonderland.plugin.Layout.Hit
+---@field grab number
+---@field thumb number
+---@field max number
+---@field change any
+
 --- Where the pointer is and whether its button is held, which is what an element's hover and
 --- active styles are picked from.
 ---@class wonderland.plugin.Layout.Pointer
@@ -114,6 +165,8 @@ end
 ---@field caret wonderland.plugin.UI.Caret? # Where the caret was last placed, and what it is drawn as
 ---@field presented boolean? # And whether the gpu has drawn one for it
 ---@field focusedName string?
+---@field modifiers winit.KeyModifiers? # What the keyboard last said was held, which mouse events do not carry
+---@field barDrag wonderland.plugin.Layout.BarDrag? # The scroll bar being dragged, while one is
 ---@field dragging wonderland.plugin.Layout.Drag? # The slider being dragged, while one is
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
 ---@field pointing boolean? # Whether the pointer cursor is the one for something clickable
@@ -195,11 +248,15 @@ Layout.__index = Layout
 
 ---@param view fun(window: wonderland.RenderWindow): wonderland.Element
 ---@param textPlugin wonderland.plugin.Text
-function Layout.new(view, textPlugin) ---@return wonderland.plugin.Layout
+---@param view fun(window: wonderland.RenderWindow): wonderland.Element
+---@param textPlugin wonderland.plugin.Text
+---@param renderPlugin wonderland.plugin.Render? # What a screen is drawn into, which is the size it is laid out at
+function Layout.new(view, textPlugin, renderPlugin) ---@return wonderland.plugin.Layout
 	return setmetatable({
 		view = view,
 		contexts = {},
 		textPlugin = textPlugin,
+		renderPlugin = renderPlugin,
 		keyRepeatDelay = KEY_REPEAT_DELAY,
 		keyRepeatInterval = KEY_REPEAT_INTERVAL,
 	}, Layout)
@@ -271,20 +328,136 @@ function Layout:refreshView(window)
 	local pointer = ctx.pointer
 
 	if pointer then
-		screen:solve(ctx.window.width, ctx.window.height, true)
+		local width, height = self:size(ctx.window)
+
+		screen:solve(width, height, true)
 
 		if screen:markPointer(pointer.x, pointer.y, pointer.pressed) then
 			ctx.root = screen:fromElement(ctx.ui)
 		end
 	end
 
-	screen:solve(ctx.window.width, ctx.window.height)
+	local width, height = self:size(ctx.window)
+
+	screen:solve(width, height)
+
+	-- A line too wide for the room it has is cut to that room, which is a question only the solve
+	-- can answer: how much room a box has is what the layout worked out, and the line it holds was
+	-- measured before any of it. What a cut line is is part of what a node is, so the screen is
+	-- solved again -- the same solve, of boxes whose lines are now the ones they draw.
+	if self:cutLines(screen, assert(ctx.root), width) then
+		screen:solve(width, height)
+	end
 
 	return ctx.root
 end
 
+--- One node of the walk below: a line too wide for the room the node has is cut to that room, and
+--- its children are walked with the room they have left.
+---
+--- What the room is is not the node's own width. A line of text in a box is as wide as the line is,
+--- so a row whose title is long is a row the title takes over: what it may have is the room its
+--- parent leaves it, and -- in a row -- what is left of that before the child after it, which is
+--- what a title beside a duration is. That is a question about where everything came out, so it is
+--- asked of the solve: see `Layout:cutLines`.
+---@param screen wonderland.Layout.Screen
+---@param index number
+---@param parentX number
+---@param parentY number
+---@param right number # Where the room this node may use ends, absolute
+---@param fontManager FontManager
+---@return boolean cut
+local function cutInto(screen, index, parentX, parentY, right, fontManager)
+	local node = screen:node(index)
+	local x, y = parentX + node.x, parentY + node.y
+	local cut = false
+
+	if node.run ~= 0 and bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0 then
+		local element = pointers[node.element]
+		local font = element.fontId ~= 0 and fontManager:get(element.fontId)
+		local text = element.text ~= 0 and strings[element.text]
+		local room = math.min(node.width, right - x) - node.paddingLeft - node.paddingRight
+
+		if font ~= nil and text ~= nil and room > 0 then
+			local run = font:getRun(text, room)
+
+			if run ~= screen.runs[node.run] then
+				screen.runs[node.run] = run
+				node.runId = run.id
+				cut = true
+
+				-- A line that was cut is as wide as it was cut to, so that what comes after it is
+				-- placed against what is drawn rather than against what would not fit: the row is
+				-- solved again, and the duration beside a title moves to the title's new end.
+				if bit.band(node.styleFlags, style.PRESENT.width) == 0 then
+					node.widthUnit, node.wantWidth = style.ABS, run.width
+				end
+			end
+		end
+	end
+
+	-- What is left for a child: the node's own content edge, and -- in a row -- the place the next
+	-- child was given, which is where this one stops being drawn over.
+	local contentRight = x + node.width - node.paddingRight
+	local isRow = node.direction == 0
+
+	for at = 0, node.childCount - 1 do
+		local child = screen.childIndices[node.firstChild + at - 1]
+		local limit = contentRight
+
+		if isRow and at < node.childCount - 1 then
+			limit = math.min(contentRight, x + screen:node(screen.childIndices[node.firstChild + at]).x)
+		end
+
+		if cutInto(screen, child, x, y, math.min(right, limit), fontManager) then
+			cut = true
+		end
+	end
+
+	return cut
+end
+
+--- Lines too wide for the room they have, cut to it with an ellipsis where they were cut: what a
+--- title in a list of them is. Only a node that asked for it is cut -- see `:ellipsis` -- and the
+--- line it is cut to is kept by the font, which holds a line by the string and the width it was
+--- cut to, so a repaint of the same screen measures nothing.
+---@param screen wonderland.Layout.Screen
+---@param root number # The node the screen was built from
+---@param width number # The window, which is the room the screen itself has
+---@return boolean cut # Whether any line was, which is what wants the screen solved again
+function Layout:cutLines(screen, root, width)
+	local shared = self.renderPlugin and self.renderPlugin.sharedResources
+	local fontManager = shared and shared.fontManager
+
+	if fontManager == nil then
+		return false
+	end
+
+	return cutInto(screen, root, 0, 0, width, fontManager)
+end
+
+--- The size a screen of this window is solved at: the surface it is drawn into rather than the
+--- size the window says it is, which is what keeps a screen being resized from being drawn into a
+--- surface of another size and stretched to fit. See `wonderland.plugin.Render:size`.
+---@param window wonderland.RenderWindow
+---@return number width
+---@return number height
+function Layout:size(window)
+	local render = self.renderPlugin
+
+	if render then
+		return render:size(window)
+	end
+
+	return window.width, window.height
+end
+
 local function hasMouseUp(e) ---@param e wonderland.Element
 	return e.onmouseup ~= 0
+end
+
+local function hasContextMenu(e) ---@param e wonderland.Element
+	return e.oncontextmenu ~= 0
 end
 
 local function hasMouseDownOrClick(e) ---@param e wonderland.Element
@@ -313,6 +486,121 @@ local function findElementById(element, id)
 end
 
 local DOUBLE_CLICK_THRESHOLD = 0.3 -- seconds
+
+--- What a box that scrolls says about being scrolled: a handler that is asked, or a message that is
+--- the answer as it is. Which of the two it is is what an element was given -- see `:onScroll`.
+---@param handler any
+---@param by number? # How far a wheel asks the content to move
+---@param to number? # Or where a bar dragged puts it
+---@return any? message
+local function scrollMessage(handler, by, to)
+	if handler == nil then
+		return nil
+	end
+
+	if type(handler) == "function" then
+		return handler(by, to)
+	end
+
+	return handler
+end
+
+--- What a box is asked when it is pressed with a button that is not the left one: a context menu.
+---@param handler any
+---@param x number
+---@param y number
+---@param width number
+---@param height number
+---@param modifiers winit.KeyModifiers?
+---@return any? message
+local function contextMessage(handler, x, y, width, height, modifiers)
+	if handler == nil then
+		return nil
+	end
+
+	if type(handler) == "function" then
+		return handler(x, y, width, height, modifiers)
+	end
+
+	return handler
+end
+
+--- The box a wheel is for: the innermost box under the pointer that scrolls, or that has said it
+--- takes the wheel itself. A box that does not scroll passes it to the box it sits in, which is
+--- what makes a list of rows scroll when the pointer is over one of the rows.
+---@param ctx wonderland.plugin.Layout.Context
+---@param x number
+---@param y number
+---@return wonderland.plugin.Layout.Hit?
+local function wheelTarget(ctx, x, y)
+	local chain = {}
+
+	chainAtPosition(assert(ctx.screen), assert(ctx.root), x, y, 0, 0, 0, chain)
+
+	local found = nil
+
+	for _, hit in ipairs(chain) do
+		if (hit.node.scrolls ~= 0 or hit.element.onscroll ~= 0) and (found == nil or hit.depth >= found.depth) then
+			found = hit
+		end
+	end
+
+	return found
+end
+
+--- The bar of a box that scrolls, as this reads it: how tall the thumb is, where its top is, and
+--- how wide the strip it is drawn in is. It is worked out the way the ui draws it, so that the bar
+--- a person takes hold of is the bar they see -- see `wonderland.plugin.UI`.
+---@param screen wonderland.Layout.Screen
+---@param hit wonderland.plugin.Layout.Hit
+---@return number? thumb
+---@return number? top
+---@return number? width
+local function barOf(screen, hit)
+	local bar = screen.bars[hit.index - 1]
+
+	if not bar or bar.width <= 0 or bar.max <= 0 then
+		return nil, nil, nil
+	end
+
+	local node = hit.node
+	local thumb = node.height * (node.height / (node.height + bar.max))
+
+	if thumb < bar.least then
+		thumb = bar.least
+	end
+
+	if thumb > node.height then
+		thumb = node.height
+	end
+
+	local span = node.height - thumb
+	local at = math.min(math.max(node.scroll / bar.max, 0), 1)
+
+	return thumb, hit.absY + (span > 0 and at * span or 0), bar.width
+end
+
+--- Every element a keyboard can be put on, in the order a screen is read in: the fields, and the
+--- things that answer a click or say what they look like with the keyboard in them. All of them by
+--- name, because a name is what the focus is kept as.
+---@param element wonderland.Element
+---@param into wonderland.Element[]
+local function collectFocusable(element, into)
+	local takes = bit.band(element.flags, TEXT_INPUT) ~= 0 or element.onclick ~= 0 or element.focusStyle ~= 0
+
+	if takes and element.name ~= 0 then
+		into[#into + 1] = element
+	end
+
+	local child = element.childFirst
+
+	while child ~= 0 do
+		local childElement = pointers[child]
+
+		collectFocusable(childElement, into)
+		child = childElement.nextSibling
+	end
+end
 
 
 --- Where the pointer is. It is one table per window rather than one per event, because a
@@ -534,6 +822,108 @@ function Layout:getCaret(window)
 	return element, line, ctx.cursorPos - (start - 1)
 end
 
+--- A press on a scroll bar, as the message it comes to: the bar is the box's own, so what it does
+--- is scroll that box. Taking hold of the thumb drags it; pressing the track beside it takes the
+--- thumb to the pointer, which is what a track is for.
+---@param ctx wonderland.plugin.Layout.Context
+---@param x number
+---@param y number
+---@return any? message
+function Layout:barPress(ctx, x, y)
+	local chain = {}
+
+	chainAtPosition(assert(ctx.screen), assert(ctx.root), x, y, 0, 0, 0, chain)
+
+	local screen = assert(ctx.screen)
+
+	-- The innermost bar under the pointer, because a box that scrolls may hold another one.
+	for at = #chain, 1, -1 do
+		local hit = chain[at]
+		local thumb, top, width = barOf(screen, hit)
+
+		if thumb ~= nil and top ~= nil and width ~= nil and hit.element.onscroll ~= 0
+			and x >= hit.absX + hit.node.width - width then
+			local bar = assert(screen.bars[hit.index - 1])
+
+			-- A press on the thumb takes hold of it where it was pressed, so it does not jump
+			-- under the pointer; a press on the track takes the thumb to the pointer, which is
+			-- what says which part of the content is being asked for.
+			local grab = y - top
+
+			if grab < 0 or grab > thumb then
+				grab = math.floor(thumb / 2)
+			end
+
+			local span = hit.node.height - thumb
+			local position = (y - grab - hit.absY) / (span > 0 and span or 1)
+
+			ctx.barDrag = {
+				hit = hit,
+				grab = grab,
+				thumb = thumb,
+				max = bar.max,
+				change = callbacks[hit.element.onscroll],
+			}
+
+			return scrollMessage(ctx.barDrag.change, nil, math.min(math.max(position, 0), 1) * bar.max)
+		end
+	end
+
+	return nil
+end
+
+--- The keyboard put on the next thing that can be focused, which is what tab is for: a screen with
+--- no pointer in it is a screen a person still has to be able to fill in. It wraps at the end,
+--- because a screen is a cycle of the things on it rather than a line, and what comes after the
+--- last one is the first.
+---
+--- What a field is left holding is its value with the caret at the end of it, which is where a
+--- focus that arrived by keyboard has been: tabbing into a field is what a person does to replace
+--- what is in it.
+---@param ctx wonderland.plugin.Layout.Context
+---@param backwards boolean?
+---@return any? message
+function Layout:focusNext(ctx, backwards)
+	if ctx.ui == nil then
+		return nil
+	end
+
+	local focusable = {}
+
+	collectFocusable(ctx.ui, focusable)
+
+	if #focusable == 0 then
+		return nil
+	end
+
+	local at = 0
+
+	for index, element in ipairs(focusable) do
+		if wonderlandElement.nameOf(element) == ctx.focusedName then
+			at = index
+			break
+		end
+	end
+
+	local next = at + (backwards and -1 or 1)
+
+	if next < 1 then
+		next = #focusable
+	elseif next > #focusable then
+		next = 1
+	end
+
+	local element = focusable[next]
+
+	ctx.focusedName = wonderlandElement.nameOf(element)
+	ctx.cursorPos = #wonderlandElement.inputOf(element)
+	ctx.typed = nil
+	ctx.caretClick = nil
+	ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
+
+	return { type = "_inputRefresh" }
+end
+
 --- The caret put where a line and a column of the value are, which is what a click in a field comes
 --- to: the ui is what walks the text a field draws, so it is the ui that says which line and which
 --- character of it a point is at, and the byte the caret is at is what that comes to. A column past
@@ -585,13 +975,34 @@ end
 function Layout:key(window, key, modifiers, typed)
 	local ctx = self.contexts[window]
 
-	if not ctx or not ctx.focusedName then
+	if not ctx then
+		return nil
+	end
+
+	-- Tab is the one key that is not about what has the keyboard but about which thing has it, so
+	-- it is answered before anything is looked up -- and it works with nothing focused at all,
+	-- which is where a window starts.
+	if key == "tab" then
+		return self:focusNext(ctx, modifiers ~= nil and modifiers.shift == true)
+	end
+
+	if not ctx.focusedName then
 		return nil
 	end
 
 	local element = findElementById(ctx.ui, ctx.focusedName)
 
-	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
+	if element == nil then
+		return nil
+	end
+
+	-- A thing that answers a click and is not a field is worked by the keyboard as well as by the
+	-- pointer when it is the thing the keyboard is on: return or space takes it.
+	if bit.band(element.flags, TEXT_INPUT) == 0 then
+		if (key == "return" or key == "space") and element.onclick ~= 0 then
+			return callbacks[element.onclick]
+		end
+
 		return nil
 	end
 
@@ -712,6 +1123,16 @@ function Layout:event(event)
 
 		setPointer(ctx, event.x, event.y)
 
+		if ctx.barDrag ~= nil then
+			local drag = ctx.barDrag
+			local hit = drag.hit
+			local span = hit.node.height - drag.thumb
+			local at = (event.y - drag.grab - hit.absY) / (span > 0 and span or 1)
+			local to = math.min(math.max(at, 0), 1) * drag.max
+
+			return scrollMessage(drag.change, nil, to)
+		end
+
 		if ctx.dragging then
 			return report(ctx.dragging, event.x, event.y)
 		end
@@ -749,12 +1170,48 @@ function Layout:event(event)
 			if handler then
 				local relX = event.x - layout.absX
 				local relY = event.y - layout.absY
-				return handler(relX, relY, layout.node.width, layout.node.height)
+				return handler(relX, relY, layout.node.width, layout.node.height, ctx.modifiers)
 			end
 		end
 	elseif event.name == "mousePress" then
 		local ctx = self.contexts[event.window]
 		setPointer(ctx, event.x, event.y, true)
+
+		-- A press is the hand leaving the keyboard: what was repeating stops, whether or not it
+		-- was the field that was pressed.
+		ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
+
+		-- Which button it was is what says what a press means. A platform that does not name one
+		-- -- one of them does not -- is a press of the left one, which is what every press meant
+		-- before any of them were named.
+		local button = event.button or 1
+
+		-- The button that is not the left one is a menu where the pointer is, and nothing else:
+		-- what answers a click is not told about it, and the keyboard stays where it was.
+		if button == 3 then
+			local pressed = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0,
+				hasContextMenu)
+
+			if pressed then
+				return contextMessage(callbacks[pressed.element.oncontextmenu], event.x - pressed.absX,
+					event.y - pressed.absY, pressed.node.width, pressed.node.height, ctx.modifiers)
+			end
+
+			return nil
+		end
+
+		if button ~= 1 then
+			return nil
+		end
+
+		-- A press on a scroll bar is a press on the box the bar belongs to rather than on what is
+		-- drawn under it: the bar is over the strip it reserved, and what is behind it is not
+		-- something anyone was aiming at.
+		local bar = self:barPress(ctx, event.x, event.y)
+
+		if bar ~= nil then
+			return bar
+		end
 
 		local info = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hasMouseDownOrClick)
 
@@ -775,12 +1232,8 @@ function Layout:event(event)
 			ctx.caretClick = nil
 		end
 
-		-- A press is the hand leaving the keyboard: what was repeating stops, whether or not it
-		-- was the field that was pressed.
-		ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
-
 		if info then
-			local now = os.clock()
+			local now = time.now()
 			local isDblClick = (info.element.ondblclick ~= 0)
 				and ctx.lastPressElement == info.element
 				and ctx.lastPressTime
@@ -817,7 +1270,23 @@ function Layout:event(event)
 			if pressed then
 				local relX = event.x - info.absX
 				local relY = event.y - info.absY
-				return pressed(relX, relY, info.node.width, info.node.height)
+				return pressed(relX, relY, info.node.width, info.node.height, ctx.modifiers)
+			end
+		end
+	elseif event.name == "mouseScroll" then
+		local ctx = self.contexts[event.window]
+
+		-- A wheel arrives without a place in the window -- the platform reports that it turned,
+		-- not where -- so it goes to the box the pointer was last seen in. A window the pointer
+		-- has never been in has no box for it, and the app's own event handler is what hears it.
+		if ctx and ctx.pointer ~= nil and (event.dy ~= 0 or event.dx ~= 0) then
+			local hit = wheelTarget(ctx, ctx.pointer.x, ctx.pointer.y)
+
+			if hit ~= nil and hit.element.onscroll ~= 0 then
+				-- How far a wheel asks the content to move is the app's to work out: a row of a
+				-- list and a page of a document are not the same distance, and what the platform
+				-- reports is the wheel turning rather than the distance.
+				return scrollMessage(callbacks[hit.element.onscroll], event.dy ~= 0 and event.dy or event.dx, nil)
 			end
 		end
 	elseif event.name == "keyPress" then
@@ -838,6 +1307,10 @@ function Layout:event(event)
 		-- types nothing of its own: a named key is one of those, and is handled as itself.
 		local typed = typedBy(event) or event.key
 		local message = self:key(event.window, event.key, event.modifiers, typed)
+
+		-- What is held, as the keyboard last said: a mouse event does not carry the modifiers, and
+		-- a menu or a range of rows is what the modifiers were asked about.
+		ctx.modifiers = event.modifiers
 
 		-- What is held down from here: the key the ui is to repeat, at the rate it was given. A press
 		-- of a key is a press of it whatever the clock was doing -- a key pressed again while the
@@ -863,12 +1336,28 @@ function Layout:event(event)
 		-- hold goes on through: see the keyboard in winit, which is what tells them apart.
 		local ctx = self.contexts[event.window]
 
-		if ctx and ctx.repeatKey == event.key and event.repeated ~= true then
-			ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
+		if ctx then
+			ctx.modifiers = event.modifiers
+
+			if ctx.repeatKey == event.key and event.repeated ~= true then
+				ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
+			end
 		end
 	elseif event.name == "mouseRelease" then
 		local ctx = self.contexts[event.window]
 		setPointer(ctx, event.x, event.y, false)
+
+		local button = event.button or 1
+
+		if button ~= 1 then
+			return nil
+		end
+
+		if ctx.barDrag ~= nil then
+			ctx.barDrag = nil
+
+			return nil
+		end
 
 		local drag = ctx.dragging
 
@@ -882,7 +1371,11 @@ function Layout:event(event)
 		if info then
 			local relX = event.x - info.absX
 			local relY = event.y - info.absY
-			return callbacks[info.element.onmouseup](relX, relY, info.node.width, info.node.height)
+			local released = callbacks[info.element.onmouseup]
+
+			if released then
+				return released(relX, relY, info.node.width, info.node.height, ctx.modifiers)
+			end
 		end
 	end
 end

@@ -9,16 +9,21 @@
 #endif
 
 #ifdef VULKAN
-// Must separate them for Vulkan (and other future targets)
-BINDING(0, 0)uniform texture2DArray uTextureArray;
+// Must separate them for Vulkan (and other future targets), where a sampler and the texture it
+// reads are two objects.
+BINDING(0, 0)uniform texture2DArray uTexture;
 BINDING(0, 1)uniform sampler uSampler;
 #else
 // Can't separate them for OpenGL..
-BINDING(0, 0)uniform sampler2DArray uTextureArray;
+BINDING(0, 0)uniform sampler2DArray uTexture;
 #endif
 
-BUFFER_BINDING(0, 2)readonly buffer TextureUVs {
-    vec2 textureUVScale[];
+// Where a picture's rows are, per picture: the layer its first band is in, how many layers a
+// picture of its height spans, and the last of them. A picture is uploaded in bands -- rows of it
+// stacked as layers -- because an upload reaches the gpu through a window of host visible memory
+// rather than the whole card, so what one upload holds is bounded however large a picture is.
+BUFFER_BINDING(0, 2)readonly buffer PictureBands {
+    vec4 pictureBand[];
 };
 
 layout(location = 0) in vec4 vertexColor;
@@ -31,10 +36,17 @@ layout(location = 5) in vec2 edge;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
+    vec4 band = pictureBand[texIndex];
+
+    // How far down the picture this pixel is, in bands: the whole of a picture that is one band is
+    // the layer it is in, and one that is more is the band the row falls in.
+    float down = texCoord.y * band.y;
+
     #ifdef VULKAN
-    vec4 texColor = texture(sampler2DArray(uTextureArray, uSampler), vec3(texCoord * textureUVScale[texIndex], texIndex));
+    vec4 texColor = texture(sampler2DArray(uTexture, uSampler),
+        vec3(texCoord.x, fract(down), min(band.x + floor(down), band.z)));
     #else
-    vec4 texColor = texture(uTextureArray, vec3(texCoord * textureUVScale[texIndex], texIndex));
+    vec4 texColor = texture(uTexture, vec3(texCoord.x, fract(down), min(band.x + floor(down), band.z)));
     #endif
 
     fragColor = texColor * vertexColor;

@@ -29,6 +29,8 @@ ffi.cdef [[
 		                             // field that is sized by it: see `element.GROWS`
 		uint32_t childFirst, childCount, nextSibling;  // the children, as a chain
 		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit, onchange;
+		uint32_t onscroll, oncontextmenu;  // the wheel and the bar of a box that scrolls, and the
+		                                   // button that is not the left one
 		uint32_t userdata;           // whatever the app carries, by handle
 		double scrollOffset;         // how far its content is scrolled up, 0 for not
 		double maxLines;             // the most lines a field that takes a paragraph holds, 0 for no end to it
@@ -93,6 +95,8 @@ element.GROWS = 256
 ---@field min number # And the values its two ends are
 ---@field max number
 ---@field onsubmit number
+---@field onscroll number
+---@field oncontextmenu number
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
 ---@field scrollOffset number # How far its content is scrolled up, and what clips it to its box
@@ -116,10 +120,21 @@ element.GROWS = 256
 ---@field onMouseDown fun(self: wonderland.Element, cons: fun(x: number, y: number, elementWidth: number, elementHeight: number): any): wonderland.Element
 ---@field onMouseUp fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onDoubleClick fun(self: wonderland.Element, message: any): wonderland.Element
+---@field onScroll fun(self: wonderland.Element, cons: wonderland.ScrollHandler): wonderland.Element
+---@field onContextMenu fun(self: wonderland.Element, cons: wonderland.ContextMenuHandler): wonderland.Element
 local Element = {}
 element.Element = Element
 
 ---@alias wonderland.IntoElement wonderland.Element | string
+
+--- What a box that scrolls is asked about being scrolled: how far a wheel moved it, or where a bar
+--- dragged to, and one of the two is always nothing. It answers with the message the app is told.
+---@alias wonderland.ScrollHandler fun(by: number?, to: number?): any?
+
+--- What a box is asked when it is pressed with a button that is not the left one, and what it
+--- answers with: the message the app is told. The modifiers are the ones held when it was pressed,
+--- which is the last the keyboard said.
+---@alias wonderland.ContextMenuHandler fun(x: number, y: number, width: number, height: number, modifiers: winit.KeyModifiers?): any?
 
 -- The calls live in their own table rather than on the element: a table is what an ffi
 -- metatype is given for `__index`, and a field of a struct is read before it is asked
@@ -478,6 +493,46 @@ end
 function methods:onDoubleClick(message)
 	check(self)
 	self.ondblclick = pushCallback(message)
+
+	return self
+end
+
+--- What a box that scrolls does about being scrolled: the wheel over it, and its own bar being
+--- dragged.
+---
+--- The handler is asked with one of two things and answers with one message, which is what the app
+--- is told: `by` is how far a wheel asks the content to move, and `to` is where a bar dragged puts
+--- it, an absolute distance into the content. Which one is not nothing is what says which it was,
+--- and the app is what holds the offset, so it is the app that clamps it -- see `:scroll`.
+---
+---   div():scroll(self.offset)
+---       :onScroll(function(by, to)
+---           return { type = "scroll", by = to or (by or 0) * ROW_STEP }
+---       end)
+---
+--- A message given instead of a handler is the answer as it is, which is what a box with nothing to
+--- work out about it wants.
+---@param cons wonderland.ScrollHandler
+---@return wonderland.Element
+function methods:onScroll(cons)
+	check(self)
+	self.onscroll = pushCallback(cons)
+
+	return self
+end
+
+--- The button that is not the left one, which is what a menu is opened with: a context menu. The
+--- handler is asked with where in the box it was pressed, how large the box is, and which
+--- modifiers were held; a message given instead is the answer as it is.
+---
+--- A press with this button is not a click: what answers a click is not told about it, and it does
+--- not move the keyboard either -- a menu is opened where the pointer is, and the field that had
+--- the caret keeps it.
+---@param cons wonderland.ContextMenuHandler
+---@return wonderland.Element
+function methods:onContextMenu(cons)
+	check(self)
+	self.oncontextmenu = pushCallback(cons)
 
 	return self
 end

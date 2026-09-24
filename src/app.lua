@@ -20,7 +20,7 @@
 -- keeps beside it, in a table of its own: `self` is the app, and the fields an app puts on a
 -- library type are fields the language server cannot check.
 local winit = require("winit")
-local Atlas = require("wonderland.font.stbtt")
+local Atlas = require("wonderland.font.atlas")
 local WindowPlugin = require("wonderland.plugin.window")
 local RenderPlugin = require("wonderland.plugin.render")
 local TextPlugin = require("wonderland.plugin.text")
@@ -66,11 +66,15 @@ local WINDOW_CREATED = { type = "windowCreated" }
 --- defining one is a definition of something the shell looks for.
 ---@class wonderland.App<Extra>: Extra
 ---@field title string
----@field font string? # A ttf to draw text with: the first one this machine is likely to have, otherwise
----@field pixelHeight number # How tall the font is baked
----@field characters string # And what it is baked for
+---@field font string? # A family name, or a ttf to draw text with: this machine's own sans otherwise
+---@field pixelHeight number # How tall the default font is drawn, in pixels
+---@field characters string # What the default font is baked for, before anything else is packed
 ---@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
 ---@field plugins wonderland.Plugin[] # In the order they were added
+---@field private pendingTicks { fn: wonderland.Tick, window: wonderland.RenderWindow?, cancelled: boolean? }[] # Registered before a screen was
+---@field onTick fun(self: wonderland.App, fn: wonderland.Tick, window: wonderland.RenderWindow?): wonderland.plugin.UI.Ticker
+---@field every fun(self: wonderland.App, seconds: number, fn: wonderland.Tick): wonderland.plugin.UI.Ticker
+---@field present fun(self: wonderland.App, window: wonderland.RenderWindow)
 ---@field init (fun(self: wonderland.App): any?)? # Once the shell has filled the app in
 ---@field view (fun(self: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element)? # What the screen looks like
 ---@field update (fun(self: wonderland.App, message: any, window: winit.Window): wonderland.Task?)? # What a message does
@@ -94,10 +98,13 @@ App.__index = App
 function app.new(title)
 	return setmetatable({
 		title = title or "Wonderland",
-		font = Atlas.find(),
+		-- A machine with something else in mind says so with FONT=, which is how a test draws the
+		-- same screen on two machines.
+		font = os.getenv("FONT"),
 		pixelHeight = 18,
 		characters = Atlas.ASCII,
 		plugins = {},
+		pendingTicks = {},
 	}, App)
 end
 
@@ -125,6 +132,72 @@ function App:getPlugin(name)
 	end
 end
 
+--- Work of the app's own, asked for on the clock the screen is on: what a thing the app is doing
+--- with a file, a device or a network answers with when nothing else is happening. The callback is
+--- handed the time it was called at and the window it is for, and answers how many seconds it
+--- wants before it is called again -- nothing at all to be done with.
+---
+--- It may be called before the app is run, which is where an app's own setup usually goes: the
+--- registrations are kept and handed to the screen when there is one. See `wonderland.Tick`, and
+--- `App:every` for the case that only wants a callback at a rate.
+---@param fn wonderland.Tick
+---@param window wonderland.RenderWindow?
+---@return wonderland.plugin.UI.Ticker
+function App:onTick(fn, window)
+	if self.uiPlugin then
+		return self.uiPlugin:onTick(fn, window)
+	end
+
+	-- What is kept is the registration, and what is answered is a handle on it: a cancelled
+	-- registration is one the screen is never told about, so what it is cancelled on is what is
+	-- kept rather than what was handed back.
+	local kept = { fn = fn, window = window }
+
+	self.pendingTicks[#self.pendingTicks + 1] = kept
+
+	---@type wonderland.plugin.UI.Ticker
+	local pending = {
+		fn = fn,
+		window = window,
+		cancel = function()
+			kept.cancelled = true
+		end,
+		present = function()
+			if window ~= nil then
+				window.shouldRedraw = true
+			end
+		end,
+	}
+
+	return pending
+end
+
+--- The same, for a callback that just wants to be called at a rate: a clock the app draws, a
+--- file it is reading, a device it is polling. The screen is drawn again after each call, because
+--- what an app asks to be woken this way for is usually something it is showing.
+---@param seconds number
+---@param fn wonderland.Tick
+---@return wonderland.plugin.UI.Ticker
+function App:every(seconds, fn)
+	return self:onTick(function(at, window)
+		fn(at, window)
+		self:present(window)
+
+		return seconds
+	end)
+end
+
+--- A frame now, rather than at the display's own rate: what an app that has just been given
+--- something new to show asks for. See `UI:present`.
+---@param window wonderland.RenderWindow
+function App:present(window)
+	if self.uiPlugin then
+		self.uiPlugin:present(window)
+	else
+		window.shouldRedraw = true
+	end
+end
+
 -- The screen, as the plugins it is made of. Each is handed the one before it, because the
 -- window owns the gpu instance, the renderer owns the device, text is measured into that, the
 -- layout needs the text, and the ui is the layout's quads in the renderer.
@@ -135,7 +208,8 @@ local function screenPlugins(self)
 	self.windowPlugin = WindowPlugin.new(WINDOW_CREATED)
 	self.renderPlugin = RenderPlugin.new(self.windowPlugin)
 	self.textPlugin = TextPlugin.new(self.renderPlugin)
-	self.layoutPlugin = LayoutPlugin.new(function(w) return self:view(w, self.assets) end, self.textPlugin)
+	self.layoutPlugin = LayoutPlugin.new(function(w) return self:view(w, self.assets) end, self.textPlugin,
+		self.renderPlugin)
 	self.uiPlugin = UIPlugin.new(self.layoutPlugin, self.renderPlugin)
 
 	-- Named as well, so an app that wants the renderer, or to replace one of these, can ask
@@ -178,6 +252,18 @@ function App:setup(...)
 		self:init()
 	end
 
+	-- What the app asked to be woken for before there was a screen to ask: an app registers these
+	-- in its own setup, which runs long before a window exists.
+	if self.uiPlugin then
+		for _, pending in ipairs(self.pendingTicks) do
+			if not pending.cancelled then
+				self.uiPlugin:onTick(pending.fn, pending.window)
+			end
+		end
+
+		self.pendingTicks = {}
+	end
+
 	return self
 end
 
@@ -208,13 +294,17 @@ function App:created(window)
 		-- before the first screen is built. See `App:view`.
 		self.assets = assert(render.sharedResources).assets
 
-		if self.font then
-			local fonts = assert(render.sharedResources).fontManager
-			local atlas = assert(Atlas.fromPath({ pixelHeight = self.pixelHeight, characters = self.characters },
-				self.font))
+		-- What text is drawn in unless it names a font of its own: a family or a file the app
+		-- named, or whatever this machine draws with where it named nothing. Nothing is baked
+		-- here: a glyph is packed when a line holding it is first measured, and the characters
+		-- an app named are the ones packed before that -- see `wonderland.font.Atlas`.
+		local fonts = assert(render.sharedResources).fontManager
 
-			fonts:setDefault(assert(fonts:upload(atlas)))
-		end
+		fonts:setDefault({
+			family = self.font,
+			pixelHeight = self.pixelHeight,
+			characters = self.characters,
+		})
 	end
 
 	if layout then

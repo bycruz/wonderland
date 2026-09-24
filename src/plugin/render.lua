@@ -18,18 +18,24 @@ local shaderExt = backend.shaderExt
 ---@field swapchain hood.Swapchain?
 ---@field capture wonderland.plugin.Render.Capture?
 ---@field clear wonderland.Color
----@field quadBindGroupLayout hood.BindGroupLayout
 ---@field quadPipeline hood.Pipeline
 ---@field quadVertex hood.Buffer
 ---@field quadIndex hood.Buffer
+---@field target hood.Texture? # What this frame draws into, taken before the screen is built for it
+---@field targetView hood.TextureView?
+---@field targetWidth number # And how big it is, which is what a screen of this frame is laid out at
+---@field targetHeight number
+---@field quadRuns ffi.cdata*? # uint32_t*, the texture and first quad of each run
 ---@field vertexCapacity number # Bytes the vertex buffer holds before it grows
 ---@field indexCapacity number # And the index buffer
+---@field runCapacity number # How many runs of quads fit before the run buffer grows
+---@field runCount number # How many the frame the gpu has was drawn with
+---@field quads number # And how many quads it was, which is where the last run ends
 ---@field depthBuffer hood.Texture
 ---@field depthBufferView hood.TextureView
 ---@field ui? wonderland.Element
 ---@field screen? wonderland.Layout.Screen
 ---@field root? number
----@field nIndices number
 ---@field drawRetries number? # Frames asked for in a row with no texture to draw into
 
 --- An offscreen target a frame can be read back from.
@@ -44,15 +50,13 @@ local shaderExt = backend.shaderExt
 ---@field textureManager TextureManager
 ---@field fontManager FontManager
 ---@field assets wonderland.Assets
----@field bindGroup hood.BindGroup
 
 ---@class wonderland.plugin.Render<Message>: wonderland.Plugin, { onWindowCreate: Message }
 ---@field windowPlugin wonderland.plugin.Window<any>
 ---@field mainCtx wonderland.plugin.Render.Context?
 ---@field contexts table<wonderland.RenderWindow, wonderland.plugin.Render.Context>
 ---@field sharedResources wonderland.plugin.Render.SharedResources?
----@field device hood.Device
----@field textureOptions wonderland.TextureOptions?
+---@field device hood.Device? # Made when a window is first registered: see `RenderPlugin:getDevice`
 ---@field presentMode string # How frames reach the display
 local RenderPlugin = {}
 
@@ -62,19 +66,13 @@ RenderPlugin.__index = RenderPlugin
 
 ---@class wonderland.plugin.Render.Options
 ---@field presentMode string? # "fifo" waits for the display, "immediate" does not
----@field textures wonderland.TextureOptions? # How much room the textures get
 
 ---@param windowPlugin wonderland.plugin.Window
 ---@param opts wonderland.plugin.Render.Options?
 function RenderPlugin.new(windowPlugin, opts)
-	local adapter = windowPlugin.instance:requestAdapter({ powerPreference = "high-performance" })
-	local device = adapter:requestDevice()
-
 	return setmetatable({
-		device = device,
 		contexts = {},
 		windowPlugin = windowPlugin,
-		textureOptions = opts and opts.textures,
 
 		-- Frames are waited for by the display unless an app says otherwise: a redraw that
 		-- is not waited for is a render loop, and a render loop takes the machine with it.
@@ -93,7 +91,7 @@ function RenderPlugin:reserve(ctx, vertexBytes, indexBytes)
 		return
 	end
 
-	self.device.queue:waitIdle()
+	self:getDevice().queue:waitIdle()
 
 	local vertexCapacity = math.max(ctx.vertexCapacity, 1)
 	while vertexCapacity < vertexBytes do
@@ -108,12 +106,12 @@ function RenderPlugin:reserve(ctx, vertexBytes, indexBytes)
 	ctx.quadVertex:destroy()
 	ctx.quadIndex:destroy()
 
-	ctx.quadVertex = self.device:createBuffer({
+	ctx.quadVertex = self:getDevice():createBuffer({
 		size = vertexCapacity,
 		usages = { "VERTEX", "COPY_DST" },
 		mapped = true
 	})
-	ctx.quadIndex = self.device:createBuffer({
+	ctx.quadIndex = self:getDevice():createBuffer({
 		size = indexCapacity,
 		usages = { "INDEX", "COPY_DST" },
 		mapped = true
@@ -122,7 +120,12 @@ function RenderPlugin:reserve(ctx, vertexBytes, indexBytes)
 	ctx.indexCapacity = indexCapacity
 end
 
---- The frame the ui just built, handed over as the memory it was written into.
+--- The frame the ui just built, handed over as the memory it was written into: the vertices, the
+--- indices, and the runs of quads that share a picture, which are the draw calls it comes to.
+---
+--- The runs are copied rather than referred to, because the batch the ui writes into is one batch
+--- and a screen with two windows in it is two frames: what a context is drawn from is what it was
+--- handed, not what the window after it put there.
 ---@param window wonderland.RenderWindow
 ---@param batch wonderland.QuadBatch
 function RenderPlugin:setRenderData(window, batch)
@@ -132,31 +135,65 @@ function RenderPlugin:setRenderData(window, batch)
 	local indexSize = batch:indexCount() * ffi.sizeof("uint32_t")
 
 	self:reserve(ctx, vertexSize, indexSize)
+	self:reserveRuns(ctx, batch.runCount)
 
-	self.device.queue:writeBuffer(ctx.quadVertex, vertexSize, batch.vertices)
-	self.device.queue:writeBuffer(ctx.quadIndex, indexSize, batch.indices)
+	self:getDevice().queue:writeBuffer(ctx.quadVertex, vertexSize, batch.vertices)
+	self:getDevice().queue:writeBuffer(ctx.quadIndex, indexSize, batch.indices)
 
-	ctx.nIndices = batch:indexCount()
+	ffi.copy(ctx.quadRuns, batch.runs, batch.runCount * QuadBatch.RUN_NUMBERS * ffi.sizeof("uint32_t"))
+
+	ctx.runCount = batch.runCount
+	ctx.quads = batch.quads
+end
+
+--- How many runs of quads fit before the buffer they are handed over in grows. A run is two
+--- numbers, and a frame is drawn with far fewer of them than it has quads.
+---@param ctx wonderland.plugin.Render.Context
+---@param runs number
+function RenderPlugin:reserveRuns(ctx, runs)
+	if runs <= ctx.runCapacity then
+		return
+	end
+
+	local capacity = math.max(ctx.runCapacity, 1)
+	while capacity < runs do
+		capacity = capacity * 2
+	end
+
+	ctx.quadRuns = ffi.new("uint32_t[?]", capacity * QuadBatch.RUN_NUMBERS)
+	ctx.runCapacity = capacity
 end
 
 -- A quad is four vertices and six indices, and this many of them fit before either
 -- buffer has to grow.
 local INITIAL_QUADS = 4096
 
-local bindings = {
-	centralTexture = 0,
-	centralSampler = isVulkan and 1 or 0, -- Combine for OpenGL
-	dimsBuffer = 2
-}
-
 ---@param window winit.Window
 function RenderPlugin:register(window)
 	local windowCtx = self.windowPlugin:getContext(window)
 	assert(windowCtx, "Window context not found for render plugin")
 
-	local swapchain = windowCtx.surface:configure(self.device, { presentMode = self.presentMode })
+	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode })
 
 	return self:createContext(window, swapchain)
+end
+
+--- The device every frame is drawn with, made when a window first needs one.
+---
+--- An app with its plugins installed and no window yet -- which is every app between `App:setup`
+--- and its first window -- is not holding a gpu device for a screen it cannot draw, and neither is
+--- a test that only wants to know which plugins an app is made of. What a device costs is not the
+--- memory alone: a machine hands out a few of them and no more, so an app that took one for each
+--- of its own setups is an app that fails to take the one it draws with.
+---@return hood.Device
+function RenderPlugin:getDevice()
+	if self.device == nil then
+		local adapter = self.windowPlugin.instance:requestAdapter({ powerPreference = "high-performance" })
+
+		self.device = adapter:requestDevice()
+	end
+
+	return assert(self.device, "A window was registered with no device to draw it with")
 end
 
 --- A headless context draws into an offscreen target the size of its window instead
@@ -180,7 +217,7 @@ function RenderPlugin:createContext(window, swapchain)
 		:withAttribute({ type = "f32", size = 3, offset = 0 }) -- position (vec3)
 		:withAttribute({ type = "f32", size = 4, offset = 12 }) -- color (rgba)
 		:withAttribute({ type = "f32", size = 2, offset = 28 }) -- uv
-		:withAttribute({ type = "f32", size = 1, offset = 36 }) -- texture id
+		:withAttribute({ type = "f32", size = 1, offset = 36 }) -- the picture it samples
 		:withAttribute({ type = "f32", size = 4, offset = 40 }) -- corner (vec4)
 		:withAttribute({ type = "f32", size = 2, offset = 56 }) -- edge (radius, band)
 
@@ -196,34 +233,31 @@ function RenderPlugin:createContext(window, swapchain)
 	-- Mapped, because a screen is written again every time it changes: without it each
 	-- write is a staged upload with a submit and a queue wait behind it, which measured
 	-- four tenths of a millisecond per repaint however small the screen was.
-	local quadVertex = self.device:createBuffer({
+	local quadVertex = self:getDevice():createBuffer({
 		size = vertexCapacity,
 		usages = { "VERTEX", "COPY_DST" },
 		mapped = true
 	})
-	local quadIndex = self.device:createBuffer({
+	local quadIndex = self:getDevice():createBuffer({
 		size = indexCapacity,
 		usages = { "INDEX", "COPY_DST" },
 		mapped = true
 	})
 
-	local quadLayout = self.device:createBindGroupLayout({
-		{
-			type = "texture",
-			binding = bindings.centralTexture,
-			visibility = { "FRAGMENT" }
-		},
-		{
-			type = "sampler",
-			binding = bindings.centralSampler,
-			visibility = { "FRAGMENT" }
-		},
-		{
-			type = "storage-buffer",
-			binding = bindings.dimsBuffer,
-			visibility = { "FRAGMENT" }
+	-- What every context of this plugin shares: one device's textures, the fonts uploaded into
+	-- them, and the pictures an app draws. Made before the pipeline, because the layout a texture
+	-- bind group is made with is the layout the pipeline is drawn with.
+	if not self.sharedResources then
+		local textureManager = TextureManager.new(self:getDevice())
+
+		self.sharedResources = {
+			textureManager = textureManager,
+			fontManager = FontManager.new(textureManager),
+			assets = Assets.new(textureManager)
 		}
-	})
+	end
+
+	local quadLayout = assert(self.sharedResources).textureManager.layout
 
 	-- hood does not expose the swapchain format to the language server, and a headless
 	-- context has no swapchain: it draws into an rgba8unorm texture.
@@ -233,7 +267,7 @@ function RenderPlugin:createContext(window, swapchain)
 		targetFormat = swapchain.format
 	end
 
-	local quadPipeline = self.device:createPipeline({
+	local quadPipeline = self:getDevice():createPipeline({
 		layout = quadLayout,
 		vertex = {
 			module = { type = shaderType, source = require("wonderland.shaders.main.vert." .. shaderExt) },
@@ -256,34 +290,28 @@ function RenderPlugin:createContext(window, swapchain)
 		}
 	})
 
-	local depthBuffer = self.device:createTexture({
-		extents = { dim = "2d", width = window.width, height = window.height },
+	-- The depth attachment is the size of what is drawn into, which is the swapchain and not always
+	-- the size the window says it is: an attachment of another size is a pass that cannot be made.
+	local depthWidth, depthHeight = window.width, window.height
+
+	if swapchain then
+		---@diagnostic disable-next-line: undefined-field
+		depthWidth, depthHeight = swapchain.width, swapchain.height
+	end
+
+	local depthBuffer = self:getDevice():createTexture({
+		extents = { dim = "2d", width = depthWidth, height = depthHeight },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
 	})
 
 	-- Initialize shared resources
 	if not self.mainCtx then
-		local textureManager = TextureManager.new(self.device, self.textureOptions)
-
-		local bindGroupLayout = textureManager:createBindGroupLayout(
-			bindings.centralTexture,
-			bindings.centralSampler,
-			bindings.dimsBuffer
-		)
-
-		local bindGroup = textureManager:createBindGroup(
-			bindGroupLayout,
-			bindings.centralTexture,
-			bindings.centralSampler,
-			bindings.dimsBuffer
-		)
+		local textureManager = TextureManager.new(self:getDevice())
 
 		local fontManager = FontManager.new(textureManager)
 
 		self.sharedResources = {
-			bindGroup = bindGroup,
-			bindGroupLayout = bindGroupLayout,
 			textureManager = textureManager,
 			fontManager = fontManager,
 			assets = Assets.new(textureManager)
@@ -297,11 +325,12 @@ function RenderPlugin:createContext(window, swapchain)
 		vertexCapacity = vertexCapacity,
 		indexCapacity = indexCapacity,
 		clear = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 },
-		quadBindGroupLayout = quadLayout,
 		quadPipeline = quadPipeline,
 		quadVertex = quadVertex,
 		quadIndex = quadIndex,
-		nIndices = 0,
+		runCapacity = 0,
+		runCount = 0,
+		quads = 0,
 		depthBuffer = depthBuffer,
 		depthBufferView = depthBuffer:createView({})
 	}
@@ -340,7 +369,7 @@ function RenderPlugin:ensureCapture(ctx)
 		capture.buffer:destroy()
 	end
 
-	local texture = self.device:createTexture({
+	local texture = self:getDevice():createTexture({
 		extents = { dim = "2d", width = width, height = height },
 		format = "rgba8unorm",
 		usages = { "RENDER_ATTACHMENT", "COPY_SRC" }
@@ -350,7 +379,7 @@ function RenderPlugin:ensureCapture(ctx)
 	capture = {
 		texture = texture,
 		view = texture:createView({}),
-		buffer = self.device:createBuffer({ size = width * height * 4, usages = { "MAP_READ" } }),
+		buffer = self:getDevice():createBuffer({ size = width * height * 4, usages = { "MAP_READ" } }),
 		width = width,
 		height = height
 	}
@@ -367,6 +396,19 @@ end
 ---@param width number
 ---@param height number
 function RenderPlugin:recordFrame(ctx, encoder, target, width, height)
+	-- What an animation has read since the last frame goes into this one, before the pass it is
+	-- drawn in: a copy is not something a render pass can have recorded inside it, and going
+	-- through the queue instead would be this frame waiting for the gpu to be idle.
+	local shared = self.sharedResources
+
+	if shared then
+		-- What a font packed since the last frame -- a glyph of a character no screen had drawn
+		-- before -- goes into the frame being recorded: a line measured in a face's atlas this
+		-- frame is drawn from a picture that has the glyph in it this frame.
+		shared.fontManager:flush()
+		shared.textureManager:flush(encoder)
+	end
+
 	encoder:beginRendering({
 		colorAttachments = {
 			{
@@ -380,12 +422,114 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height)
 		}
 	})
 	encoder:setPipeline(ctx.quadPipeline)
-	encoder:setBindGroup(0, self.sharedResources.bindGroup)
 	encoder:setViewport(0, 0, width, height)
 	encoder:setVertexBuffer(0, ctx.quadVertex)
 	encoder:setIndexBuffer(ctx.quadIndex, "u32")
-	encoder:drawIndexed(ctx.nIndices, 1)
+
+	-- A run at a time, in the order the walk wrote them: every quad of a run samples the picture
+	-- the run names, so the bind group changes between runs and not between quads -- and the
+	-- picture's own bands are read by the shader from the id each vertex carries. A line of text is
+	-- one run and one draw call, and a screen of pictures is as many as it has of them.
+	if ctx.runCount > 0 then
+		local manager = assert(self.sharedResources).textureManager
+		local runs = assert(ctx.quadRuns)
+
+		for run = 0, ctx.runCount - 1 do
+			local at = run * QuadBatch.RUN_NUMBERS
+			local texture = runs[at + QuadBatch.RUN_TEXTURE]
+			local first = runs[at + QuadBatch.RUN_FIRST]
+			-- Where this run ends: the quad the next one starts at, or the end of the frame.
+			local after = run + 1 < ctx.runCount
+					and runs[at + QuadBatch.RUN_NUMBERS + QuadBatch.RUN_FIRST]
+				or ctx.quads
+
+			encoder:setBindGroup(0, manager:bindGroup(texture))
+			encoder:drawIndexed((after - first) * 6, 1, first * 6)
+		end
+	end
+
 	encoder:endRendering()
+end
+
+--- The size a frame of this window is drawn into, which is what its screen is laid out at.
+---
+--- It is the target the frame is drawn into -- taken by `retarget`, before the screen is built --
+--- rather than the size the window says it is: an X11 window and the surface it is drawn into are
+--- told about a resize at different moments, and a screen laid out against the window while it is
+--- drawn into a surface of another size is a screen the compositor stretches to fit.
+---
+--- A screen with no window behind it is the size it says, since there is nothing else for it to be.
+---@param window wonderland.RenderWindow
+---@return number width
+---@return number height
+function RenderPlugin:size(window)
+	local ctx = self.contexts[window]
+
+	if ctx and ctx.target then
+		return ctx.targetWidth, ctx.targetHeight
+	end
+
+	if ctx and ctx.swapchain then
+		return ctx.swapchain.width, ctx.swapchain.height
+	end
+
+	return window.width, window.height
+end
+
+--- Takes the target this frame draws into, so that a screen can be laid out at the size of what it
+--- is drawn into rather than at the size of what the last frame was drawn into.
+---
+--- A swapchain whose surface changed under it is reconfigured here, before any of the screen is
+--- built: a frame built for the old size and drawn into the new one is a frame the compositor
+--- stretches, and during a resize that is every frame of the drag.
+---
+--- Answers with whether there is anything to draw into; a frame with nothing is one the caller
+--- drops, and the redraw it asks for is what tries again.
+---@param window wonderland.RenderWindow
+---@return boolean
+function RenderPlugin:retarget(window)
+	local ctx = self:getContext(window)
+
+	if not ctx then
+		return false
+	end
+
+	if ctx.target then
+		return true
+	end
+
+	if not ctx.swapchain then
+		-- A screen with no window behind it draws into the capture it is read back from.
+		return true
+	end
+
+	local texture = ctx.swapchain:getCurrentTexture()
+
+	if not texture then
+		self:resize(ctx)
+
+		texture = ctx.swapchain:getCurrentTexture()
+	end
+
+	if not texture then
+		-- The surface is still moving under it. A frame is asked for again -- but only a few times
+		-- in a row, so that a window that is gone, or one being dragged, is not a loop that draws
+		-- as fast as it can: see `drawRetries`.
+		ctx.drawRetries = (ctx.drawRetries or 0) + 1
+
+		if ctx.drawRetries <= DRAW_RETRIES then
+			ctx.window.shouldRedraw = true
+		end
+
+		return false
+	end
+
+	ctx.drawRetries = 0
+	ctx.target = texture
+	ctx.targetView = texture:createView({})
+	ctx.targetWidth, ctx.targetHeight = ctx.swapchain.width, ctx.swapchain.height
+
+	return true
 end
 
 --- Reconfigures a swapchain whose surface changed under it, which is what a resize
@@ -393,10 +537,10 @@ end
 ---@param ctx wonderland.plugin.Render.Context
 function RenderPlugin:resize(ctx)
 	local windowCtx = assert(self.windowPlugin:getContext(ctx.window))
-	ctx.swapchain = windowCtx.surface:configure(self.device, { presentMode = self.presentMode }, ctx.swapchain)
+	ctx.swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }, ctx.swapchain)
 
 	local oldBufferView, oldBuffer = ctx.depthBufferView, ctx.depthBuffer
-	ctx.depthBuffer = self.device:createTexture({
+	ctx.depthBuffer = self:getDevice():createTexture({
 		extents = { dim = "2d", width = ctx.swapchain.width, height = ctx.swapchain.height },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
@@ -424,44 +568,24 @@ function RenderPlugin:frameEncoder(ctx)
 		return ctx.swapchain:createCommandEncoder()
 	end
 
-	return self.device:createCommandEncoder()
+	return self:getDevice():createCommandEncoder()
 end
 
 ---@param ctx wonderland.plugin.Render.Context
----@return boolean drawn # false when the swapchain had to be reconfigured first
+---@return boolean drawn # false when there was nothing to draw into
 function RenderPlugin:draw(ctx)
 	local view, width, height
 
 	if ctx.capture then
 		view, width, height = ctx.capture.view, ctx.capture.width, ctx.capture.height
 	else
-		local texture = ctx.swapchain:getCurrentTexture()
-
-		if not texture then
-			-- The swapchain is out of date, which is what a resize looks like from here.
-			-- This frame is the one that resize asked for: reconfiguring and dropping it
-			-- would leave the window showing nothing, because a redraw is only asked for
-			-- when something changes, and by then the change has already happened.
-			self:resize(ctx)
-
-			texture = ctx.swapchain:getCurrentTexture()
-		end
-
-		if not texture then
-			-- Still nothing to draw into. A swapchain being reconfigured may settle in a
-			-- frame or two, so another frame is asked for -- but only a few times: a window
-			-- that is gone, or one being dragged, would otherwise have the loop draw as fast
-			-- as it can. What is left of this frame is the next real resize.
-			ctx.drawRetries = (ctx.drawRetries or 0) + 1
-
-			if ctx.drawRetries <= DRAW_RETRIES then
-				ctx.window.shouldRedraw = true
-			end
-
+		-- What the frame draws into, taken before the screen was built for it: see `retarget`, which
+		-- is what a frame that has not been through it yet is given here.
+		if not ctx.target then
 			return false
 		end
 
-		view, width, height = texture:createView({}), ctx.swapchain.width, ctx.swapchain.height
+		view, width, height = assert(ctx.targetView), ctx.targetWidth, ctx.targetHeight
 	end
 
 	local encoder = self:frameEncoder(ctx)
@@ -469,14 +593,14 @@ function RenderPlugin:draw(ctx)
 	self:recordFrame(ctx, encoder, view, width, height)
 
 	if ctx.swapchain then
-		self.device.queue:submit(encoder:finish())
-		self.device.queue:present(ctx.swapchain)
+		self:getDevice().queue:submit(encoder:finish())
+		self:getDevice().queue:present(ctx.swapchain)
 	else
 		self:recordCopy(ctx, encoder)
-		self.device.queue:submit(encoder:finish())
+		self:getDevice().queue:submit(encoder:finish())
 	end
 
-	ctx.drawRetries = 0
+	ctx.target, ctx.targetView = nil, nil
 
 	return true
 end
@@ -505,13 +629,13 @@ function RenderPlugin:getPixels(ctx)
 
 		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height)
 		self:recordCopy(ctx, encoder)
-		self.device.queue:submit(encoder:finish())
+		self:getDevice().queue:submit(encoder:finish())
 	end
 
 	local capture = assert(ctx.capture)
 
 	-- The copy has to have finished before the buffer can be read.
-	self.device.queue:waitIdle()
+	self:getDevice().queue:waitIdle()
 
 	local buffer = capture.buffer
 	buffer:mapAsync()
@@ -546,18 +670,9 @@ function RenderPlugin:saveScreenshot(ctx, path)
 	return image.new(capture.width, capture.height, 4, buffer):save(path)
 end
 
---- hood's OpenGL backend does not implement every destroy its types declare, so a
---- resource is asked whether it can be freed rather than assumed to be freeable.
----@param resource { destroy: (fun(self: any))? }?
-local function release(resource)
-	if resource and resource.destroy then
-		resource:destroy()
-	end
-end
-
 --- Frees what a context holds, and what the contexts shared once the last one goes.
---- Something that makes a screen per test wants this: the texture manager alone holds a
---- texture array hundreds of layers deep.
+--- Something that makes a screen per test wants this: the shared resources alone hold every
+--- picture the app has uploaded.
 ---@param window wonderland.RenderWindow
 function RenderPlugin:destroy(window)
 	local ctx = self.contexts[window]
@@ -566,17 +681,16 @@ function RenderPlugin:destroy(window)
 	end
 
 	if ctx.capture then
-		release(ctx.capture.view)
-		release(ctx.capture.texture)
-		release(ctx.capture.buffer)
+		ctx.capture.view:destroy()
+		ctx.capture.texture:destroy()
+		ctx.capture.buffer:destroy()
 	end
 
-	release(ctx.depthBufferView)
-	release(ctx.depthBuffer)
-	release(ctx.quadVertex)
-	release(ctx.quadIndex)
-	release(ctx.quadPipeline)
-	release(ctx.quadBindGroupLayout)
+	ctx.depthBufferView:destroy()
+	ctx.depthBuffer:destroy()
+	ctx.quadVertex:destroy()
+	ctx.quadIndex:destroy()
+	ctx.quadPipeline:destroy()
 
 	self.contexts[window] = nil
 
@@ -590,7 +704,6 @@ function RenderPlugin:destroy(window)
 
 	local shared = self.sharedResources
 	if shared then
-		release(shared.bindGroup)
 		shared.textureManager:destroy()
 		self.sharedResources = nil
 	end

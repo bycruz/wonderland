@@ -119,6 +119,152 @@ by its events instead. `screen.plugins.ui.caretBlink` is the time, and nought is
 Text with newlines in it is drawn as lines, for a `text` element as much as for a field, and each
 line is aligned by its own width.
 
+## Text
+
+A style says what its text is drawn in, and what has to be there for it is a font:
+
+```lua
+-- Any family this machine has, by the name it has it under. One it does not have is drawn in the
+-- machine's own sans rather than in nothing, so a screen that names a font still starts on a
+-- machine without it.
+local SCREEN = sty():fill():bg("#12141c"):fg("#edf0f7"):font("Inter")
+local TITLE = sty():text("3xl"):font("Inter", { weight = "semibold" })
+local CAPTION = sty():text("sm"):fg("#7d8697")
+local BODY = sty():text(15)             -- a size is also just pixels
+```
+
+`:text` is a size from a scale -- `xs`, `sm`, `base`, `lg`, `xl`, `2xl` and up to `6xl` -- or a
+number of pixels, and both are the same thing written two ways: `:text("lg")` is `:text(18)`. What
+a style says about a font is the one thing about the text inside it: a family, a size, a weight or
+a slant is inherited by everything drawn in the element, so naming a family once at the top of a
+screen is every line on it, and a heading is the one element that says otherwise.
+
+A family name is looked up in the fonts this machine has, and the fonts it does not have are what
+the rest of the chain is for: a character the font an app named has no glyph for -- a title in
+Japanese, a name in Cyrillic, an emoji -- is drawn from the next font that has it. A glyph is
+packed into the atlas the first time a line holding it is drawn, so what an app draws is not
+limited to the characters anyone named in advance: a file name, a title, anything a person typed.
+
+```lua
+-- A line too wide for the box it is in is cut, with an ellipsis where it was cut. What it is cut
+-- to is the room the box has, which is why the layout cuts it and not the app: in a row, a title
+-- gets what is left over beside the duration after it.
+div():style(sty():w(40)):children(text("a track's title"):style(sty():ellipsis()))
+```
+
+What is not drawn is an OpenType font whose outlines are CFF -- which is how most CJK fonts are
+shipped, Noto Sans CJK and Source Han among them. The rasteriser is stb_truetype, which draws
+TrueType outlines and nothing else, so a font like that is skipped for the one after it in the
+chain. A machine with only a CFF font for a script draws that script as the framework's own
+"not a glyph" box.
+
+## Time and animation
+
+Everything that happens on its own -- a caret blinking, a key repeating, a gif moving on -- is on
+one clock, and an app can keep time by it as well:
+
+```lua
+local time = require("wonderland").time
+
+function App:init()
+	-- Called every second, and the screen is drawn again after each call.
+	self:every(1.0, function()
+		self:updateClock()
+	end)
+
+	-- Or on the clock itself, where the callback says when it wants to be asked again. What comes
+	-- back is seconds, nothing at all for never again, and nought to be asked as soon as the loop
+	-- comes round -- which is how a decoder reads a burst of frames out of a file.
+	self:onTick(function(at, window)
+		local frame = self.decoder:frameAt(at)
+
+		if frame then
+			self.video:frame(frame)
+			self:present(window)          -- a frame now, rather than at the display's rate
+			return frame.delay
+		end
+
+		return 0.01
+	end)
+end
+```
+
+`time.now()` is the clock itself: seconds that only go forwards, on the monotonic clock of the
+machine rather than its wall clock, so a difference of two of them is how long passed between
+them. It is what a frame being paced, a frame of video being due and a position in a file are all
+measured against.
+
+## Frames from anywhere
+
+A picture is a file, and a frame of a video is not: a stream is what a decoder writes into, and
+everything after the writing is what a gif already does -- a ring of layers the frames cycle
+through, a picture a style names, and a frame that changed being a screen that changed.
+
+```lua
+local video = assets:stream({ width = 1920, height = 1080 })
+
+-- Somewhere else, on whatever clock the decoder keeps:
+video:frame(decodedFrame, 0.04)          -- seconds to show it for
+
+local shown = video:current()
+
+div():style(sty():size(shown.width, shown.height):image(shown.texture, shown.uv))
+```
+
+What a stream costs is the layers it cycles through and not the frames shown in them, so a video
+of any length is a handful of pictures on the gpu, and a frame the decoder hands over is a copy
+into the layer the frame before it is not being drawn from.
+
+## Scrolling
+
+A box that scrolls is a box that clips: the app holds the offset, and the library clips and moves
+the content by it. What the library does with the offset is put it where the wheel and the bar go:
+
+```lua
+-- The wheel over the pane, and the pane's own bar being dragged, are one call. `by` is how far a
+-- wheel asks the content to move, `to` is where a bar dragged puts it, and one of them is always
+-- nothing. What the offset comes to is the app's -- one row of a list and one page of a document
+-- are not the same distance -- so the app clamps it and hands it back.
+div():style(PANE)
+	:children(rows)
+	:scroll(self.offset)
+	:onScroll(function(by, to)
+		return { type = "scroll", by = to and to - self.offset or (by or 0) * ROW_STEP }
+	end)
+```
+
+A wheel goes to the innermost box under the pointer that scrolls, so a screen of panes scrolls the
+one it is over and a box that does not scroll passes it on. A wheel over nothing that scrolls is
+left for the app, which is where a screen that scrolls itself handles it.
+
+## The pointer and the keyboard
+
+A press is the button it was pressed with, and the buttons are not the same thing: the left one is
+a click, and the one on the right is a menu.
+
+```lua
+-- A right press is a context menu where it was pressed, and is not a click: what answers a click
+-- is not told about it, and the field that had the caret keeps it.
+div():style(ROW)
+	:onClick({ type = "open", id = track.id })
+	:onContextMenu(function(x, y, width, height, modifiers)
+		return { type = "menu", id = track.id, at = { x, y } }
+	end)
+```
+
+What a mouse event carries about itself is thin -- a platform reports the wheel turning rather than
+where, and a press rather than what was held -- so the modifiers a press is told about are the ones
+the keyboard last said. A press and a release and a move are handed them, which is what a range of
+rows taken with shift is written from.
+
+Tab moves the keyboard from one thing to the next: a field, a thing that answers a click, a thing
+that says what it looks like with the keyboard in it. A thing that answers a click is worked with
+return or space when the keyboard is on it, so a screen is usable without a pointer at all.
+
+```lua
+div():style(BUTTON):named("play"):focus(sty():bright(1.2)):onClick({ type = "play" })
+```
+
 ## Pictures
 
 An image or a gif is loaded with the asset manager the view function is handed, and what comes back
@@ -141,6 +287,19 @@ repaint pays a lookup for it. A picture the app drew itself rather than read fro
 on a headless screen as `screen.assets`; a screen wired up by hand makes one with
 `wonderland.Assets.new(textureManager)`.
 
+A picture is uploaded as the size it is, into a texture of its own, so a screen costs what the
+pictures on it are and there is nothing to size before an app starts: a four thousand pixel
+photograph next to an eight pixel icon costs the two of them and no more. What that gives up is one
+draw call for the whole screen, which is bought back by the runs: the quads that share a picture are
+drawn together, so a line of text is one call and a screen with two pictures on it is three.
+
+A picture of any size is uploaded in bands -- rows of it, stacked as layers of its texture -- because
+of how an upload reaches the gpu: it is staged through a window of host visible memory rather than
+the whole card, and one the size of a large photograph is the one that fails on a machine whose
+window is busy with other things. A band at a time, what one upload holds is bounded, and a twelve
+megapixel photograph is six of them -- which is nothing an app has to think about, and nothing it
+can see: a picture is drawn by one quad and sampled across its bands.
+
 A gif comes back with every frame of it, and is played by the delay each frame carries:
 
 ```lua
@@ -150,12 +309,24 @@ local frame = dance:current()
 div():style(sty():size(frame.width, frame.height):image(frame.texture, frame.uv))
 ```
 
+An animation is read a frame at a time rather than the whole of it at once. A gif of eighty frames
+of a photograph is eighty frames of decoding and seventy megabytes, which read whole is a fifth of a
+second before anything is drawn and all of it held from then on; read a frame at a time, the first
+frame is on screen in a few milliseconds, the rest are decoded and uploaded as the clock reaches
+them, and what a screen holds of a gif is the four layers those frames cycle through rather than
+every frame of it. A frame that has moved on is a picture a quad names differently, which is what
+says the screen changed.
+
 Which frame is current is the screen's own clock: a gif that has been asked for is advanced by
 `wonderland.plugin.UI:tick`, the frame it moved on to is drawn by a repaint, and the loop is woken
 for the time the frame after it is due -- so nothing but the app drawing it decides whether one is
-playing. The frames are packed into as few layers of the texture array as they fit, a gif of small
-frames being one layer for the whole of it, so a large or a long one wants a render plugin given
-more: `textures = { size = 1024, layers = 64 }` in the render plugin's options.
+playing.
+
+What is left to know is small: a picture is at most 8192 pixels a side, which is the renderer's
+rather than the picture's, and a picture past it says so. A streamed animation is drawn from the
+four layers its frames cycle through, so a screen that draws more of one animation at once than
+that -- a strip of the whole of it, say -- is not what a stream is for: read the file with the
+image package's `loadFrames` and `assets:upload` the frames it wants.
 
 ## Plugins
 
@@ -166,10 +337,10 @@ For example, the window handling, rendering, layout engine and text rendering ar
 | plugin | what it owns |
 | ------- | ------------ |
 | window | the gpu instance, and a surface per window |
-| render | the device, the frame buffers, the pictures, and a screenshot |
-| text | measuring lines into runs the quad pass draws |
-| layout | solving the screen, and turning events into messages |
-| ui | the layout's quads, the diff that skips a frame that came out the same, and the caret |
+| render | the device -- made when a window is first registered -- the frame buffers, the pictures an app draws, and a screenshot |
+| text | measuring lines into runs the quad pass draws, in the font a style asks for |
+| layout | solving the screen, cutting the lines that do not fit, and turning events into messages |
+| ui | the layout's quads, the diff that skips a frame that came out the same, the caret, and the clock an app asks to be called back on |
 
 A frame is built from the state the events left, and a frame the display asks for with nothing
 behind it is a frame of what is already built: the view, the measure and the solve happen when
@@ -243,3 +414,20 @@ You can also save screenshots from a windowed screen:
 ```lua
 renderPlugin:saveScreenshot(ctx, "ui.png")
 ```
+
+## What is not here yet
+
+wonderland draws a screen and takes what a person does to it. What an application of more than a
+screen needs is mostly not this library's, and some of it is nobody's yet:
+
+| | |
+| - | - |
+| Sound | `treble`, a cross platform audio library for LuaJIT (`lde add treble`): a player mixes and plays with it, and `wonderland.time` is what its position is read against |
+| Video and audio decoding | nothing in the lde registry: a decoder is a binding to be written, and what it hands over is a frame for `assets:stream` |
+| Tags and a library | `id3`, Vorbis comments, mp4 atoms and cover art: a parser to be written, or a decoder that already has them |
+| Threads | lde has none, and reading a file on the thread that draws is a screen that stutters: a decoder that is a C library brings its own, otherwise it is `lua-llthreads2` |
+| The clipboard, files dragged onto a window, a file dialog | not in winit's backends either, so a platform layer to be written |
+| Fullscreen, window sizes and icons | the same: winit has the window, and not yet these |
+| Media keys, the system's own controls, tray icons, notifications | a platform layer per platform: MPRIS on linux, SMTC on windows |
+| macOS | winit has an X11 and a Win32 backend and no third: wonderland runs where winit does |
+| Text as a document | selection, copy, IME, right-to-left, wrapping: a field takes typing, and a paragraph of it is lines rather than a text view |

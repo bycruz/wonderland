@@ -1,49 +1,41 @@
+local bit = require("bit")
 local ffi = require("ffi")
 local QuadBatch = require("wonderland.util.quad_batch")
+local style = require("wonderland.style")
 local wonderlandElement = require("wonderland.element")
+local time = require("wonderland.time")
 
 -- The element arena, read by the node's index into it: what a caret is for, and what has been
 -- typed into the field it belongs to.
 local pointers, strings = wonderlandElement.pointers, wonderlandElement.strings
 
--- When a frame went out, on a clock that keeps running while the process does not. A window that
--- is waiting for the next event uses no time at all, and it is that wait the frame after it is
--- measured against: `os.clock` counts the work the process has done, so a window that sat idle
--- for a second would say a frame had just gone out -- and refuse every frame after it, which is
--- a window that stops answering. The call that has that time is the same on every platform but
--- its name, and it is the time since some fixed point, which is all a difference needs.
-ffi.cdef [[
-	struct wl_timeval { long tv_sec; long tv_usec; };
-	int gettimeofday(struct wl_timeval *time, void *zone);
-	unsigned long long GetTickCount64(void);
-]]
+-- The clock the screen is on: a window that is waiting for the next event uses no time at all, and
+-- it is that wait the frame after it is measured against. See `wonderland.time`.
+local now = time.now
 
---- The two halves of a time, as that call writes them. The language server cannot see an
---- ffi.cdef, so the fields are spelled out here: it is the only way to get them checked.
----@class wonderland.plugin.UI.Timeval: ffi.cdata*
----@field tv_sec number
----@field tv_usec number
+--- What a screen has to do on its own, as a thing the app can ask for: it is handed the time it
+--- was called at and the window it is for, and it answers how long it wants before it is called
+--- again -- nought to be called as soon as the loop comes round, nothing at all to be done with.
+---
+--- A callback whose work is a new frame asks for one itself, with the ticker's own `present`:
+--- whether a download finishing is worth a frame is the app's answer, and this is the app's own
+--- work rather than the screen's.
+---@alias wonderland.Tick fun(at: number, window: wonderland.RenderWindow): number?
 
-local native = ffi.os == "Windows" and ffi.load("kernel32") or ffi.C
--- ffi.new is typed as a bare pointer, so the fields it has are the ones spelled out above.
----@diagnostic disable-next-line: assign-type-mismatch
-local timeval = ffi.new("struct wl_timeval") ---@type wonderland.plugin.UI.Timeval
-
----@return number # Seconds, for telling one moment from another
-local function now()
-	if ffi.os == "Windows" then
-		return tonumber(native.GetTickCount64()) / 1000
-	end
-
-	native.gettimeofday(timeval, nil)
-
-	return tonumber(timeval.tv_sec) + tonumber(timeval.tv_usec) / 1000000
-end
+---@class wonderland.plugin.UI.Ticker
+---@field fn wonderland.Tick
+---@field window wonderland.RenderWindow? # The one it is for, taken from the first it is asked about
+---@field due number? # When it is next asked, on the ui's clock
+---@field cancelled boolean?
+---@field cancel fun(self: wonderland.plugin.UI.Ticker) # Done with it, before its next turn
+---@field present fun(self: wonderland.plugin.UI.Ticker) # A frame asked for now, for what it just did
+---@field private ui wonderland.plugin.UI
 
 ---@class wonderland.plugin.UI: wonderland.Plugin
 ---@field layoutPlugin wonderland.plugin.Layout
 ---@field renderPlugin wonderland.plugin.Render
 ---@field batch wonderland.QuadBatch
+---@field tickers wonderland.plugin.UI.Ticker[] # What the app asked to be called back on
 ---@field frameInterval number # The least time between frames, in seconds: see `UI:requestRedraw`
 ---@field caretBlink number # How long a caret is drawn for and how long it is not, nought for one that stays
 local UI = {}
@@ -77,9 +69,48 @@ function UI.new(layoutPlugin, renderPlugin)
 		layoutPlugin = layoutPlugin,
 		renderPlugin = renderPlugin,
 		batch = QuadBatch.new(),
+		tickers = {},
 		frameInterval = FRAME_INTERVAL,
 		caretBlink = CARET_BLINK,
 	}, UI)
+end
+
+--- What the app wants woken for, in the order it asked: a decoder with a frame ready, a player
+--- with a position to read, anything that has work of its own rather than work an event brought.
+---
+--- The window it is for is taken from the first the loop asks about, so an app that registers
+--- this before its window exists -- in `init`, which is where an app's own setup goes -- does not
+--- have to know when one is made. A callback that wants a frame asks for it with the ticker's
+--- own `present`, and one that is done with is `cancel`led, which is also what answering nothing
+--- from the callback does.
+---@param fn wonderland.Tick
+---@param window wonderland.RenderWindow?
+---@return wonderland.plugin.UI.Ticker
+function UI:onTick(fn, window)
+	local ui = self
+	---@type wonderland.plugin.UI.Ticker
+	local ticker = { fn = fn, window = window, ui = ui }
+
+	ticker.cancel = function()
+		ticker.cancelled = true
+	end
+
+	ticker.present = function()
+		if ticker.window ~= nil then
+			ui:requestRedraw(ticker.window, true)
+		end
+	end
+
+	self.tickers[#self.tickers + 1] = ticker
+
+	return ticker
+end
+
+--- A frame asked for now rather than at the display's own rate: what a screen that has just been
+--- given something new to show asks for. See `UI:requestRedraw`, which is the rationed one.
+---@param window wonderland.RenderWindow
+function UI:present(window)
+	self:requestRedraw(window, true)
 end
 
 ---@param pos number
@@ -279,7 +310,13 @@ end
 ---@param windowHeight number
 local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, windowWidth, windowHeight)
 	local r, g, b = node.fgR / 255, node.fgG / 255, node.fgB / 255
-	local font = node.font ~= 0 and (node.font - 1)
+
+	-- The picture a glyph is drawn from is the one it was measured in, because a line may be drawn
+	-- by more than one face: a character the font an app named has no glyph for is drawn from the
+	-- face after it in the chain, and the run's glyphs name the picture each of them is in. What
+	-- the font itself answers with is where a glyph with no picture of its own is drawn from, which
+	-- is a glyph of a font that was measured with no gpu under it.
+	local font = node.font ~= 0 and fontManager:get(node.font - 1)
 		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
 
 	local zIndex = convertZ(z)
@@ -301,10 +338,11 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 
 		for at = 0, line.count - 1 do
 			local glyph = assert(run.glyphs)[line.first + at]
+			local picture = glyph.texture ~= 0 and glyph.texture or font:picture()
 
 			clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, y + glyph.y,
 				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, r, g, b,
-				node.fgA / 255, font, glyph.u0, glyph.v0, glyph.u1, glyph.v1)
+				node.fgA / 255, picture, glyph.u0, glyph.v0, glyph.u1, glyph.v1)
 		end
 	end
 end
@@ -383,9 +421,16 @@ local function placeCaret(caret, element, node, x, y, z, clip, fontManager)
 	-- its parents said unless it named one itself, and the measurement that says it did is the one
 	-- the text plugin keeps on the element. A field that draws no text of its own is measured in
 	-- whatever the window's default is, which is the font the value would have been drawn in.
-	local font = element.fontId ~= 0 and element.fontId
+	local font = element.fontId ~= 0 and fontManager:get(element.fontId)
 		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
-	local run = fontManager:getBitmap(font):getRun(value)
+
+	-- A line the screen draws cut to its box is measured cut when the caret beside it is placed,
+	-- so that the caret lands in the text that is on screen rather than in the text that was too
+	-- long for it. See `wonderland.plugin.Layout`, which is where a line is cut.
+	local maxWidth = bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0
+			and (node.width - node.paddingLeft - node.paddingRight)
+		or nil
+	local run = font:getRun(value, maxWidth)
 	local pen, lineStep = caretPen(run, caret.line, caret.column)
 	local height = lineStep - CARET_INSET * 2
 	local line = run.lines[caret.line] ---@type wonderland.font.Line
@@ -873,8 +918,11 @@ function UI:tick(window, handler)
 		due = ctx.repeatAt
 	end
 
-	-- The caret, which is the other thing a screen does with no event behind it.
-	if ctx.focusedName ~= nil and self.caretBlink > 0 then
+	-- The caret, which is the other thing a screen does with no event behind it. What has the
+	-- keyboard is not always a caret: a thing the keyboard was tabbed to that answers a click is
+	-- a keyboard with nothing blinking under it, and a frame every half second for a caret that
+	-- is not there is a screen drawing itself for nothing.
+	if self.caretBlink > 0 and self.layoutPlugin:getCaret(window) ~= nil then
 		local blink = (ctx.caretAt or at) + self.caretBlink
 
 		if at >= blink then
@@ -906,6 +954,58 @@ function UI:tick(window, handler)
 		if frames ~= nil then
 			due = due ~= nil and math.min(due, frames) or frames
 		end
+	end
+
+	-- What the app asked to be woken for, asked here because this is the one moment a loop with
+	-- nothing in it has: it is what a player reads its position on, what a decoder takes the next
+	-- frame out of a file on, and what a screen pacing itself to something other than the display
+	-- -- a video, an audio clock -- is driven by. A callback that answered nothing is done with,
+	-- and one that is done with is dropped here rather than kept to be asked again.
+	local tickers = self.tickers
+	local live = 0
+
+	for index = 1, #tickers do
+		local ticker = tickers[index]
+
+		if ticker.window == nil then
+			ticker.window = window
+		end
+
+		if not ticker.cancelled and ticker.window == window then
+			if ticker.due == nil or at >= ticker.due then
+				local wait = ticker.fn(at, window)
+
+				if wait == nil then
+					ticker.cancelled = true
+				else
+					ticker.due = at + math.max(wait, 0)
+				end
+			end
+
+			if not ticker.cancelled then
+				live = live + 1
+				tickers[live] = ticker
+
+				local nextAt = assert(ticker.due)
+
+				if nextAt <= at then
+					-- A callback that wants to be asked again straight away is one that is racing
+					-- the loop rather than the clock, and the loop is given no wait at all: it
+					-- comes round as fast as it can, which is what decoding a burst of frames out
+					-- of a file is.
+					due = due ~= nil and math.min(due, at) or at
+				else
+					due = due ~= nil and math.min(due, nextAt) or nextAt
+				end
+			end
+		elseif not ticker.cancelled then
+			live = live + 1
+			tickers[live] = ticker
+		end
+	end
+
+	for index = #tickers, live + 1, -1 do
+		tickers[index] = nil
 	end
 
 	-- What the events left, drawn as soon as the display's time allows it. A frame that came too soon
@@ -946,11 +1046,16 @@ function UI:walk(window, ctx, key)
 	local batch = self.batch
 	local caret = self:caretFor(window)
 
-	batch:reset()
-	batch:setViewport(window.width, window.height)
+	-- The size the frame is drawn into: the surface under the window rather than the size the
+	-- window says it is, which is what the quads are written against and what the clip is. See
+	-- `wonderland.plugin.Render:size`.
+	local width, height = self.renderPlugin:size(window)
 
-	generateNodeQuads(batch, assert(ctx.screen), { left = 0, top = 0, right = window.width,
-		bottom = window.height }, assert(ctx.root), 0, 0, window.width, window.height, nil, fontManager, caret)
+	batch:reset()
+	batch:setViewport(width, height)
+
+	generateNodeQuads(batch, assert(ctx.screen), { left = 0, top = 0, right = width,
+		bottom = height }, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret)
 
 	-- What the caret's quad is added to: the frame is the quads of the screen and then it, so a
 	-- blink is this many of them and no more.
@@ -960,7 +1065,7 @@ function UI:walk(window, ctx, key)
 	-- A caret that has not blinked yet is a caret that is drawn: nothing has said it should not be,
 	-- and the first thing a field that takes the keyboard does is show where the typing goes.
 	if ctx.caret ~= nil and ctx.caretOn ~= false then
-		addCaretQuad(batch, ctx.caret, window.width, window.height)
+		addCaretQuad(batch, ctx.caret, width, height)
 	end
 
 	self.renderPlugin:setRenderData(window, batch)
@@ -982,10 +1087,14 @@ function UI:toggle(window, ctx)
 
 	if ctx.caretOn then
 		if self.batch.quads <= ctx.caretBase then
-			addCaretQuad(self.batch, caret, window.width, window.height)
+			local width, height = self.renderPlugin:size(window)
+
+			addCaretQuad(self.batch, caret, width, height)
 		end
 	else
-		self.batch.quads = ctx.caretBase
+		-- Taken out with the runs it was in, which is what a frame is drawn from: what is left is
+		-- the frame the gpu was given before the caret was put in.
+		self.batch:truncate(ctx.caretBase)
 	end
 
 	self.renderPlugin:setRenderData(window, self.batch)
@@ -1029,6 +1138,13 @@ function UI:frame(window)
 	local owed = ctx.owed or not ctx.uploaded
 
 	ctx.owed = false
+
+	-- What this frame draws into is taken before any of it is built: a screen laid out at the size
+	-- of the last frame's target and drawn into this one's is a screen the compositor stretches,
+	-- which during a resize is every frame of it.
+	if (owed or not ctx.presented) and not self.renderPlugin:retarget(window) then
+		return
+	end
 
 	if owed then
 		self.layoutPlugin:refreshView(window)

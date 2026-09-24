@@ -3,9 +3,11 @@
 -- An asset is a texture, and a texture needs a device, so this file is skipped where there is no
 -- gpu, the way the headless tests are. What is checked here is what an asset is; what a picture
 -- comes out as on screen is checked there, where there is a screen to look at.
+local ffi = require("ffi")
 local test = require("lde-test")
 local image = require("image")
 local wonderland = require("wonderland")
+local TextureManager = require("wonderland.util.texture_manager")
 
 local div, sty = wonderland.div, wonderland.sty
 
@@ -63,6 +65,24 @@ local function written(width, height, channels, color, extension)
 	return path
 end
 
+--- A frame the app decoded itself, which is what a video is: pixels in the shape the texture
+--- manager takes, with no file behind them.
+---@param width number
+---@param height number
+---@param level number
+---@return image.Image
+local function decoded(width, height, level)
+	local pixels = ffi.new("uint8_t[?]", width * height * 4)
+
+	for at = 0, width * height - 1 do
+		pixels[at * 4] = level
+		pixels[at * 4 + 3] = 255
+	end
+
+	---@type any
+	return { width = width, height = height, channels = 4, pixels = pixels }
+end
+
 ---@param screen wonderland.Headless
 ---@return TextureManager
 local function texturesOf(screen)
@@ -97,6 +117,39 @@ test.skipIf(not canUpload)("decodes a picture and uploads it, whatever the file 
 
 	screen:close()
 	os.remove(path)
+end)
+
+test.skipIf(not canUpload)("uploads a picture at its own size, whatever that size is", function()
+	local screen = aScreen()
+	local manager = texturesOf(screen)
+
+	-- Two sizes that no one size could be: one past what a texture array would have held, and one
+	-- that is nothing beside it. Both are textures of their own size, and neither made room for
+	-- the other.
+	local wide = written(640, 360, 4, { 10, 20, 30, 255 }, "png")
+	local tall = written(3, 700, 4, { 40, 50, 60, 255 }, "png")
+
+	local picture = screen.assets:image(wide)
+	local strip = screen.assets:image(tall)
+
+	local width, height = manager:getSize(picture.texture)
+	test.equal(width, 640, "a picture is uploaded as the size it is")
+	test.equal(height, 360)
+	test.equal(picture.width, 640, "and is drawn at it")
+	test.equal(picture.height, 360)
+
+	local stripWidth, stripHeight = manager:getSize(strip.texture)
+	test.equal(stripWidth, 3, "one that is almost nothing is almost nothing")
+	test.equal(stripHeight, 700)
+
+	-- What is held is the white texture, the one that says a texture id was not one, and these
+	-- two: nothing is allocated ahead of the pictures an app asks for, and neither picture made
+	-- room for the other.
+	test.equal(manager.textureCount, 4, "and nothing was made room for before either of them")
+
+	screen:close()
+	os.remove(wide)
+	os.remove(tall)
 end)
 
 test.skipIf(not canUpload)("decodes a path once, however often a view asks for it", function()
@@ -134,69 +187,96 @@ test.skipIf(not canUpload)("says what it could not read, naming the file", funct
 	os.remove(path)
 end)
 
-test.skipIf(not canUpload)("comes back with every frame of a gif, and the time each is shown for", function()
+test.skipIf(not canUpload)("shows a frame the app decoded, and cycles the pictures it is drawn from", function()
 	local screen = aScreen()
-	local dance = screen.assets:gif(SPINNER)
+	local video = screen.assets:stream({ width = 4, height = 4, layers = 3 })
 
-	test.equal(dance.width, 4)
-	test.equal(dance.height, 4)
-	test.equal(#dance.frames, 3, "the gif is three frames")
-	test.equal(dance.frames[1].delay, 0.1, "a tenth of a second each")
-	test.equal(dance.frames[2].delay, 0.1)
-	test.equal(dance.frames[3].delay, 0.2)
-	test.equal(dance.duration, 0.4, "and it runs for four tenths of a second")
-	test.equal(dance:current(), dance.frames[1], "it starts on its first frame")
+	test.equal(video:current(), nil, "nothing is shown until the app gives it a frame")
+
+	local first = video:frame(decoded(4, 4, 10), 0.5)
+
+	test.equal(video:current(), first, "the frame the app gave is the one drawn")
+	test.equal(first.width, 4, "as large as the stream was made")
+	test.equal(first.delay, 0.5, "and shown for as long as the app said")
+
+	local second = video:frame(decoded(4, 4, 20))
+	local third = video:frame(decoded(4, 4, 30))
+	local fourth = video:frame(decoded(4, 4, 40))
+
+	test.truthy(first.texture ~= second.texture, "a frame is not the picture the one before it was in")
+	test.truthy(second.texture ~= third.texture)
+	test.truthy(fourth.texture == first.texture, "and a stream of any length cycles the layers it has")
+	test.equal(#video.slots, 3, "so what it costs is the layers, and not the frames shown in them")
+	test.falsy(video:advance(100), "nothing here moves a stream on: the app's clock is its own")
 
 	screen:close()
 end)
 
-test.skipIf(not canUpload)("packs the frames of an animation into the layers they fit", function()
+test.skipIf(not canUpload)("reads a gif a frame at a time, and comes back with the first of them", function()
+	local screen = aScreen()
+	local dance = screen.assets:gif(SPINNER)
+
+	test.equal(dance.width, 4, "the size of the file is the size of its frames")
+	test.equal(dance.height, 4)
+	test.equal(dance.index, 1, "it starts on its first frame")
+	test.equal(dance:current().delay, 0.1, "which the file says is a tenth of a second")
+
+	screen:close()
+end)
+
+test.skipIf(not canUpload)("uploads a picture in bands, so that one upload is never the picture", function()
+	local screen = aScreen()
+
+	-- A budget a picture this size does not fit in, so that what is being checked -- a picture
+	-- uploaded in pieces and read as one -- is something a small picture can show.
+	local manager = TextureManager.new(texturesOf(screen).device, { uploadPixels = 10240 })
+	local path = written(200, 100, 4, { 10, 20, 30, 255 }, "png")
+	local picture = manager:upload(assert(image.load(path)))
+
+	test.equal(manager:getSize(picture), 200, "a picture is still the size it was uploaded at")
+	local slot = manager.slots[picture]
+
+	test.equal(slot.base, 0, "its first band is the first layer of its texture")
+	test.equal(slot.scale, 2, "a picture of a hundred rows is two of the fifty a band holds")
+	test.equal(slot.last, 1, "and reaches the second layer of it")
+	test.equal(manager.textures[slot.texture].layers, 2, "which is what the texture was made with")
+
+	os.remove(path)
+	manager:destroy()
+	screen:close()
+end)
+
+test.skipIf(not canUpload)("holds the frames of an animation in the layers they cycle through", function()
 	local screen = aScreen()
 	local manager = texturesOf(screen)
-	local frames = {}
-
-	-- Frames nothing decoded: what is packed is a shape, and a gif is one way to get one.
-	for index = 1, 25 do
-		local frame = image.new(200, 100, 4)
-
-		frame:fill(index, 0, 0, 255)
-		frames[index] = frame
-	end
-
-	local packed = manager:uploadFrames(frames)
-	local layers, perLayer = {}, {}
-
-	for _, place in ipairs(packed) do
-		test.equal(place.uv.v1 - place.uv.v0, 100 / 512, "a frame is as tall as the picture")
-		test.truthy(place.uv.u0 >= 0 and place.uv.u1 <= 1, "and inside the layer it was put in")
-
-		layers[place.texture] = true
-		perLayer[place.texture] = (perLayer[place.texture] or 0) + 1
-	end
-
-	test.equal(test.count(layers), 3, "twenty five frames of 200 by 100 fit three layers deep")
-	test.equal(perLayer[packed[1].texture], 10, "ten to a layer")
-	test.equal(perLayer[packed[11].texture], 10, "and ten to the next")
-	test.equal(perLayer[packed[21].texture], 5, "and what is left of them to the last")
-
-	test.equal(packed[10].texture, packed[1].texture, "the tenth is still in the first layer")
-	test.notEqual(packed[11].texture, packed[10].texture, "and the eleventh starts the next one")
-	test.notEqual(packed[2].uv.u0, packed[1].uv.u0, "frames beside each other are not on top of each other")
-	test.equal(packed[2].uv.u0, packed[1].uv.u1 + 1 / 512, "with a pixel between them to spare")
-
-	screen:close()
-end)
-
-test.skipIf(not canUpload)("shares one layer between the frames of a gif, each its own part of it", function()
-	local screen = aScreen()
+	local before = manager.textureCount
 	local dance = screen.assets:gif(SPINNER)
 
-	test.equal(dance.frames[2].texture, dance.frames[1].texture, "three small frames are one layer")
-	test.equal(dance.frames[3].texture, dance.frames[1].texture)
-	test.equal(dance.frames[1].uv.u0, 0, "the first is at the start of it")
-	test.equal(dance.frames[1].uv.u1 - dance.frames[1].uv.u0, 4 / 512, "a frame wide, no more")
-	test.notEqual(dance.frames[2].uv.u0, dance.frames[1].uv.u1,
-		"and the next is a gutter further on, so nothing of one is in the other")
+	-- Every frame of the file that the clock has reached is drawn by an id of its own, and the
+	-- ones after the first few name a layer that a frame before them did: what is held is the
+	-- layers, not a layer a frame.
+	test.equal(manager.slots[dance:current().texture].base, 0,
+		"the frame the file came back with is the first layer")
+
+	local layers = {}
+
+	for index = 1, 4 do
+		local frame = dance:read()
+
+		if frame == nil then
+			break
+		end
+
+		layers[index] = manager.slots[frame.texture].base
+	end
+
+	test.equal(layers[1], 1, "the next frame of the file is the next layer")
+	test.equal(layers[2], 2)
+	test.equal(layers[3], 0, "and the file starting again is the first layer once more")
+	test.equal(layers[4], 1)
+
+	test.equal(manager.textureCount, before + 1, "and the whole animation is one texture of layers")
+	test.equal(manager.textures[manager.slots[dance:current().texture].texture].layers, 4)
 
 	screen:close()
 end)
@@ -212,6 +292,7 @@ test.skipIf(not canUpload)("plays a gif by the delays its frames came with", fun
 
 	test.falsy(assets:advance(start), "the first look at a gif starts its clock and nothing else")
 	test.equal(dance.index, 1)
+	test.equal(dance:current().delay, 0.1, "and the frame it is on is the one the file started with")
 	test.truthy(nearTime(assets:due(), start + 0.1), "the first frame is due a tenth of a second later")
 
 	test.falsy(assets:advance(start + 0.05), "half a frame in, it is still the first one")
@@ -225,7 +306,8 @@ test.skipIf(not canUpload)("plays a gif by the delays its frames came with", fun
 
 	test.truthy(assets:advance(assert(assets:due())))
 	test.equal(dance.index, 3)
-	test.truthy(nearTime(assets:due(), start + 0.4), "the third frame is shown for two tenths")
+	test.equal(dance:current().delay, 0.2, "the third frame is shown for two tenths")
+	test.truthy(nearTime(assets:due(), start + 0.4), "which is when the next one is due")
 
 	test.falsy(assets:advance(start + 0.3), "which is not over yet")
 	test.equal(dance.index, 3)
