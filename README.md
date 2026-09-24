@@ -83,6 +83,33 @@ end
 App:run()
 ```
 
+## Controls
+
+What a box *does* is a call on it, and what it *looks like* stays the app's: a slider is a track
+you put a filled part in, and a field is a box you put the text in.
+
+```lua
+-- A slider reports where in itself it was pressed and dragged, between the two values you give
+-- it. The filled part below is as wide as the value, as a share of the box it sits in.
+div():style(TRACK)
+	:slider({ value = self.volume, min = 0, max = 1, onchange = function(now)
+		return { type = "volume", value = now }
+	end })
+	:children(div():style(sty():h(14):wrel(self.volume):bg("#4a6dbd")))
+
+-- A field takes the keyboard from the click that focuses it. With `multiline` it is a paragraph:
+-- return breaks the line rather than sending it, control with return is what sends it, and the
+-- caret moves between the lines and the ends of them with the arrow keys, home and end.
+div():style(NOTES)
+	:input({ name = "notes", value = self.notes, multiline = true, oninput = function(value)
+		return { type = "notes", value = value }
+	end })
+	:children(text(self.notes))
+```
+
+Text with newlines in it is drawn as lines, for a `text` element as much as for a field, and each
+line is aligned by its own width.
+
 ## Plugins
 
 The internals of wonderland consist of plugins.

@@ -25,6 +25,7 @@ local HOVERED, PRESSED = wonderlandElement.HOVERED, wonderlandElement.PRESSED
 local ABS, REL, AUTO = style.ABS, style.REL, style.AUTO
 local PRESENT = style.PRESENT
 local SCROLLS = wonderlandElement.SCROLLS
+local SLIDE, THUMB = wonderlandElement.SLIDE, wonderlandElement.THUMB
 local WIDTH, HEIGHT = PRESENT.width, PRESENT.height
 
 -- Which style array the nodes are read out of. It is replaced when the arena grows, and
@@ -73,6 +74,7 @@ ffi.cdef [[
 		uint32_t run;                  // which run of the screen's runs to draw
 		uint32_t runId;                // and which measured line that was
 		uint32_t element;              // the element this came from, 1 based, 0 for none
+		uint32_t thumb;                // whether it is the nub of the slider above it
 
 		// how it came out
 		double x, y;
@@ -196,6 +198,7 @@ local layout = {}
 ---@field run number
 ---@field runId number
 ---@field element number
+---@field thumb number # Whether it is the nub of the slider above it
 ---@field x number
 ---@field y number
 ---@field width number # Solved
@@ -212,7 +215,7 @@ local layout = {}
 --- What a screen is laid out against. A real window has more than this and a headless
 --- screen has less; both are laid out by their size, the redraw flag is how the ui asks for
 --- another frame, and the cursor is there to be pointed with when there is one.
----@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))? }
+---@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))? }
 
 ---@class wonderland.layout
 ---@field new fun(capacity: number?): wonderland.Layout.Screen
@@ -439,6 +442,7 @@ function Screen:add(element)
 	ffi.copy(node, given, STYLE_COPY)
 
 	node.element = element.index
+	node.thumb = bit.band(flags, THUMB) ~= 0 and 1 or 0
 	node.style = over ~= 0 and over or element.baseStyle
 	node.x, node.y, node.width, node.height = 0, 0, 0, 0
 	node.firstChild, node.childCount = 0, 0
@@ -737,6 +741,39 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 
 		end
 
+	end
+
+	-- A slider's nub is a child of it, and is put where the value is rather than where the layout
+	-- stacked it: it travels across the box less its own size, which is what makes the ends of the
+	-- box the ends of the slider, and along the axis the slider stacks on -- a slider that stacks
+	-- down is one that is dragged up and down. The value is the app's, so a nub whose value did not
+	-- move stays where the last frame put it, and a nub of a box that is not a slider stays where
+	-- the layout put it.
+	local slid = pointers[node.element]
+
+	if slid ~= nil and bit.band(slid.flags, SLIDE) ~= 0 and count > 0 then
+		local range = slid.max - slid.min
+		local at1 = range ~= 0 and (slid.sliderValue - slid.min) / range or 0
+		local along = at1 < 0 and 0 or (at1 > 1 and 1 or at1)
+
+		for at = 0, count - 1 do
+			local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+
+			if child.thumb ~= 0 then
+				local size = isRow and child.width or child.height
+				local travel = containerMain - size
+
+				if travel < 0 then
+					travel = 0
+				end
+
+				if isRow then
+					child.x = snap(node.paddingLeft + along * travel)
+				else
+					child.y = snap(node.paddingTop + along * travel)
+				end
+			end
+		end
 	end
 
 	-- What is scrolled is shifted, and its own children come with it: their places are relative to

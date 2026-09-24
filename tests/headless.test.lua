@@ -507,6 +507,250 @@ test.skipIf(not canRender)("draws a box with round corners", function()
 	test.equal(b, 0)
 end)
 
+-- A slider is a box that reports where in itself it was pressed and dragged, as the value that
+-- sits there: pressing in it goes straight to that value, dragging follows the pointer even past
+-- the ends of the box, and letting go is the end of the drag rather than the end of the slider.
+test.skipIf(not canRender)("a slider reports where it was pressed and dragged", function()
+	local slid = {}
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { abs = 100 }, height = { abs = 40 },
+			bg = { r = 0, g = 0, b = 0, a = 1 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 40 } })
+				:slider({
+					value = 0,
+					min = 0,
+					max = 100,
+					onchange = function(value) return { type = "slid", value = value } end,
+				})
+		)
+	end, {
+		width = 100,
+		height = 40,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			slid[#slid + 1] = message.value
+		end,
+	})
+
+	---@param name string
+	---@param x number
+	local function send(name, x)
+		screen:event({ name = name, window = screen.window, x = x, y = 20, button = 1 })
+	end
+
+	---@return number
+	local function last()
+		return slid[#slid]
+	end
+
+	screen:draw()
+	send("mousePress", 75)
+	test.equal(last(), 75, "pressing three quarters along is three quarters of the way")
+
+	send("mouseMove", 140)
+	test.equal(last(), 100, "dragging past the right end stops at it")
+
+	send("mouseMove", 50)
+	test.equal(last(), 50, "and back in the middle is the middle")
+
+	send("mouseMove", -20)
+	test.equal(last(), 0, "while past the left end stops at that")
+
+	send("mouseRelease", 25)
+	test.equal(last(), 25, "letting go leaves it where it was let go")
+
+	send("mouseMove", 90)
+	test.equal(last(), 25, "and moving after that is not dragging it")
+
+	test.equal(#slid, 5, "which is the press, the three drags and letting go, and nothing else")
+
+	screen:close()
+end)
+
+-- The nub of a slider is a child of it that the layout puts where the value is, because how wide
+-- the box a slider was given came out is the one thing an app cannot work out for itself. It
+-- travels across the box less the nub, so the ends of the box are the ends of the slider.
+test.skipIf(not canRender)("puts a slider's nub where the value is", function()
+	local value = 0
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 10 },
+			bg = { r = 0, g = 0, b = 0, a = 1 } }):children(
+			div():style({ direction = "row", width = { abs = 100 }, height = { abs = 10 } })
+				:slider({ value = value, min = 0, max = 100, onchange = function() end })
+				:children({
+					div():style({ width = { abs = 20 }, height = { abs = 10 },
+						bg = { r = 1, g = 1, b = 1, a = 1 } }):thumb(),
+				})
+		)
+	end, { width = 100, height = 10, fontPath = assert(fontPath) })
+
+	---@return number # The first column the nub of the frame is drawn at
+	local function nubLeft()
+		screen:draw()
+
+		local pixels = assert(screen:getPixels())
+
+		for x = 0, 99 do
+			if select(1, pixelAt(pixels, 100, x, 5)) == 255 then
+				return x
+			end
+		end
+
+		return 100
+	end
+
+	value = 50
+	test.equal(nubLeft(), 40, "half way is the box less the nub, halved")
+
+	value = 0
+	test.equal(nubLeft(), 0, "at the low end it starts at the start of the box")
+
+	value = 100
+	test.equal(nubLeft(), 80, "and at the high end it ends at the end of it")
+
+	value = 25
+	test.equal(nubLeft(), 20, "while a quarter of the way is a quarter of the space it has")
+
+	screen:close()
+end)
+
+-- What a pointer grabs when it drags a slider is the nub, so where it is pressed is measured to
+-- the middle of the nub: a nub that is a fifth of the box has a tenth of it either side of the
+-- pointer at either of its ends.
+test.skipIf(not canRender)("a slider is dragged by the middle of its nub", function()
+	local slid = {}
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 40 },
+			bg = { r = 0, g = 0, b = 0, a = 1 } }):children(
+			div():style({ direction = "row", width = { abs = 100 }, height = { abs = 40 } })
+				:slider({
+					value = 0,
+					min = 0,
+					max = 100,
+					onchange = function(value) return { type = "slid", value = value } end,
+				})
+				:children({
+					div():style({ width = { abs = 20 }, height = { abs = 40 },
+						bg = { r = 1, g = 1, b = 1, a = 1 } }):thumb(),
+				})
+		)
+	end, {
+		width = 100,
+		height = 40,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			slid[#slid + 1] = message.value
+		end,
+	})
+
+	---@param name string
+	---@param x number
+	local function send(name, x)
+		screen:event({ name = name, window = screen.window, x = x, y = 20, button = 1 })
+	end
+
+	---@return number
+	local function last()
+		return slid[#slid]
+	end
+
+	screen:draw()
+	send("mousePress", 50)
+	test.equal(last(), 50, "pressing half way along is half way, nub and all")
+
+	send("mouseMove", 10)
+	test.equal(last(), 0, "and the left end of it is where the nub's middle is, so the pointer is")
+
+	send("mouseMove", 90)
+	test.equal(last(), 100, "which is the same at the right end")
+
+	send("mouseMove", 30)
+	test.equal(last(), 25, "so a quarter of the way along what the nub travels is a quarter of it")
+
+	screen:close()
+end)
+
+-- A field that takes more than one line: return breaks the line rather than sending it,
+-- control with return sends it, and the caret moves between the lines and the ends of them. What
+-- is typed is the app's to keep, as it is in a field of one line: the message comes back and the
+-- screen is built again with it.
+test.skipIf(not canRender)("types into a field that takes more than one line", function()
+	local draft = ""
+	local sent = {}
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { abs = 100 }, height = { abs = 60 },
+			bg = { r = 0, g = 0, b = 0, a = 1 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 60 } })
+				:input({
+					name = "notes",
+					value = draft,
+					multiline = true,
+					oninput = function(value) return { type = "typed", value = value } end,
+					onsubmit = function(value) return { type = "sent", value = value } end,
+				})
+		)
+	end, {
+		width = 100,
+		height = 60,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			sent[#sent + 1] = message
+
+			if message.type == "typed" then
+				draft = message.value
+			end
+		end,
+	})
+
+	--- A key, and the frame the app would draw to take the message it produced.
+	---@param key string
+	---@param ctrl boolean? # Whether the key was held with control
+	local function press(key, ctrl)
+		screen:event({
+			name = "keyPress",
+			window = screen.window,
+			key = key,
+			modifiers = { shift = false, lock = false, ctrl = ctrl or false, alt = false, super = false },
+		})
+		screen:draw()
+	end
+
+	screen:draw()
+	screen:click(50, 30)
+
+	press("a")
+	press("b")
+	press("return")
+	press("c")
+
+	test.equal(draft, "ab\nc", "return breaks the line rather than sending what is in it")
+
+	-- Up keeps how far into its line the caret was, counted from the start of it: it was at the
+	-- end of a line of one character, which is one byte in, so it lands one byte into the line
+	-- above, which is after the "a".
+	press("up")
+	press("X")
+	test.equal(draft, "aXb\nc", "and the caret moves between lines")
+
+	press("end")
+	press("Y")
+	test.equal(draft, "aXbY\nc", "end goes to the end of the line the caret is on")
+
+	press("home")
+	press("Z")
+	test.equal(draft, "ZaXbY\nc", "and home to its start")
+
+	press("return", true)
+	test.equal(sent[#sent].type, "sent", "control with return is what sends it")
+	test.equal(sent[#sent].value, "ZaXbY\nc", "with the whole paragraph")
+
+	screen:close()
+end)
+
 -- A shadow is the box it belongs to, moved and drawn with its edge spread out: it is drawn
 -- behind the box, so what shows of it is what the box does not cover, and it is soft, so what
 -- shows fades with the distance from the box rather than stopping at it.
@@ -612,24 +856,79 @@ test.skipIf(not canRender)("a rounded box cut by a pane keeps only the corners i
 	test.equal(select(1, pixelAt(pixels, 100, 50, 58)), 255, "and it is drawn where it lands")
 end)
 
-test.skipIf(not canRender)("a repaint that comes out the same asks for no frame", function()
+-- A frame is built once for the frame rather than once for every event behind it, so what an
+-- event asks for is a frame and not a screen: the frame itself is what comes out the same as the
+-- one already drawn. A frame the *window* asks for -- what an expose is -- is drawn whatever it
+-- comes out to, because what it is for is a window that lost what it was showing.
+test.skipIf(not canRender)("a frame that comes out the same is not drawn", function()
 	local screen = withButton()
+
+	-- A frame is asked for at most once a frame's time, which is what a display shows: this is
+	-- about which frame is drawn, so the test asks for them as often as it likes.
+	screen.plugins.ui.frameInterval = 0
 
 	screen:draw()
 	screen.window.shouldRedraw = false
 
 	screen.plugins.ui:refreshView(screen.window)
-	test.falsy(screen.window.shouldRedraw, "a screen that came out the same is not drawn again")
+	test.falsy(screen.window.shouldRedraw, "a screen that came out the same asks for no frame")
+
+	local drawn = 0
+	local draw = screen.plugins.render.draw
+
+	screen.plugins.render.draw = function(plugin, ctx)
+		drawn = drawn + 1
+		return draw(plugin, ctx)
+	end
+
+	--- What the loop does for a frame it was asked for.
+	local function frame()
+		screen:event({ name = "redraw", window = screen.window })
+	end
 
 	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 60 })
-	test.truthy(screen.window.shouldRedraw, "the pointer arriving on the button is a frame")
+	test.truthy(screen.window.shouldRedraw, "the pointer arriving on the button asks for one")
+	frame()
+	test.equal(drawn, 1, "and it is drawn, because the button under the pointer changed")
 
 	screen.window.shouldRedraw = false
 	screen:event({ name = "mouseMove", window = screen.window, x = 110, y = 62 })
-	test.falsy(screen.window.shouldRedraw, "and moving about on it is not")
+	test.truthy(screen.window.shouldRedraw, "moving about on it asks for one too")
+	frame()
+	test.equal(drawn, 1, "which comes out the same, so it is not drawn")
 
 	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 190 })
-	test.truthy(screen.window.shouldRedraw, "while leaving it is")
+	frame()
+	test.equal(drawn, 2, "while leaving it is")
+
+	screen.window.shouldRedraw = false
+	frame()
+	test.equal(drawn, 3, "and a frame the window asks for is drawn whatever it solves to")
+
+	-- A frame that came too soon to be shown waits for the display, and what the window manager
+	-- asks for is the display: the frame that was held back is the one that goes out.
+	screen.plugins.ui.frameInterval = 1 / 60
+	screen.window.shouldRedraw = false
+	-- As if no frame had gone out yet: the frames above were drawn as fast as they were asked for.
+	screen.plugins.layout.contexts[screen.window].framedAt = nil
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 60 })
+	test.truthy(screen.window.shouldRedraw, "a frame asks for the one after it")
+
+	screen.window.shouldRedraw = false
+	screen:event({ name = "mouseMove", window = screen.window, x = 90, y = 58 })
+	test.falsy(screen.window.shouldRedraw, "while one that comes too soon waits for the display")
+
+	screen.window.frameAsked = true
+	screen:event({ name = "mouseMove", window = screen.window, x = 80, y = 56 })
+	test.truthy(screen.window.shouldRedraw, "and is drawn when the window manager asks for it")
+
+	-- A resize is the window's own, so it is not held back: a window left at the size before the
+	-- last one is a window that looks frozen.
+	screen.window.shouldRedraw = false
+	screen:event({ name = "resize", window = screen.window })
+	test.truthy(screen.window.shouldRedraw, "and a window that changed size is drawn at once")
+	screen.window.shouldRedraw = false
+	screen.plugins.ui.frameInterval = 0
 
 	screen:close()
 end)

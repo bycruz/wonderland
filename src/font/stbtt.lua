@@ -18,6 +18,13 @@ ffi.cdef [[
 		float u0, v0, u1, v1;         // and where it is in the atlas
 	} wl_glyph;
 
+	// One line of a run: the range of the run's glyphs that are its own, and how wide it came
+	// out, which is what a line that is not left-aligned is placed by.
+	typedef struct {
+		int32_t first, count;
+		double width;
+	} wl_line;
+
 	// Where one character sits in the atlas, measured when the atlas is built: nine floats,
 	// because that is what stb writes them as, and read one struct at a time when a line is
 	// measured rather than built as a table per character per line.
@@ -78,9 +85,20 @@ local FIRST_CHAR = 32
 --- A line of text: what it measures, and where each glyph goes inside it. This is the
 --- whole of what drawing text needs, so a text element can stay one element instead of
 --- becoming one element per character.
+---@class wonderland.font.Line
+---@field first number # Where this line's glyphs start in the run's array
+---@field count number # How many of them there are
+---@field width number # And how far the pen moved over it, which is what it is aligned by
+
+--- What a string measures to, and where each of its glyphs goes. This is the whole of what
+--- drawing text needs, so a text element can stay one element instead of becoming one element
+--- per character. A string with newlines in it is a run of several lines: one array of glyphs
+--- with each line's own range in it, and each line's glyphs placed a line lower than the last.
 ---@class wonderland.font.Run
----@field width number # How far the pen moves over the whole line
----@field height number # One line box, the font's line height
+---@field width number # How far the pen moves over the widest of its lines
+---@field height number # The line box: the font's line height, times how many lines there are
+---@field lines ffi.cdata*? # `wl_line`, one per line, from the top
+---@field lineCount number # How many lines, since the array is not a Lua one
 ---@field glyphs ffi.cdata*? # `wl_glyph`, one per character from nought, nothing for an empty line
 ---@field count number # How many, since the array is not a Lua one
 ---@field id number # Stable for the life of the run: what a frame compares to tell whether a line changed
@@ -336,44 +354,90 @@ function Atlas:getRun(text)
 		self.recentAt = at
 	end
 
-	local count = #text
+	-- How many lines the string is, and how many glyphs they hold between them: a newline is a
+	-- break with nothing drawn at it, so it is not a glyph. Counted before anything is placed,
+	-- because both arrays are made once and filled in place.
+	local lineCount = 1
+	local glyphCount = 0
+	local scan = 1
+
+	while true do
+		local newline = text:find("\n", scan, true)
+
+		if not newline then
+			glyphCount = glyphCount + #text - scan + 1
+			break
+		end
+
+		glyphCount = glyphCount + newline - scan
+		lineCount = lineCount + 1
+		scan = newline + 1
+	end
 
 	---@type ffi.cdata*?
-	local glyphs = count > 0 and ffi.new("wl_glyph[?]", count) or nil
-	local pen = 0
-	local baseline = math.floor(self.ascent + 0.5)
+	local glyphs = glyphCount > 0 and ffi.new("wl_glyph[?]", glyphCount) or nil
+	local lines = ffi.new("wl_line[?]", lineCount)
 
 	local quads = self.quads
 	local byByte = self.byByte
 	local array = glyphs
+	local lineStep = math.floor(self.lineHeight + 0.5)
+	local widest = 0
+	local placed = 0
+	local start = 1
 
 	-- A line of nothing is a line of nothing: no glyphs to place, and no array to place them in.
 	-- By byte, not by taking a one-character string out of the line: a string per character per
 	-- line is what measuring cost before the quads were structs, and it is most of what was left.
-	for at = 1, count do
-		local place = byByte[text:byte(at)]
+	for line = 0, lineCount - 1 do
+		local newline = text:find("\n", start, true)
+		local last = (newline or #text + 1) - 1
+		local baseline = math.floor(self.ascent + 0.5) + line * lineStep
+		local pen = 0
+		local first = placed
 
-		if place == 0 then
-			error("Character '" .. text:sub(at, at) .. "' is not in the atlas.", 2)
+		for at = start, last do
+			local place = byByte[text:byte(at)]
+
+			if place == 0 then
+				error("Character '" .. text:sub(at, at) .. "' is not in the atlas.", 2)
+			end
+
+			local quad = quads[place - 1]
+			local glyph = assert(array)[placed]
+
+			glyph.x = math.floor(pen + quad.x + 0.5)
+			glyph.y = math.floor(baseline + quad.y + 0.5)
+			glyph.width = math.ceil(quad.width)
+			glyph.height = math.ceil(quad.height)
+			glyph.u0, glyph.v0 = quad.u0, quad.v0
+			glyph.u1, glyph.v1 = quad.u1, quad.v1
+
+			pen = pen + math.floor(quad.advance + 0.5)
+			placed = placed + 1
 		end
 
-		local quad = quads[place - 1]
-		local glyph = assert(array)[at - 1]
+		lines[line].first, lines[line].count, lines[line].width = first, placed - first, pen
 
-		glyph.x = math.floor(pen + quad.x + 0.5)
-		glyph.y = math.floor(baseline + quad.y + 0.5)
-		glyph.width = math.ceil(quad.width)
-		glyph.height = math.ceil(quad.height)
-		glyph.u0, glyph.v0 = quad.u0, quad.v0
-		glyph.u1, glyph.v1 = quad.u1, quad.v1
+		if pen > widest then
+			widest = pen
+		end
 
-		pen = pen + math.floor(quad.advance + 0.5)
+		start = last + 2
 	end
 
 	nextRunId = nextRunId + 1
 
 	---@type wonderland.font.Run
-	local run = { width = pen, height = math.ceil(self.lineHeight), glyphs = glyphs, count = count, id = nextRunId }
+	local run = {
+		width = widest,
+		height = lineStep * lineCount,
+		lines = lines,
+		lineCount = lineCount,
+		glyphs = glyphs,
+		count = placed,
+		id = nextRunId,
+	}
 	self.runs[text] = run
 	self.runCount = self.runCount + 1
 

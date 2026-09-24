@@ -82,6 +82,29 @@ test.skipIf(fontPath == nil)("measures a line as one run of glyphs", function()
 	end
 end)
 
+test.skipIf(fontPath == nil)("measures a paragraph as lines of one run", function()
+	local atlas = assert(Atlas.fromPath({ characters = CHARACTERS, pixelHeight = 18 }, assert(fontPath)))
+	local line = atlas:getRun("Hello")
+	local paragraph = atlas:getRun("Hello\nHi")
+
+	test.equal(paragraph.lineCount, 2, "a break makes a second line")
+	test.equal(paragraph.count, 7, "and is not a glyph itself")
+	test.equal(paragraph.width, line.width, "so it is as wide as its widest line, which is the first")
+	test.equal(paragraph.height, 2 * math.ceil(atlas.lineHeight), "and two lines tall")
+
+	-- The lines are read by index like the glyphs are, so the first is nought.
+	test.equal(paragraph.lines[0].count, 5, "the first line holds what came before the break")
+	test.equal(paragraph.lines[0].width, line.width)
+	test.equal(paragraph.lines[0].first, 0)
+	test.equal(paragraph.lines[1].count, 2, "and the second what came after")
+	test.equal(paragraph.lines[1].first, 5)
+	test.greater(paragraph.lines[1].width, 0)
+
+	local above, below = paragraph.glyphs[0], paragraph.glyphs[5]
+	test.equal(below.y - above.y, math.ceil(atlas.lineHeight), "which is drawn a line lower than the first")
+	test.equal(atlas:getRun("").lineCount, 1, "and a line of nothing is still a line")
+end)
+
 test.skipIf(fontPath == nil)("keeps the run it measured for the next frame", function()
 	local atlas = assert(Atlas.fromPath({ characters = CHARACTERS, pixelHeight = 18 }, assert(fontPath)))
 

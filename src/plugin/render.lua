@@ -404,6 +404,26 @@ function RenderPlugin:resize(ctx)
 	oldBuffer:destroy()
 end
 
+--- The command buffer a frame is recorded into. A frame that goes into a swapchain is recorded
+--- into the swapchain's own, one per image, which is the one that is free: an image is not handed
+--- out again until the frame that used it is done, so the recording that goes with it is done
+--- too. A frame recorded into a fresh command buffer instead is a pool of them -- the driver's to
+--- size, hundreds of kilobytes of it -- for every frame, which is a window that grows by a pool a
+--- frame for as long as it is drawn, and a process that runs out of memory for it.
+---
+--- A screen that is read back rather than shown has no swapchain to take one from, so it records
+--- into a command buffer of its own: it is not a frame, and it happens when a screenshot or a
+--- test asks for one rather than every frame.
+---@param ctx wonderland.plugin.Render.Context
+---@return hood.CommandEncoder
+function RenderPlugin:frameEncoder(ctx)
+	if ctx.swapchain then
+		return ctx.swapchain:createCommandEncoder()
+	end
+
+	return self.device:createCommandEncoder()
+end
+
 ---@param ctx wonderland.plugin.Render.Context
 ---@return boolean drawn # false when the swapchain had to be reconfigured first
 function RenderPlugin:draw(ctx)
@@ -441,7 +461,8 @@ function RenderPlugin:draw(ctx)
 		view, width, height = texture:createView({}), ctx.swapchain.width, ctx.swapchain.height
 	end
 
-	local encoder = self.device:createCommandEncoder()
+	local encoder = self:frameEncoder(ctx)
+
 	self:recordFrame(ctx, encoder, view, width, height)
 
 	if ctx.swapchain then
@@ -477,7 +498,7 @@ end
 function RenderPlugin:getPixels(ctx)
 	if ctx.swapchain then
 		local capture = self:ensureCapture(ctx)
-		local encoder = self.device:createCommandEncoder()
+		local encoder = self:frameEncoder(ctx)
 
 		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height)
 		self:recordCopy(ctx, encoder)
@@ -564,21 +585,7 @@ function RenderPlugin:destroy(window)
 	end
 end
 
---- A window asking to be drawn is the whole of a frame, and the swapchain it is drawn into is
---- this plugin's, so this is where it happens. Returning nothing matters: a message is what
---- update is called with, and a frame is not one.
----@param event winit.Event
----@param _handler winit.EventManager
-function RenderPlugin:event(event, _handler)
-	if event.name ~= "redraw" then
-		return
-	end
-
-	local ctx = self:getContext(event.window)
-
-	if ctx then
-		self:draw(ctx)
-	end
-end
-
+-- What a render plugin is asked for is nothing: a frame is the ui plugin's -- it is the one that
+-- knows what the screen came out to and whether it is worth drawing -- and what the renderer
+-- draws with is what the ui handed it. See `wonderland.plugin.UI:frame`.
 return RenderPlugin

@@ -182,7 +182,7 @@ end)
 
 test.it("a line of text is the size of the line it measured", function()
 	local line = text("hello")
-	wonderlandElement.setRun(line, { width = 84, height = 18, glyphs = nil, count = 0, id = 1 })
+	wonderlandElement.setRun(line, { width = 84, height = 18, lines = nil, lineCount = 1, glyphs = nil, count = 0, id = 1 })
 
 	local node = solve(line, 400, 300):node(1)
 	test.equal(node.width, 84)

@@ -7,6 +7,8 @@ local wonderlandElement = require("wonderland.element")
 local pointers = wonderlandElement.pointers
 local callbacks = wonderlandElement.callbacks
 local TEXT_INPUT = wonderlandElement.TEXT_INPUT
+local MULTILINE = wonderlandElement.MULTILINE
+local SLIDE = wonderlandElement.SLIDE
 
 --- Where a node ended up, and which element it is.
 ---@class wonderland.plugin.Layout.Hit
@@ -96,7 +98,12 @@ end
 ---@field screen wonderland.Layout.Screen? # The laid out screen
 ---@field root number?
 ---@field uploaded boolean? # Whether the gpu has been given a frame for this window yet
+---@field asked boolean? # Whether the screen is what asked for the next frame
+---@field owed boolean? # Whether a frame it asked for was held back, waiting for the display
+---@field framedAt number? # When the last frame of this window went out, on the clock frames are paced by
+---@field presented boolean? # And whether the gpu has drawn one for it
 ---@field focusedName string?
+---@field dragging wonderland.plugin.Layout.Drag? # The slider being dragged, while one is
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
 ---@field pointing boolean? # Whether the pointer cursor is the one for something clickable
 ---@field cursorPos number
@@ -192,7 +199,7 @@ local function hasMouseUp(e) ---@param e wonderland.Element
 end
 
 local function hasMouseDownOrClick(e) ---@param e wonderland.Element
-	return bit.band(e.flags, TEXT_INPUT) ~= 0
+	return bit.band(e.flags, TEXT_INPUT) ~= 0 or bit.band(e.flags, SLIDE) ~= 0
 		or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0
 end
 
@@ -239,6 +246,144 @@ local function setPointer(ctx, x, y, pressed)
 	end
 end
 
+--- A slider being dragged: what to tell about it, the box it is measured along, and the two
+--- values its ends are. The callback is held rather than the element, because an element is
+--- built again every frame and its callbacks are the frame's, while a drag goes on across them.
+--- What the pointer is measured against is where the middle of the nub sits at the low end of the
+--- slider: a nub is what the pointer grabs, so a pointer at a nub's middle is the value that nub
+--- is at, and one whose box has no nub is measured from the end of the box.
+---@class wonderland.plugin.Layout.Drag
+---@field change fun(value: number): any
+---@field x number # Where the pointer is measured from, absolute
+---@field y number
+---@field span number # And how far along from there the high end of the slider is
+---@field vertical boolean # Whether a slider that stacks down is dragged up and down
+---@field min number
+---@field max number
+---@field value number? # The value it reported last, which is what says a change is a change
+
+--- Where a pointer is along a dragged slider, as the value that sits there: the two ends of the
+--- box are the two ends of the slider, and a pointer past either of them is as far as it goes.
+---@param drag wonderland.plugin.Layout.Drag
+---@param x number
+---@param y number
+---@return number
+local function valueAt(drag, x, y)
+	local span = drag.span > 0 and drag.span or 1
+	local along = ((drag.vertical and y or x) - (drag.vertical and drag.y or drag.x)) / span
+	local fraction = math.min(math.max(along, 0), 1)
+
+	return drag.min + fraction * (drag.max - drag.min)
+end
+
+--- What a drag says: the value the pointer is at, and only when it is not the one it was at
+--- last. A slider held past one of its ends is a slider whose value is not changing, and a
+--- callback told the same value a hundred times is the app building a screen a hundred times for
+--- a frame that says what the one before it said -- which, with a pointer held down and moved
+--- away, is a window that stops answering.
+---@param drag wonderland.plugin.Layout.Drag
+---@param x number
+---@param y number
+---@return any? message
+local function report(drag, x, y)
+	local value = valueAt(drag, x, y)
+
+	if value == drag.value then
+		return nil
+	end
+
+	drag.value = value
+	return drag.change(value)
+end
+
+--- The box a press on a slider is measured in, as the drag that goes with it: the box less its
+--- padding and its borders, which is the space a slider stacks its own children in, and less the
+--- nub as well when there is one, since the nub's own ends are the ends of the slider. The nub is
+--- the child the layout put where the value is, so the two agree on where a value is by both
+--- being worked out the same way: see the nub in `solveNode`.
+---@param screen wonderland.Layout.Screen
+---@param hit wonderland.plugin.Layout.Hit
+---@param element wonderland.Element
+---@return wonderland.plugin.Layout.Drag
+local function dragFor(screen, hit, element)
+	local node = hit.node
+	local across = node.direction == 0
+	local lead = across and node.paddingLeft or node.paddingTop
+	local trail = across and node.paddingRight or node.paddingBottom
+	local borders = across and (node.borderLeft + node.borderRight) or (node.borderTop + node.borderBottom)
+	local nub = 0
+
+	for at = 0, node.childCount - 1 do
+		local child = screen.nodes[screen.childIndices[node.firstChild + at - 1] - 1]
+
+		if child.thumb ~= 0 then
+			nub = across and child.width or child.height
+			break
+		end
+	end
+
+	return {
+		change = callbacks[element.onchange],
+		x = hit.absX + lead + (across and nub / 2 or 0),
+		y = hit.absY + lead + (across and 0 or nub / 2),
+		span = (across and node.width or node.height) - lead - trail - borders - nub,
+		vertical = not across,
+		min = element.min,
+		max = element.max,
+	}
+end
+
+--- What a value typed into a field is made of: one line until a break is typed into it.
+---@param value string
+---@param at number # Where the caret is: from nought, before the first byte, to its length
+---@return number # The byte the line the caret is on starts at
+local function lineStart(value, at)
+	local before = value:sub(1, at)
+	local break_ = before:find("\n[^\n]*$")
+
+	return break_ and break_ + 1 or 1
+end
+
+---@param value string
+---@param at number
+---@return number # And the byte that line ends at, which is the end of the value on the last one
+local function lineEnd(value, at)
+	local break_ = value:find("\n", at + 1, true)
+
+	return break_ and break_ - 1 or #value
+end
+
+--- The caret moved a line up or down, keeping how far into its line it was. It stays where it is
+--- at either end of the value, which is what having no line above or below it means. A caret is
+--- the gap before a byte, so how far into a line it is counts from the gap before the line.
+---@param value string
+---@param at number
+---@param by number
+---@return number
+local function lineAcross(value, at, by)
+	local start = lineStart(value, at)
+	local column = at - (start - 1)
+
+	if by < 0 then
+		if start == 1 then return at end
+
+		-- Up: the line above ends at the byte before the break that ended it.
+		local above = start - 2
+		local aboveStart = lineStart(value, above)
+
+		return math.min(aboveStart - 1 + column, above)
+	end
+
+	local stop = lineEnd(value, at)
+
+	if stop >= #value then return at end
+
+	local belowStart = stop + 2
+	local belowStop = lineEnd(value, belowStart)
+
+	return math.min(belowStart - 1 + column, belowStop)
+end
+
 ---@generic Message
 ---@param self wonderland.plugin.Layout<Message>
 ---@param event winit.Event
@@ -257,13 +402,18 @@ function Layout:event(event)
 
 		setPointer(ctx, event.x, event.y)
 
+		if ctx.dragging then
+			return report(ctx.dragging, event.x, event.y)
+		end
+
 		---@type table<wonderland.Element, wonderland.plugin.Layout.Hit>
 		local hoveredElements = {}
 		findElementsAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hoveredElements)
 
 		local anyWithMouseDown = false
 		for el, _ in pairs(hoveredElements) do
-			if bit.band(el.flags, TEXT_INPUT) ~= 0 or el.onmousedown ~= 0 or el.onclick ~= 0 then
+			if bit.band(el.flags, TEXT_INPUT) ~= 0 or bit.band(el.flags, SLIDE) ~= 0
+				or el.onmousedown ~= 0 or el.onclick ~= 0 then
 				anyWithMouseDown = true
 				break
 			end
@@ -331,6 +481,15 @@ function Layout:event(event)
 				return callbacks[info.element.onclick]
 			end
 
+			if bit.band(info.element.flags, SLIDE) ~= 0 then
+				-- The box is kept, not the pointer's place in it: a drag goes on where the pointer
+				-- goes, and it is measured along the box it started in.
+				local drag = dragFor(assert(ctx.screen), info, info.element)
+
+				ctx.dragging = drag
+				return report(drag, event.x, event.y)
+			end
+
 			local pressed = callbacks[info.element.onmousedown]
 
 			if pressed then
@@ -355,7 +514,15 @@ function Layout:event(event)
 				elseif key == "return" then
 					local submit = callbacks[element.onsubmit]
 
-					if submit then
+					-- A paragraph takes the break, and control with return is what sends it: a
+					-- field that is one line has nothing to break, so return sends it.
+					if bit.band(element.flags, MULTILINE) ~= 0
+						and not (event.modifiers and event.modifiers.ctrl) then
+						value = value:sub(1, cursor) .. "\n" .. value:sub(cursor + 1)
+						ctx.cursorPos = cursor + 1
+						local typed = callbacks[element.oninput]
+						if typed then return typed(value) end
+					elseif submit then
 						return submit(value)
 					end
 				elseif key == "backspace" then
@@ -378,10 +545,16 @@ function Layout:event(event)
 					ctx.cursorPos = math.min(#value, cursor + 1)
 					return { type = "_inputRefresh" }
 				elseif key == "home" then
-					ctx.cursorPos = 0
+					ctx.cursorPos = lineStart(value, cursor) - 1
 					return { type = "_inputRefresh" }
 				elseif key == "end" then
-					ctx.cursorPos = #value
+					ctx.cursorPos = lineEnd(value, cursor)
+					return { type = "_inputRefresh" }
+				elseif key == "up" then
+					ctx.cursorPos = lineAcross(value, cursor, -1)
+					return { type = "_inputRefresh" }
+				elseif key == "down" then
+					ctx.cursorPos = lineAcross(value, cursor, 1)
 					return { type = "_inputRefresh" }
 				elseif event.modifiers and event.modifiers.ctrl then
 					if key == "a" or key:byte(1) == 1 then
@@ -404,6 +577,13 @@ function Layout:event(event)
 	elseif event.name == "mouseRelease" then
 		local ctx = self.contexts[event.window]
 		setPointer(ctx, event.x, event.y, false)
+
+		local drag = ctx.dragging
+
+		if drag then
+			ctx.dragging = nil
+			return report(drag, event.x, event.y)
+		end
 
 		local info = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hasMouseUp)
 

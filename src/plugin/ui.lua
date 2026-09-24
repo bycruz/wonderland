@@ -1,16 +1,66 @@
+local ffi = require("ffi")
 local QuadBatch = require("wonderland.util.quad_batch")
+
+-- When a frame went out, on a clock that keeps running while the process does not. A window that
+-- is waiting for the next event uses no time at all, and it is that wait the frame after it is
+-- measured against: `os.clock` counts the work the process has done, so a window that sat idle
+-- for a second would say a frame had just gone out -- and refuse every frame after it, which is
+-- a window that stops answering. The call that has that time is the same on every platform but
+-- its name, and it is the time since some fixed point, which is all a difference needs.
+ffi.cdef [[
+	struct wl_timeval { long tv_sec; long tv_usec; };
+	int gettimeofday(struct wl_timeval *time, void *zone);
+	unsigned long long GetTickCount64(void);
+]]
+
+--- The two halves of a time, as that call writes them. The language server cannot see an
+--- ffi.cdef, so the fields are spelled out here: it is the only way to get them checked.
+---@class wonderland.plugin.UI.Timeval: ffi.cdata*
+---@field tv_sec number
+---@field tv_usec number
+
+local native = ffi.os == "Windows" and ffi.load("kernel32") or ffi.C
+-- ffi.new is typed as a bare pointer, so the fields it has are the ones spelled out above.
+---@diagnostic disable-next-line: assign-type-mismatch
+local timeval = ffi.new("struct wl_timeval") ---@type wonderland.plugin.UI.Timeval
+
+---@return number # Seconds, for telling one moment from another
+local function now()
+	if ffi.os == "Windows" then
+		return tonumber(native.GetTickCount64()) / 1000
+	end
+
+	native.gettimeofday(timeval, nil)
+
+	return tonumber(timeval.tv_sec) + tonumber(timeval.tv_usec) / 1000000
+end
 
 ---@class wonderland.plugin.UI: wonderland.Plugin
 ---@field layoutPlugin wonderland.plugin.Layout
 ---@field renderPlugin wonderland.plugin.Render
 ---@field batch wonderland.QuadBatch
+---@field frameInterval number # The least time between frames, in seconds: see `UI:requestRedraw`
 local UI = {}
 UI.__index = UI
+
+-- A display shows a frame for a frame's time. A present that waits for the display is what keeps
+-- a window to that on most platforms, and the ones where it does not -- X11 handing frames over
+-- without waiting for one, which is what XWayland does -- leave the app free to hand over as many
+-- frames as it is asked for. A pointer dragged across a window is a thousand events a second, so
+-- without this it is a thousand frames a second for a display that shows sixty: the compositor is
+-- given more than it can show, and a driver that keeps something for every present is given more
+-- than it can hold -- which is a window that stops answering after a few seconds of dragging.
+local FRAME_INTERVAL = 1 / 60
 
 ---@param layoutPlugin wonderland.plugin.Layout
 ---@param renderPlugin wonderland.plugin.Render
 function UI.new(layoutPlugin, renderPlugin)
-	return setmetatable({ layoutPlugin = layoutPlugin, renderPlugin = renderPlugin, batch = QuadBatch.new() }, UI)
+	return setmetatable({
+		layoutPlugin = layoutPlugin,
+		renderPlugin = renderPlugin,
+		batch = QuadBatch.new(),
+		frameInterval = FRAME_INTERVAL,
+	}, UI)
 end
 
 ---@param pos number
@@ -175,7 +225,9 @@ local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowW
 		0, 0, 1, 1)
 end
 
---- A line is drawn from the run it measured into, which is where its glyphs are.
+--- A line is drawn from the run it measured into, which is where its glyphs are. A run of
+--- several lines is drawn line by line, each of them placed in the box on its own: a line that
+--- is not as wide as the box is aligned by its own width, not by the widest one in the run.
 ---@param batch wonderland.QuadBatch
 ---@param run wonderland.font.Run
 ---@param node wonderland.Node
@@ -190,26 +242,30 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 	local font = node.font ~= 0 and (node.font - 1)
 		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
 
-	-- A line may be given more room than it needs, and then it says where in that room
-	-- the line sits.
-	local offset = 0
-	if node.justify == 1 then
-		offset = math.floor((node.width - run.width) / 2 + 0.5)
-	elseif node.justify == 2 then
-		offset = node.width - run.width
-	end
-
-	local originX, originY = x + offset, y
 	local zIndex = convertZ(z)
 
-	-- One array of glyphs, read by index: the run was measured as structs, so drawing a
-	-- line costs a handful of loads rather than a table lookup per glyph.
-	for index = 0, run.count - 1 do
-		local glyph = run.glyphs[index]
+	-- One array of glyphs and one of lines, read by index: the run was measured as structs, so
+	-- drawing a line costs a handful of loads rather than a table lookup per glyph.
+	for lineIndex = 0, run.lineCount - 1 do
+		local line = run.lines[lineIndex]
 
-		clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, originY + glyph.y,
-			originX + glyph.x + glyph.width, originY + glyph.y + glyph.height, zIndex, r, g, b,
-			node.fgA / 255, font, glyph.u0, glyph.v0, glyph.u1, glyph.v1)
+		-- A line may be given more room than it needs, and then it says where in that room it sits.
+		local offset = 0
+		if node.justify == 1 then
+			offset = math.floor((node.width - line.width) / 2 + 0.5)
+		elseif node.justify == 2 then
+			offset = node.width - line.width
+		end
+
+		local originX = x + offset
+
+		for at = 0, line.count - 1 do
+			local glyph = assert(run.glyphs)[line.first + at]
+
+			clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, y + glyph.y,
+				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, r, g, b,
+				node.fgA / 255, font, glyph.u0, glyph.v0, glyph.u1, glyph.v1)
+		end
 	end
 end
 
@@ -335,7 +391,33 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 end
 
 
-function UI:requestRedraw(window)
+--- A frame is asked for, at most one for each frame the display has time to show. What the
+--- question is asked about is a window, so what says when the last frame went out is kept with it.
+--- A frame asked for before that time is not lost: what the screen says goes into the frame that
+--- is still to come, and the event after this one asks again.
+---@param window wonderland.RenderWindow
+---@param forced boolean? # Whether the frame is the window's own, which is not held back
+function UI:requestRedraw(window, forced)
+	local ctx = self.layoutPlugin.contexts[window]
+	local at = now()
+
+	if ctx then
+		-- Whether the screen is what asked for the frame: a frame asked for by the screen is one
+		-- that may not be worth drawing, and one asked for by the window is not.
+		ctx.asked = true
+
+		-- A frame the window manager asked for is the display's own time: one that was held back
+		-- for coming too soon is the one that goes out then, so what a window shows is the state
+		-- its events left rather than the state they left a frame ago.
+		if not forced and not window.frameAsked and at - (ctx.framedAt or 0) < self.frameInterval then
+			ctx.owed = true
+			return
+		end
+
+		ctx.owed = false
+		ctx.framedAt = at
+	end
+
 	window.shouldRedraw = true -- shh. I'll figure out a way to make this use the eventhandler later.
 end
 
@@ -344,6 +426,12 @@ end
 --- is. Both are another repaint, and a repaint that comes out the same as the last one costs a
 --- solve and no more, so this does not have to be clever about which of them changed anything.
 ---
+--- The screen is not built here, though: what these events change is what the *frame* is built
+--- from, and a frame is built once however many events asked for it. A pointer dragged across a
+--- window is hundreds of events a second and a frame each is sixty, so a screen built per event is
+--- a window that falls further behind the pointer the faster it is dragged -- and, once the events
+--- arrive faster than a screen is built, one that never draws at all.
+---
 --- The layout is asked before this is, because the plugins are asked in the order they were
 --- added, and it is the layout that says where the pointer is.
 ---@param event winit.Event
@@ -351,22 +439,33 @@ end
 function UI:event(event, _handler)
 	local name = event.name
 
+	if name == "redraw" then
+		return self:frame(event.window)
+	end
+
 	if name == "resize" or name == "mouseMove" or name == "mousePress"
 		or name == "mouseRelease" or name == "focusOut" then
-		self:refreshView(event.window)
+		-- A resize is the window rather than what the screen says, and how often it happens is
+		-- the window manager's -- a size a frame is shown at, at worst -- so it is not rationed
+		-- by the frame's time: a resize held back for coming too soon is a window left at the
+		-- size it had, which is a window that looks frozen for as long as nothing else happens.
+		self:requestRedraw(event.window, name == "resize")
 	end
 end
 
+--- The screen the state says, built for the gpu: this is where a repaint starts. It is the frame
+--- that asks for it, once for each frame, which is what keeps the build off the events: see
+--- `wonderland.plugin.UI:event`.
 ---@param window wonderland.RenderWindow
-function UI:refreshView(window)
-	-- The screen is built and laid out again first: this is where a repaint starts.
+---@return boolean changed # Whether what the gpu has is not this frame
+function UI:build(window)
 	self.layoutPlugin:refreshView(window)
 
 	local ctx = self.layoutPlugin.contexts[window]
 
 	-- Nothing to draw for a window no screen was made in.
 	if not ctx then
-		return
+		return false
 	end
 
 	-- The font a line is drawn in is looked up only when there is a line to draw, so a
@@ -379,22 +478,59 @@ function UI:refreshView(window)
 	-- quads built and nothing uploaded: that is the whole point of the layout being one
 	-- flat array of plain data. The first frame is always built, whatever it says, because
 	-- a window that has never been given a frame has nothing to show.
-	if screen.changed or not ctx.uploaded then
-		self.batch:reset()
-		self.batch:setViewport(window.width, window.height)
-		generateNodeQuads(self.batch, screen, { left = 0, top = 0, right = window.width, bottom = window.height },
-			assert(ctx.root), 0, 0, window.width, window.height, nil, fontManager)
+	if not (screen.changed or not ctx.uploaded) then
+		return false
+	end
 
-		self.renderPlugin:setRenderData(window, self.batch)
-		ctx.uploaded = true
+	self.batch:reset()
+	self.batch:setViewport(window.width, window.height)
+	generateNodeQuads(self.batch, screen, { left = 0, top = 0, right = window.width, bottom = window.height },
+		assert(ctx.root), 0, 0, window.width, window.height, nil, fontManager)
 
-		-- A frame is asked for only when the one the gpu has is not the one the screen solves
-		-- to. Everything that can repaint goes through here -- a click, a resize, the pointer
-		-- moving -- and most of those come out the same as the last one: a pointer that moved
-		-- across the same element, a window resized back to the size it was, a message that
-		-- changed nothing the screen shows. Asking the window to draw those would spend a
-		-- frame on nothing and, worse, spend it waiting for the display, which is time the
-		-- next event spends queued behind it. That is what made the pointer feel slow.
+	self.renderPlugin:setRenderData(window, self.batch)
+	ctx.uploaded = true
+
+	return true
+end
+
+--- One frame of a window: the screen the state says, built, and then drawn -- which is the whole
+--- of what a window that nothing has happened to does when it is asked to draw again.
+---
+--- A frame the *screen* asked for that came out the same as the one already on screen is not
+--- drawn: a pointer that moved across an element that does not change for it, a message that
+--- changed nothing the screen shows, and a window drawn again for a frame that is already there
+--- are frames that would show nothing new, and drawing one spends the display's time on it --
+--- which is time the events behind it spend queued. A frame the *window* asked for is drawn
+--- whatever it comes out to, because what it is for is a window that lost what it was showing:
+--- an expose, a surface the gpu is not ready to draw into yet.
+---@param window wonderland.RenderWindow
+function UI:frame(window)
+	local ctx = self.layoutPlugin.contexts[window]
+
+	if not ctx then
+		return
+	end
+
+	-- An ask is answered by the frame that comes out of it, which is where the window is told the
+	-- frame is ready: see `X11Window:acknowledgeSync`, which is what puts the ask away.
+	local asked = ctx.asked or window.frameAsked
+
+	ctx.asked = nil
+
+	if not (self:build(window) or not asked or not ctx.presented) then
+		return
+	end
+
+	ctx.presented = true
+	ctx.framedAt = now()
+	self.renderPlugin:draw(assert(self.renderPlugin:getContext(window)))
+end
+
+--- A repaint that is not a frame: a window being registered, or a screen drawn by hand. The
+--- screen is built, and the frame it came out to is asked for, which is what a window loop draws.
+---@param window wonderland.RenderWindow
+function UI:refreshView(window)
+	if self:build(window) then
 		self:requestRedraw(window)
 	end
 end

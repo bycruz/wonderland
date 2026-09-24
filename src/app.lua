@@ -215,9 +215,9 @@ end
 --- is handed to the app's own `event`, if it has one. The first message either of them hands
 --- back is the one update is given.
 ---
---- The shell does nothing with an event itself: a window being drawn is the render plugin's,
---- and one that changed size is the ui plugin's, so this is a walk down the plugins and then,
---- for whatever none of them claimed, the app.
+--- The shell does nothing with an event itself: a window being drawn is the ui plugin's, and one
+--- that changed size is the ui plugin's too, so this is a walk down the plugins and then, for
+--- whatever none of them claimed, the app.
 ---@param event winit.Event
 ---@param handler winit.EventManager
 ---@return any
@@ -237,9 +237,12 @@ function App:dispatch(event, handler)
 	end
 end
 
---- A message is what an event came to: the app does what it does with it, and the screen is
---- laid out and drawn again, because the view is a function of the state. A screen that comes
---- out the same as the one before it is not uploaded, so that costs the layout and no more.
+--- A message is what an event came to: the app does what it does with it, and the frame that
+--- shows what it did is asked for -- not built, because a frame is built once however many
+--- events asked for one, and a drag is hundreds of them. See `app.run`: the loop is what turns
+--- what the events asked for into the frames that come out of it. A screen that comes out the
+--- same as the one before it is not uploaded, so a frame that changed nothing costs the layout
+--- and no more.
 ---@param message any
 ---@param window winit.Window
 ---@return wonderland.Task?
@@ -251,7 +254,7 @@ function App:handle(message, window)
 	local task = self.update and self:update(message, window)
 
 	if self.uiPlugin then
-		self.uiPlugin:refreshView(window)
+		self.uiPlugin:requestRedraw(window)
 	end
 
 	return task
@@ -280,10 +283,22 @@ function app.run(self)
 	local eventLoop = winit.EventLoop.new()
 	winit.Window.fromEventLoop(eventLoop)
 
-	eventLoop:run(function(event, handler)
-		handler:setMode("poll")
+	-- Whether events are coming in faster than the loop can take them one at a time, which is what
+	-- decides whether the loop waits for the next event or takes what is already queued. Only an
+	-- event that came to something counts: a pointer being moved is an event either way, and an
+	-- event that changed nothing is one the loop should wait out rather than take more of.
+	local flowed = false
 
+	eventLoop:run(function(event, handler)
+		-- A frame is a screen, and a screen is built once for it: what an event does is what the
+		-- app does with the message it came to, and what it leaves behind is the frame the loop
+		-- draws next. See `App:handle`, which is where that frame is asked for.
 		local message = self:dispatch(event, handler)
+
+		if message and event.window then
+			flowed = true
+		end
+
 		if message then
 			local task = self:handle(message, event.window)
 
@@ -299,14 +314,18 @@ function app.run(self)
 			end
 		end
 
-		-- Whether the loop waits for the next event or takes what is already queued. Waiting is
-		-- what an idle window does, and it is what keeps a screen that nothing has happened to
-		-- from spinning. Taking what is queued is what a burst is for: a wheel turned hard is
-		-- dozens of events, and waiting between them means a frame each, drawn from a state that
-		-- is already behind the events -- which is what makes a fast scroll lag behind the wheel.
-		local owes = event.window ~= nil and event.window.shouldRedraw
-
-		handler:setMode(owes and "poll" or "wait")
+		if event.name == "aboutToWait" then
+			-- Whether the loop waits for the next event or takes what is already queued. Waiting is
+			-- what an idle window does, and it is what keeps a screen that nothing has happened to
+			-- from spinning. Taking what is queued is what a burst is for, and a pointer being
+			-- dragged across a window is one: its events are taken in one go, so the frame that
+			-- comes out of them is the pointer where it is now rather than a frame per event, each
+			-- one drawn -- and each one waiting for the display -- from a state already behind the
+			-- one the event after it left. That is what makes a drag lag behind the pointer, and
+			-- what a wheel turned hard was made to stop doing.
+			handler:setMode(flowed and "poll" or "wait")
+			flowed = false
+		end
 	end)
 end
 

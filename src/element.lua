@@ -26,9 +26,11 @@ ffi.cdef [[
 		uint32_t text, name, inputValue;  // strings of this frame, by handle
 		uint32_t run;                // the line it measured into, by handle
 		uint32_t childFirst, childCount, nextSibling;  // the children, as a chain
-		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit;
+		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit, onchange;
 		uint32_t userdata;           // whatever the app carries, by handle
 		double scrollOffset;         // how far its content is scrolled up, 0 for not
+		double sliderValue;          // where a slider of an element is, and the values its
+		double min, max;             // two ends are, which its dragging is reported between
 		uint32_t fontId;             // the font its text is measured in, from the top down
 		uint32_t flags;              // hovered, pressed, focused, takes typing
 		uint32_t index;              // which element this is, from one
@@ -40,6 +42,20 @@ ffi.cdef [[
 -- so this is what the layout reads to pick which style it is.
 element.HOVERED, element.PRESSED, element.FOCUSED, element.TEXT_INPUT = 1, 2, 4, 8
 element.SCROLLS = 16
+
+--- A field that takes more than one line: what it is typed into is one string with breaks in
+--- it, and a break is what return types rather than what submits it.
+element.MULTILINE = 32
+
+--- A box that is dragged along: pressing in it, and moving while pressed, says where in it the
+--- pointer is. What that means -- a value, a position, a level -- is the app's.
+element.SLIDE = 64
+
+--- The nub of a slider: a child of one, which is put where the slider's value is rather than
+--- wherever the layout would have stacked it. The box it travels across is the slider's own --
+--- less the nub, so the ends of the box are the ends of the slider -- and how wide that box came
+--- out is the one thing an app cannot work out for itself, which is why the layout does this.
+element.THUMB = 128
 
 --- One element, as the arena holds it. The language server cannot see an ffi.cdef, so the
 --- fields are spelled out here: it is the only way to get them checked. The ones that
@@ -63,6 +79,10 @@ element.SCROLLS = 16
 ---@field onmouseup number
 ---@field ondblclick number
 ---@field oninput number
+---@field onchange number
+---@field sliderValue number # Where a slider is: the value, as the app last said
+---@field min number # And the values its two ends are
+---@field max number
 ---@field onsubmit number
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
@@ -78,6 +98,8 @@ element.SCROLLS = 16
 ---@field named fun(self: wonderland.Element, name: string): wonderland.Element
 ---@field data fun(self: wonderland.Element, data: any): wonderland.Element
 ---@field input fun(self: wonderland.Element, opts: wonderland.InputOpts<any>): wonderland.Element
+---@field slider fun(self: wonderland.Element, opts: wonderland.SliderOpts<any>): wonderland.Element
+---@field thumb fun(self: wonderland.Element): wonderland.Element
 ---@field scroll fun(self: wonderland.Element, offset: number): wonderland.Element
 ---@field onMouseMove fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onClick fun(self: wonderland.Element, message: any): wonderland.Element
@@ -468,22 +490,74 @@ end
 ---@class wonderland.InputOpts<T>
 ---@field name string
 ---@field value string
+---@field multiline boolean? # Whether return should break the line instead of submitting it
 ---@field oninput fun(value: string): T
 ---@field onsubmit fun(value: string): T
 
 --- Takes the keyboard, and sends what is typed. It is called `input` rather than `textInput`
 --- because a field of an element is read before a call is asked for, and it is the call an app
---- makes.
+--- makes. With `multiline` the field is a paragraph: return breaks the line rather than sending
+--- it, and control with return is what sends it.
 ---@generic T
 ---@param opts wonderland.InputOpts<T>
 ---@return wonderland.Element
 function methods:input(opts)
 	check(self)
 	self.flags = bit.bor(self.flags, element.TEXT_INPUT)
+
+	if opts.multiline then
+		self.flags = bit.bor(self.flags, element.MULTILINE)
+	end
+
 	self.name = pushString(opts.name)
 	self.inputValue = pushString(opts.value or "")
 	self.oninput = pushCallback(opts.oninput)
 	self.onsubmit = pushCallback(opts.onsubmit)
+
+	return self
+end
+
+---@class wonderland.SliderOpts<T>
+---@field value number # Where the slider is, as a number between the two ends of it
+---@field min number? # The value at the left end, nought by default
+---@field max number? # And the one at the right end, one by default
+---@field onchange fun(value: number): T
+
+--- A slider: the box reports where in it the pointer was pressed and dragged, in pixels, as the
+--- value between `min` and `max` that sits there. What is drawn -- a track, a filled part, a
+--- nub -- is the app's, as the look of a field is: an element here is a box and how it behaves.
+---
+---   local value = 0.4
+---
+---   div():style(track):slider({ value = value, onchange = function(now) return { type = "volume", value = now } end })
+---     :children({
+---       div():style(fill):wrel(value),
+---       div():style(nub):thumb(),
+---     })
+---
+--- The nub is the app's too, and is a child of the slider marked with `:thumb()`: the layout puts
+--- it where the value is, which is the only part of a slider an app cannot lay out itself, since
+--- it cannot know how wide the box the slider was given came out.
+---@generic T
+---@param opts wonderland.SliderOpts<T>
+---@return wonderland.Element
+function methods:slider(opts)
+	check(self)
+	self.flags = bit.bor(self.flags, element.SLIDE)
+	self.sliderValue = opts.value
+	self.min, self.max = opts.min or 0, opts.max or 1
+	self.onchange = pushCallback(opts.onchange)
+
+	return self
+end
+
+--- Marks an element as a slider's nub, which is where the slider puts it: across the box less the
+--- nub itself, so the nub's ends are the ends of the slider. Anywhere but inside a slider it is a
+--- flag nothing reads, and the element stays where the layout stacked it.
+---@return wonderland.Element
+function methods:thumb()
+	check(self)
+	self.flags = bit.bor(self.flags, element.THUMB)
 
 	return self
 end
