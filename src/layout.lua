@@ -26,6 +26,7 @@ local ABS, REL, AUTO = style.ABS, style.REL, style.AUTO
 local PRESENT = style.PRESENT
 local SCROLLS = wonderlandElement.SCROLLS
 local SLIDE, THUMB = wonderlandElement.SLIDE, wonderlandElement.THUMB
+local GROWS = wonderlandElement.GROWS
 local WIDTH, HEIGHT = PRESENT.width, PRESENT.height
 
 -- Which style array the nodes are read out of. It is replaced when the arena grows, and
@@ -544,6 +545,24 @@ function Screen:build(element, fgR, fgG, fgB, fgA, font)
 
 	if measured ~= nil then
 		sizeToRun(self, entry, node, measured)
+	end
+
+	-- A field that is as tall as what is typed into it: the height its style gave it is not what
+	-- the box is, what has been typed into it is -- up to the lines it is held to, which is the
+	-- last of it that shows. The value was measured with everything else the frame draws, in the
+	-- font it is drawn in, so the box comes out exactly as tall as the text in it.
+	local valueRun = runs[element.valueRun]
+
+	if valueRun ~= nil and bit.band(element.flags, GROWS) ~= 0 then
+		local lines = valueRun.lineCount
+		local most = element.maxLines
+
+		if most > 0 and lines > most then
+			lines = most
+		end
+
+		entry.heightUnit, entry.wantHeight = ABS, valueRun.height * lines / valueRun.lineCount
+			+ entry.paddingTop + entry.paddingBottom + entry.borderTop + entry.borderBottom
 	end
 
 	local firstChild = self.childCount + 1

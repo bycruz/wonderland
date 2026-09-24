@@ -90,6 +90,12 @@ end
 ---@field y number
 ---@field pressed boolean
 
+--- A point in a window, which is what a click in a field leaves behind for the ui to place the
+--- caret from: the layout knows which field was clicked, and the ui knows where the text of it is.
+---@class wonderland.plugin.Layout.Point
+---@field x number
+---@field y number
+
 ---@class wonderland.plugin.Layout.Context
 ---@field lastPressTime any
 ---@field lastPressElement any
@@ -113,20 +119,90 @@ end
 ---@field pointing boolean? # Whether the pointer cursor is the one for something clickable
 ---@field cursorPos number
 ---@field typed string? # What has been typed into the focused field since the frame that built it
+---@field caretClick wonderland.plugin.Layout.Point? # Where a field was clicked, until the ui has placed the caret from it
+---@field repeatKey string? # The key held down in the focused field, which is what the library repeats
+---@field repeatMods winit.KeyModifiers? # And the modifiers it went down with
+---@field repeatAt number? # When the next one of them is due, on the ui's clock: nothing of it means the hold has just begun
+---@field repeatTyped string? # And what the key it is repeating types, which is not always the key: see `typedBy`
 ---@field lastPressX any
 ---@field lastPressY any
+
+-- How a key that is held repeats: the wait before it starts at all, and how long there is between
+-- the ones after it. The wait is what tells one key from a hold of it -- a key that lingers as long
+-- as this is a key someone is holding -- so it is the wait a keyboard has for its own repeats rather
+-- than anything shorter: a tap that ended up typing twice because a hand was slow to come off the
+-- key is a worse thing than a hold that takes half a second to start. A display's own setting is half a second and then a rate slow enough to watch
+-- -- twenty-five a second, on a keyboard set up as most are -- so a backspace held down takes a
+-- character at a time at a rate the eye follows rather than one that reads as "it is deleting".
+--
+-- The interval is two frames' time, which is a character every other frame at a display's sixty a
+-- second: even to look at, because every one of them lands on a frame that was going to be drawn
+-- anyway, and slower than the keyboard's own rate rather than faster -- a hold that takes a line
+-- before it can be watched going is a worse thing to do to a field than a slow repeat is. Nought
+-- for the interval turns the library's repeat off, and a held key is then whatever the keyboard
+-- itself does with it.
+local KEY_REPEAT_DELAY = 0.5
+local KEY_REPEAT_INTERVAL = 1 / 30
+
+-- The keys a held key repeats, by name: what moves the caret and what takes a character away, which
+-- is what is done over and over while one is held down.
+local REPEATS = {
+	backspace = true,
+	delete = true,
+	left = true,
+	right = true,
+	up = true,
+	down = true,
+}
+
+--- Whether a key is one a hold repeats: what it does is done again and again while it is held, as
+--- opposed to what happens once. A character is one of them -- holding a letter is typing it, and
+--- what a screen should do with that is tell the field at the rate it can show rather than at the
+--- rate the keyboard manages -- and so is what moves the caret or takes a character away. What is
+--- not: return, which sends what is in the field, and a chord held with control, which is a command
+--- rather than a letter.
+---@param key string
+---@param modifiers winit.KeyModifiers?
+---@param typed string? # What the key types, where it types something: see `typedBy`
+---@return boolean
+local function repeats(key, modifiers, typed)
+	if modifiers ~= nil and modifiers.ctrl then
+		return false
+	end
+
+	if REPEATS[key] then
+		return true
+	end
+
+	-- A key that types a character is one, whatever it is called: what it does is what a hold does
+	-- over and over. A key named at length that types nothing is a key of its own -- an arrow, a
+	-- function key, return -- and none of those is a character.
+	if typed ~= nil then
+		return true
+	end
+
+	return key == "space" or (#key == 1 and key:byte(1) >= 32)
+end
 
 ---@class wonderland.plugin.Layout<Message>: wonderland.Plugin
 ---@field textPlugin wonderland.plugin.Text
 ---@field view fun(window: wonderland.RenderWindow): wonderland.Element<Message>
 ---@field contexts table<wonderland.RenderWindow, wonderland.plugin.Layout.Context>
+---@field keyRepeatDelay number # The wait before a held key repeats, in seconds
+---@field keyRepeatInterval number # And the time between the repeats after it, nought for none of them
 local Layout = {}
 Layout.__index = Layout
 
 ---@param view fun(window: wonderland.RenderWindow): wonderland.Element
 ---@param textPlugin wonderland.plugin.Text
 function Layout.new(view, textPlugin) ---@return wonderland.plugin.Layout
-	return setmetatable({ view = view, contexts = {}, textPlugin = textPlugin }, Layout)
+	return setmetatable({
+		view = view,
+		contexts = {},
+		textPlugin = textPlugin,
+		keyRepeatDelay = KEY_REPEAT_DELAY,
+		keyRepeatInterval = KEY_REPEAT_INTERVAL,
+	}, Layout)
 end
 
 ---@param window wonderland.RenderWindow
@@ -157,6 +233,8 @@ function Layout:setFocus(window, id)
 	ctx.focusedName = id
 	ctx.cursorPos = 0
 	ctx.typed = nil
+	ctx.caretClick = nil
+	ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 end
 
 ---@param window wonderland.RenderWindow
@@ -365,6 +443,37 @@ local function lineEnd(value, at)
 	return break_ and break_ - 1 or #value
 end
 
+--- What a key types, where it types something a field takes: the text the keyboard made of the key,
+--- which is not the key -- shift and 1 is the key 1 pressed and "!" typed -- or nothing, which is
+--- every key that types nothing of its own and every key whose name is what it does. A character
+--- that is not printable is not typed either: what a key makes of control belongs to whoever reads
+--- the chord, and the chord is read here.
+---@param event winit.Event
+---@return string?
+local function typedBy(event)
+	local text = event.text
+
+	if text ~= nil and #text == 1 and text:byte(1) >= 32 then
+		return text
+	end
+
+	return nil
+end
+
+--- How many lines a value is: one, and one more for every break in it. What a field is held to is
+--- counted in lines, and a value of no breaks is one line however long it is.
+---@param value string
+---@return number
+local function lineCount(value)
+	local count = 1
+
+	for _ in value:gmatch("\n") do
+		count = count + 1
+	end
+
+	return count
+end
+
 --- The caret moved a line up or down, keeping how far into its line it was. It stays where it is
 --- at either end of the value, which is what having no line above or below it means. A caret is
 --- the gap before a byte, so how far into a line it is counts from the gap before the line.
@@ -420,13 +529,164 @@ function Layout:getCaret(window)
 
 	local value = wonderlandElement.inputOf(element)
 	local start = lineStart(value, ctx.cursorPos)
-	local line = 0
-
-	for _ in value:sub(1, start - 1):gmatch("\n") do
-		line = line + 1
-	end
+	local line = lineCount(value:sub(1, start - 1)) - 1
 
 	return element, line, ctx.cursorPos - (start - 1)
+end
+
+--- The caret put where a line and a column of the value are, which is what a click in a field comes
+--- to: the ui is what walks the text a field draws, so it is the ui that says which line and which
+--- character of it a point is at, and the byte the caret is at is what that comes to. A column past
+--- the end of its line is the end of that line, and a line the value does not have is nowhere: the
+--- caret stays where it was rather than being put at a byte that is not there.
+---@param window wonderland.RenderWindow
+---@param line number
+---@param column number
+function Layout:setCaret(window, line, column)
+	local ctx = self.contexts[window]
+
+	if not ctx or not ctx.focusedName or ctx.ui == nil then
+		return
+	end
+
+	local element = findElementById(ctx.ui, ctx.focusedName)
+
+	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
+		return
+	end
+
+	-- The value as the keys before this frame have left it, as everywhere else a key is handled.
+	local value = ctx.typed or wonderlandElement.inputOf(element)
+	local start = 1
+
+	for _ = 1, line do
+		local break_ = value:find("\n", start, true)
+
+		if not break_ then
+			return
+		end
+
+		start = break_ + 1
+	end
+
+	ctx.cursorPos = math.min(start - 1 + column, lineEnd(value, start - 1))
+end
+
+--- What a key does to the field that has the keyboard, as the message the app is told. It is one
+--- call rather than the body of an event handler because one key is handled more than once: the
+--- display repeats a held key, and so does the library -- see `Layout:event`, which says what is
+--- repeating, and `UI:tick`, which is what has the clock -- and every one of those is the same key
+--- doing the same thing to the value the one before it left.
+---@param window wonderland.RenderWindow
+---@param key string # The key itself, which is what a named key is handled as
+---@param modifiers winit.KeyModifiers?
+---@param typed string # What the key types, which is what a field takes of it and not always the key: the key itself where it types nothing of its own
+---@return any? message
+function Layout:key(window, key, modifiers, typed)
+	local ctx = self.contexts[window]
+
+	if not ctx or not ctx.focusedName then
+		return nil
+	end
+
+	local element = findElementById(ctx.ui, ctx.focusedName)
+
+	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
+		return nil
+	end
+
+	-- What is typed into is the value as it is now, which is not necessarily the one the last frame
+	-- drew: a key is handled as it arrives, and a key held down arrives several times between two
+	-- frames. Every key applied to the field the frame drew would apply it to the same value over
+	-- and over -- a backspace held down taking the same character each time while the caret walks
+	-- back, which is a caret that leaves the text behind rather than deleting it.
+	local value = ctx.typed or wonderlandElement.inputOf(element)
+	local cursor = ctx.cursorPos
+
+	--- The value an edit left the field with, kept for the keys before the next frame and
+	--- reported to the app.
+	---@param edited string
+	---@return any?
+	local function edit(edited)
+		ctx.typed = edited
+
+		local handler = callbacks[element.oninput]
+
+		return handler and handler(edited) or { type = "_inputRefresh" }
+	end
+
+	if key == "escape" then
+		ctx.focusedName = nil
+		ctx.cursorPos = 0
+		return { type = "_inputRefresh" }
+	elseif key == "return" then
+		local submit = callbacks[element.onsubmit]
+
+		-- A paragraph takes the break, and control with return is what sends it: a
+		-- field that is one line has nothing to break, so return sends it.
+		if bit.band(element.flags, MULTILINE) ~= 0 and not (modifiers and modifiers.ctrl) then
+			-- Up to the lines the field is held to: a paragraph with a limit on it is one whose
+			-- last line is the last line, so a break typed at the end of it is a key that does
+			-- nothing rather than a line that is drawn past the box it was given.
+			local most = element.maxLines
+
+			if most > 0 and lineCount(value) >= most then
+				return nil
+			end
+
+			value = value:sub(1, cursor) .. "\n" .. value:sub(cursor + 1)
+			ctx.cursorPos = cursor + 1
+			return edit(value)
+		elseif submit then
+			return submit(value)
+		end
+	elseif key == "backspace" then
+		if cursor > 0 then
+			value = value:sub(1, cursor - 1) .. value:sub(cursor + 1)
+			ctx.cursorPos = cursor - 1
+			return edit(value)
+		end
+	elseif key == "delete" then
+		if cursor < #value then
+			value = value:sub(1, cursor) .. value:sub(cursor + 2)
+			return edit(value)
+		end
+	elseif key == "left" then
+		ctx.cursorPos = math.max(0, cursor - 1)
+		return { type = "_inputRefresh" }
+	elseif key == "right" then
+		ctx.cursorPos = math.min(#value, cursor + 1)
+		return { type = "_inputRefresh" }
+	elseif key == "home" then
+		ctx.cursorPos = lineStart(value, cursor) - 1
+		return { type = "_inputRefresh" }
+	elseif key == "end" then
+		ctx.cursorPos = lineEnd(value, cursor)
+		return { type = "_inputRefresh" }
+	elseif key == "up" then
+		ctx.cursorPos = lineAcross(value, cursor, -1)
+		return { type = "_inputRefresh" }
+	elseif key == "down" then
+		ctx.cursorPos = lineAcross(value, cursor, 1)
+		return { type = "_inputRefresh" }
+	elseif modifiers and modifiers.ctrl then
+		if key == "a" or key:byte(1) == 1 then
+			ctx.cursorPos = #value
+			return { type = "_inputRefresh" }
+		end
+	elseif key == "space" then
+		value = value:sub(1, cursor) .. " " .. value:sub(cursor + 1)
+		ctx.cursorPos = cursor + 1
+		return edit(value)
+	elseif #typed == 1 and typed:byte(1) >= 32 then
+		-- A single character is typed, and what it is is what the key types rather than what the key
+		-- is: shift and 1 is named 1 and types "!". A key that types nothing of its own is handed its
+		-- own name as that, which is a key of one character or a key of none -- and a key of none is
+		-- one with something else to do, which the branches above have already done.
+		value = value:sub(1, cursor) .. typed .. value:sub(cursor + 1)
+		ctx.cursorPos = cursor + #typed
+		return edit(value)
+	end
 end
 
 ---@generic Message
@@ -440,6 +700,11 @@ function Layout:event(event)
 
 		if ctx then
 			ctx.pointer = nil
+
+			-- The window does not have the keyboard any more either, so a key that was held down in
+			-- it is not held down in it: what repeats stops, and a key released while the window is
+			-- away comes back as a release that nothing is repeating.
+			ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 		end
 	elseif event.name == "mouseMove" then
 		local ctx = self.contexts[event.window]
@@ -496,12 +761,23 @@ function Layout:event(event)
 		-- Update focus: set on text input click, clear otherwise
 		if info and bit.band(info.element.flags, TEXT_INPUT) ~= 0 then
 			ctx.focusedName = wonderlandElement.nameOf(info.element)
+			-- Where in what it holds the pointer is, which is not something the layout can work
+			-- out: the text a field draws is the app's, and which line and which character of it a
+			-- point is at comes from the run the ui walks. Until the ui has placed the caret from
+			-- it, the caret is at the end of the value -- which is what a field that draws none
+			-- gets, and what every click in one did before the ui knew about it.
+			ctx.caretClick = { x = event.x, y = event.y }
 			ctx.cursorPos = #wonderlandElement.inputOf(info.element)
 			ctx.typed = nil
 		else
 			ctx.focusedName = nil
 			ctx.cursorPos = 0
+			ctx.caretClick = nil
 		end
+
+		-- A press is the hand leaving the keyboard: what was repeating stops, whether or not it
+		-- was the field that was pressed.
+		ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 
 		if info then
 			local now = os.clock()
@@ -546,92 +822,49 @@ function Layout:event(event)
 		end
 	elseif event.name == "keyPress" then
 		local ctx = self.contexts[event.window]
-		if ctx and ctx.focusedName then
-			local element = findElementById(ctx.ui, ctx.focusedName)
-			if element and bit.band(element.flags, TEXT_INPUT) ~= 0 then
-				-- What is typed into is the value as it is now, which is not necessarily the one the
-				-- last frame drew: a key is handled as it arrives, and a key held down arrives several
-				-- times between two frames. Every key applied to the field the frame drew would apply
-				-- it to the same value over and over -- a backspace held down taking the same
-				-- character each time while the caret walks back, which is a caret that leaves the
-				-- text behind rather than deleting it.
-				local value = ctx.typed or wonderlandElement.inputOf(element)
-				local cursor = ctx.cursorPos
-				local key = event.key
 
-				--- The value an edit left the field with, kept for the keys before the next frame and
-				--- reported to the app.
-				---@param edited string
-				---@return any?
-				local function edit(edited)
-					ctx.typed = edited
+		-- A press the keyboard says is one of its own repeats is not a key: what it repeats is the key
+		-- the clock is already repeating, and taking it as well would be the two rates added together
+		-- -- a hold that takes two characters at some moments and one at others. A keyboard repeating
+		-- a key it is holding sends a release and then the press of that repeat together, so which
+		-- presses are its own is not something that can be worked out from what arrives: it is what
+		-- the keyboard is asked -- see the keyboard in winit, which marks the press of a repeat.
+		if self.keyRepeatInterval > 0 and event.repeated == true and ctx ~= nil
+			and ctx.repeatKey == event.key then
+			return nil
+		end
 
-					local handler = callbacks[element.oninput]
+		-- What the key types is what it does to the field, and the key itself is what it types where it
+		-- types nothing of its own: a named key is one of those, and is handled as itself.
+		local typed = typedBy(event) or event.key
+		local message = self:key(event.window, event.key, event.modifiers, typed)
 
-					return handler and handler(edited) or { type = "_inputRefresh" }
-				end
+		-- What is held down from here: the key the ui is to repeat, at the rate it was given. A press
+		-- of a key is a press of it whatever the clock was doing -- a key pressed again while the
+		-- clock is repeating the same one is a key of its own, and the wait before it repeats starts
+		-- here rather than going on with the hold before it.
+		if ctx then
+			ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 
-				if key == "escape" then
-					ctx.focusedName = nil
-					ctx.cursorPos = 0
-					return { type = "_inputRefresh" }
-				elseif key == "return" then
-					local submit = callbacks[element.onsubmit]
-
-					-- A paragraph takes the break, and control with return is what sends it: a
-					-- field that is one line has nothing to break, so return sends it.
-					if bit.band(element.flags, MULTILINE) ~= 0
-						and not (event.modifiers and event.modifiers.ctrl) then
-						value = value:sub(1, cursor) .. "\n" .. value:sub(cursor + 1)
-						ctx.cursorPos = cursor + 1
-						return edit(value)
-					elseif submit then
-						return submit(value)
-					end
-				elseif key == "backspace" then
-					if cursor > 0 then
-						value = value:sub(1, cursor - 1) .. value:sub(cursor + 1)
-						ctx.cursorPos = cursor - 1
-						return edit(value)
-					end
-				elseif key == "delete" then
-					if cursor < #value then
-						value = value:sub(1, cursor) .. value:sub(cursor + 2)
-						return edit(value)
-					end
-				elseif key == "left" then
-					ctx.cursorPos = math.max(0, cursor - 1)
-					return { type = "_inputRefresh" }
-				elseif key == "right" then
-					ctx.cursorPos = math.min(#value, cursor + 1)
-					return { type = "_inputRefresh" }
-				elseif key == "home" then
-					ctx.cursorPos = lineStart(value, cursor) - 1
-					return { type = "_inputRefresh" }
-				elseif key == "end" then
-					ctx.cursorPos = lineEnd(value, cursor)
-					return { type = "_inputRefresh" }
-				elseif key == "up" then
-					ctx.cursorPos = lineAcross(value, cursor, -1)
-					return { type = "_inputRefresh" }
-				elseif key == "down" then
-					ctx.cursorPos = lineAcross(value, cursor, 1)
-					return { type = "_inputRefresh" }
-				elseif event.modifiers and event.modifiers.ctrl then
-					if key == "a" or key:byte(1) == 1 then
-						ctx.cursorPos = #value
-						return { type = "_inputRefresh" }
-					end
-				elseif key == "space" then
-					value = value:sub(1, cursor) .. " " .. value:sub(cursor + 1)
-					ctx.cursorPos = cursor + 1
-					return edit(value)
-				elseif #key == 1 and key:byte(1) >= 32 then
-					value = value:sub(1, cursor) .. key .. value:sub(cursor + 1)
-					ctx.cursorPos = cursor + 1
-					return edit(value)
-				end
+			if repeats(event.key, event.modifiers, typed) and ctx.focusedName then
+				-- What is repeated is the key, and what it does over again is what it typed: a held
+				-- shift and 1 is "!" over and over rather than 1, and the name is what a release of
+				-- the key is matched against.
+				ctx.repeatKey, ctx.repeatMods = event.key, event.modifiers
+				ctx.repeatTyped = typed
 			end
+		end
+
+		return message
+	elseif event.name == "keyRelease" then
+		-- The key is up, so what was repeating stops with it: a key that is let go of does not repeat
+		-- once more, and nothing else has to arrive to say so. A release the keyboard says is one of
+		-- its own repeats is not a key coming up -- the key is still held -- so that one is what the
+		-- hold goes on through: see the keyboard in winit, which is what tells them apart.
+		local ctx = self.contexts[event.window]
+
+		if ctx and ctx.repeatKey == event.key and event.repeated ~= true then
+			ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 		end
 	elseif event.name == "mouseRelease" then
 		local ctx = self.contexts[event.window]

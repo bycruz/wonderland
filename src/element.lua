@@ -25,10 +25,13 @@ ffi.cdef [[
 		uint32_t baseStyle, hoverStyle, activeStyle, focusStyle;  // what it looks like
 		uint32_t text, name, inputValue;  // strings of this frame, by handle
 		uint32_t run;                // the line it measured into, by handle
+		uint32_t valueRun;           // and the line what is typed into it measures into, for a
+		                             // field that is sized by it: see `element.GROWS`
 		uint32_t childFirst, childCount, nextSibling;  // the children, as a chain
 		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit, onchange;
 		uint32_t userdata;           // whatever the app carries, by handle
 		double scrollOffset;         // how far its content is scrolled up, 0 for not
+		double maxLines;             // the most lines a field that takes a paragraph holds, 0 for no end to it
 		double sliderValue;          // where a slider of an element is, and the values its
 		double min, max;             // two ends are, which its dragging is reported between
 		uint32_t fontId;             // the font its text is measured in, from the top down
@@ -57,6 +60,11 @@ element.SLIDE = 64
 --- out is the one thing an app cannot work out for itself, which is why the layout does this.
 element.THUMB = 128
 
+--- A field that is as tall as what has been typed into it: its height is the value's, up to
+--- `maxLines` of it, so a box does not have to be sized for what a field might hold. A field
+--- without this keeps the height its style gave it.
+element.GROWS = 256
+
 --- One element, as the arena holds it. The language server cannot see an ffi.cdef, so the
 --- fields are spelled out here: it is the only way to get them checked. The ones that
 --- hold a number are a handle -- `text`, `name`, `run`, the handlers -- and are read
@@ -70,6 +78,7 @@ element.THUMB = 128
 ---@field name number # Its own name, for input focus and for finding it
 ---@field inputValue number # What has been typed into it, by handle
 ---@field run number # The line it measured into, by handle
+---@field valueRun number # And the line what is typed into it measured into, where it is sized by it
 ---@field childFirst number
 ---@field childCount number
 ---@field nextSibling number
@@ -87,6 +96,7 @@ element.THUMB = 128
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
 ---@field scrollOffset number # How far its content is scrolled up, and what clips it to its box
+---@field maxLines number # The most lines what is typed into it may hold, 0 for as many as it takes
 ---@field flags number
 ---@field index number
 ---@field frame number
@@ -491,6 +501,8 @@ end
 ---@field name string
 ---@field value string
 ---@field multiline boolean? # Whether return should break the line instead of submitting it
+---@field maxLines number? # The most lines it holds: return does nothing at the end of them
+---@field grow boolean? # Whether the box is as tall as what is typed into it, up to `maxLines`
 ---@field oninput fun(value: string): T
 ---@field onsubmit fun(value: string): T
 
@@ -498,6 +510,10 @@ end
 --- because a field of an element is read before a call is asked for, and it is the call an app
 --- makes. With `multiline` the field is a paragraph: return breaks the line rather than sending
 --- it, and control with return is what sends it.
+---
+--- A paragraph grows downwards as it fills up, which is a box that would have to be sized for
+--- everything it might hold: `maxLines` is how many lines it takes before it stops, and `grow`
+--- is the box following what is in it. A field of one line is unaffected by both.
 ---@generic T
 ---@param opts wonderland.InputOpts<T>
 ---@return wonderland.Element
@@ -509,6 +525,11 @@ function methods:input(opts)
 		self.flags = bit.bor(self.flags, element.MULTILINE)
 	end
 
+	if opts.grow then
+		self.flags = bit.bor(self.flags, element.GROWS)
+	end
+
+	self.maxLines = opts.maxLines or 0
 	self.name = pushString(opts.name)
 	self.inputValue = pushString(opts.value or "")
 	self.oninput = pushCallback(opts.oninput)

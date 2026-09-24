@@ -315,14 +315,23 @@ function app.run(self)
 		end
 
 		if event.name == "aboutToWait" then
-			-- What a screen has to do on its own -- a caret that blinks -- is asked about here, and
-			-- this is where the loop can be given an end to its wait: the loop has no timer in it,
-			-- so a screen with something to do is one that says when it wants waking.
+			-- What a screen has to do on its own -- a caret that blinks, a key held down in a field
+			-- repeating -- is asked about here, and this is where the loop can be given an end to its
+			-- wait: the loop has no timer in it, so a screen with something to do is one that says
+			-- when it wants waking.
 			local owes = false
 
 			for _, window in pairs(eventLoop.windows) do
 				if self.uiPlugin then
-					self.uiPlugin:tick(window, handler)
+					-- A repeated key is a key: what it edited is the app's, so the message that comes
+					-- of it goes to the app the way an event's does, and the frame that shows what it
+					-- did is asked for with it. Nothing else a screen does on its own has anything to
+					-- say to the app -- a caret blinking is the screen's own business.
+					local repeated = self.uiPlugin:tick(window, handler)
+
+					if repeated then
+						self:handle(repeated, window)
+					end
 				end
 
 				if window.shouldRedraw then

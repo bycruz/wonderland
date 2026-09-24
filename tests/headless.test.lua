@@ -867,11 +867,15 @@ test.skipIf(not canRender)("asks the loop for the time a blinking caret is due",
 	screen:close()
 end)
 
--- A key held down arrives several times between two frames, and each of those keys is applied to
--- what the one before it left. Applied to the field the last frame drew, every one of them takes the
--- same character while the caret walks back: a backspace that skips over what is in front of it.
-test.skipIf(not canRender)("takes a held key one character at a time", function()
-	local value = "abc"
+-- A key arrives with the keys before it still not drawn, and each of them is applied to what the one
+-- before it left rather than to the field the last frame drew. Applied to the field the last frame
+-- drew, the letters would each be typed into the same empty line with the caret walking along it:
+-- what is typed is the app's, and the app hands it back a frame later.
+--
+-- A key that is *held*, and a key pressed again while the clock is repeating it, are repeats, and a
+-- repeat is the clock's to take: see the test below about the rate a held key repeats at.
+test.skipIf(not canRender)("applies every key before the next frame to what the one before it left", function()
+	local value = ""
 
 	local screen = wonderland.headless.new(function()
 		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 30 } }):children(
@@ -887,23 +891,27 @@ test.skipIf(not canRender)("takes a held key one character at a time", function(
 		end
 	end })
 
+	--- A tap of a key: it goes down and comes back up, which is what a key that is pressed rather
+	--- than held does.
+	---@param key string
 	---@return nil
-	local function backspace()
-		screen:event({ name = "keyPress", window = screen.window, key = "backspace", modifiers = {} })
+	local function tap(key)
+		screen:event({ name = "keyPress", window = screen.window, key = key, modifiers = {} })
+		screen:event({ name = "keyRelease", window = screen.window, key = key })
 	end
 
 	-- Clicking takes the keyboard and puts the caret at the end of what is in the field.
 	screen:click(50, 15)
 
-	backspace()
-	test.equal(value, "ab", "one backspace takes the character before the caret")
+	tap("a")
+	test.equal(value, "a", "a key tapped types its letter")
 
-	-- Three more before the frame that would show the first: what they are applied to is what the
-	-- key before them left, which is not what is on screen.
-	backspace()
-	test.equal(value, "a", "and the one after it takes the one before that")
-	backspace()
-	test.equal(value, "", "and the next one the last of them")
+	-- Two more before the frame that would show the first: what they are applied to is what the key
+	-- before them left, which is not what is on screen.
+	tap("b")
+	test.equal(value, "ab", "and the next one types into what that one left")
+	tap("c")
+	test.equal(value, "abc", "and the one after it into what that one left")
 
 	screen:close()
 end)
@@ -1257,4 +1265,443 @@ test.skipIf(not canRender)("hands back nothing when a click misses", function()
 	screen:close()
 
 	test.falsy(message, "the click was nowhere near the button")
+end)
+
+-- A paragraph grows downwards as it is typed into, which is a box the app would have to size for
+-- everything it might hold: `maxLines` is how many lines it holds before a break stops doing
+-- anything, and `grow` is the box being as tall as what is in it rather than as tall as a guess.
+test.skipIf(not canRender)("holds a paragraph to the lines it was given", function()
+	local draft = "one"
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "column", width = { abs = 120 }, height = { abs = 120 },
+			bg = { r = 0, g = 0, b = 0, a = 1 } }):children(
+			div():style({ direction = "row", width = { abs = 120 }, height = { abs = 6 }, fg = WHITE })
+				:input({
+					name = "notes",
+					value = draft,
+					multiline = true,
+					maxLines = 2,
+					grow = true,
+					oninput = function(value) return { type = "typed", value = value } end,
+				})
+				:children(text(draft):style({ fg = { r = 0.5, g = 0.5, b = 0.5, a = 1 } }))
+		)
+	end, {
+		width = 120,
+		height = 120,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			if message.type == "typed" then
+				draft = message.value
+			end
+		end,
+	})
+
+	local layout = screen.plugins.layout
+	local ctx = assert(layout.contexts[screen.window])
+
+	--- The field as the last solve left it, which is what a box that grows is measured by.
+	---@return wonderland.Node
+	local function field()
+		return assert(assert(ctx.screen):child(assert(ctx.root), 1))
+	end
+
+	--- A key, and the frame the app would draw to take the message it produced.
+	---@param key string
+	local function press(key)
+		screen:event({ name = "keyPress", window = screen.window, key = key, modifiers = {} })
+		screen:draw()
+	end
+
+	screen:draw()
+	screen:click(60, 3)
+
+	local oneLine = field().height
+
+	test.greater(oneLine, 6, "the box is as tall as what is typed into it rather than as its style says")
+
+	press("return")
+	press("t")
+	press("w")
+	press("o")
+
+	test.equal(draft, "one\ntwo", "a break makes a second line")
+	test.equal(field().height, oneLine * 2, "and the box is as tall as the two of them")
+
+	-- Two lines is what it holds, so a break at the end of the last of them is a key that does
+	-- nothing rather than a line that is drawn past the box it was given.
+	press("return")
+	test.equal(draft, "one\ntwo", "while a break past the last line it holds is not taken")
+	test.equal(field().height, oneLine * 2, "and the box does not grow for one either")
+
+	screen:close()
+end)
+
+-- A key held down is one key arriving over and over, and how fast it arrives is not the screen's to
+-- choose: a keyboard's own repeat is half a second away and then slow enough to watch, which is a
+-- backspace that reads as a character at a time rather than as deleting. So the library repeats the
+-- keys a hold keeps doing itself -- a rate of its own, and the same rate for a letter as for a
+-- backspace -- and the app hears every one of them the way it hears a key.
+--
+-- The keyboard repeats a held key as well, and what its repeats are is not something that arrives
+-- with them: a press of a key it is repeating is a press of it like any other. So the library is
+-- told which they are -- see the keyboard in winit -- and takes the rest itself. A key that the
+-- keyboard says is a repeat of a key the clock is repeating is left to the clock; a key that is
+-- pressed again by hand is a key of its own, and what it does, it does at once.
+test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
+	local value = "abc"
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 30 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 30 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = value, oninput = function(typed)
+					return { type = "typed", value = typed }
+				end })
+		)
+	end, { width = 100, height = 30, fontPath = assert(fontPath), onMessage = function(message)
+		if message.type == "typed" then
+			value = message.value
+		end
+	end })
+
+	local ui = screen.plugins.ui
+	local layout = screen.plugins.layout
+	local ctx = assert(layout.contexts[screen.window])
+	local asked, seconds = 0, nil
+
+	---@diagnostic disable-next-line: missing-fields
+	local handler = {
+		setTimeout = function(_, value2)
+			asked, seconds = asked + 1, value2
+		end,
+	}
+
+	--- A key, as the keyboard sends one.
+	---@param name string
+	---@param pressed string # The key itself
+	---@param repeated boolean? # Whether the keyboard said this press was one of its own repeats
+	---@param modifiers table? # And what was held with it
+	---@return any?
+	local function key(name, pressed, repeated, modifiers)
+		local message = screen:event({
+			name = name,
+			window = screen.window,
+			key = pressed,
+			modifiers = modifiers or {},
+			repeated = repeated,
+		})
+
+		if message and screen.onMessage then
+			screen.onMessage(message)
+		end
+
+		return message
+	end
+
+	--- A tick of the loop, with what is due made due: the clock is the loop's, and what the screen
+	--- does with it is what is being checked -- so the wait is forced rather than sat through.
+	---@param due boolean?
+	---@return any? message
+	local function tick(due)
+		if due then
+			ctx.repeatAt = 0
+		end
+
+		local message = ui:tick(screen.window, handler)
+
+		if message and screen.onMessage then
+			screen.onMessage(message)
+		end
+
+		return message
+	end
+
+	-- The caret is a clock of its own, and this is a test about the other one. Frames are not held
+	-- back either: what is being asked about is what asks for one, not how often one may go out --
+	-- and a test fires its events closer together than any display has frames.
+	ui.caretBlink = 0
+	ui.frameInterval = 0
+
+	screen:click(50, 15)
+
+	key("keyPress", "backspace")
+	test.equal(value, "ab", "the key itself takes the character before the caret")
+	test.equal(ctx.repeatKey, "backspace", "and a key that does something again and again is held down")
+
+	-- Nothing yet: what comes first is the wait before a key repeats at all, and the loop is told
+	-- when that is over.
+	tick()
+	test.equal(value, "ab", "and takes nothing more until the wait is over")
+	test.truthy(seconds ~= nil and seconds > 0 and seconds <= layout.keyRepeatDelay,
+		"which is the wait the loop is asked to come back after")
+
+	test.equal(assert(tick(true)).type, "typed", "the wait over, the key is the app's again")
+	test.equal(value, "a", "and it took the character before the caret")
+	test.truthy(screen.window.shouldRedraw, "with a frame asked for, which is what shows it")
+
+	-- The keyboard repeating the key itself is that key arriving again, and the clock is what is
+	-- repeating it: its press is taken by nothing, and the one the clock has next is where it was --
+	-- which is what says a hold is one rate rather than the keyboard's and the clock's added up.
+	local due = ctx.repeatAt
+
+	screen.window.shouldRedraw = false
+	key("keyPress", "backspace", true)
+	test.equal(value, "a", "a press the keyboard says is its own repeat is not taken as a key")
+	test.falsy(screen.window.shouldRedraw, "so it asks for no frame of its own")
+	test.equal(ctx.repeatAt, due, "and the repeat the clock has next is not moved by it")
+
+	-- A release the keyboard says is one of its own repeats is not a key coming up: the key is still
+	-- held, and the hold goes on through it.
+	key("keyRelease", "backspace", true)
+	test.equal(ctx.repeatKey, "backspace", "a release the keyboard says is its own repeat does not let go")
+
+	ctx.repeatAt = 0
+	test.equal(assert(tick(true)).type, "typed", "and the clock goes on repeating the key it holds")
+	test.equal(value, "", "which took the character it was due to take")
+
+	-- What the hand does is a release of its own, and a key that is let go of is not held any more:
+	-- what was repeating stops with it, and it does not repeat once more on the way out.
+	screen:draw()
+	ctx.owed = false
+	screen.window.shouldRedraw = false
+	ctx.repeatAt = 0
+
+	key("keyRelease", "backspace")
+	test.falsy(ctx.repeatKey, "a key that is let go of is not held down any more")
+	test.falsy(tick(true), "and nothing repeats after it")
+	test.falsy(screen.window.shouldRedraw, "so no frame is asked for either")
+
+	-- A key pressed again is a key of its own, whatever the clock was doing: it does what it does at
+	-- once rather than waiting out the wait a hold begins with, and the wait starts again from it.
+	-- Typed into an empty field, so that what the press does is plain.
+	key("keyPress", "i")
+	test.equal(value, "i", "a letter typed is a letter in the field")
+
+	screen.window.shouldRedraw = false
+	test.equal(assert(key("keyPress", "backspace")).type, "typed",
+		"and a backspace pressed again is a key of its own")
+	test.equal(value, "", "which took the character it was pressed to take")
+	test.truthy(screen.window.shouldRedraw, "and asked for the frame that shows it")
+	test.falsy(ctx.repeatAt, "with the wait before it repeats starting again")
+
+	-- Holding a key that types types it, by the same clock and at the same rate: a letter held down
+	-- is letters at a fixed rate rather than a burst whenever the keyboard feels like one.
+	key("keyPress", "x")
+	test.equal(ctx.repeatKey, "x", "a letter is held down like anything else")
+	test.equal(value, "x", "which is the letter the press typed")
+
+	ctx.repeatAt = 0
+	test.equal(assert(tick(true)).type, "typed", "and the clock is what types it again")
+	test.equal(value, "xx", "one letter a repeat, at the rate it was given")
+
+	ctx.repeatAt = 0
+	key("keyPress", "x", true)
+	test.equal(value, "xx", "while the keyboard's own repeat of it types nothing")
+
+	-- A key that happens once is not one of those: return sends what is in the field rather than
+	-- filling it in, and a chord with control is a command.
+	key("keyRelease", "x")
+	key("keyPress", "f5")
+	key("keyPress", "return")
+	key("keyPress", "a", nil, { ctrl = true })
+	test.falsy(ctx.repeatKey, "and none of those is repeated by the library")
+
+	-- With the library's repeat turned off, the keyboard's own is what a held key does: it is the
+	-- presses that do the work, and there is nothing to say any of them is a repeat.
+	layout.keyRepeatInterval = 0
+
+	key("keyPress", "backspace")
+	test.equal(value, "x", "which takes a character")
+	key("keyPress", "backspace", true)
+	test.equal(value, "", "and the keyboard's own repeat of it takes the next")
+
+	screen:close()
+end)
+
+-- A key is not what it types: shift and 1 is the key 1 held, and "!" is what the keyboard made of
+-- it. A field that typed the key itself would type "1" for shift and 1 -- and a key its release
+-- cannot be matched to is a hold nothing lets go of, because the release of a key is named after
+-- the key and not after what it typed.
+test.skipIf(not canRender)("types what a key types, and repeats that while it is held", function()
+	local value = ""
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 30 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 30 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = value, oninput = function(typed)
+					return { type = "typed", value = typed }
+				end })
+		)
+	end, { width = 100, height = 30, fontPath = assert(fontPath), onMessage = function(message)
+		if message.type == "typed" then
+			value = message.value
+		end
+	end })
+
+	local ui = screen.plugins.ui
+	local layout = screen.plugins.layout
+	local ctx = assert(layout.contexts[screen.window])
+
+	---@diagnostic disable-next-line: missing-fields
+	local handler = { setTimeout = function() end }
+
+	--- A key, as the keyboard sends one: what it is, what it types, and what was held with it.
+	---@param name string
+	---@param pressed string
+	---@param typed string?
+	---@param modifiers table?
+	---@param repeated boolean?
+	---@return any?
+	local function key(name, pressed, typed, modifiers, repeated)
+		local message = screen:event({
+			name = name,
+			window = screen.window,
+			key = pressed,
+			text = typed,
+			modifiers = modifiers or {},
+			repeated = repeated,
+		})
+
+		if message and screen.onMessage then
+			screen.onMessage(message)
+		end
+
+		return message
+	end
+
+	---@return any? message
+	local function beat()
+		ctx.repeatAt = 0
+
+		local message = ui:tick(screen.window, handler)
+
+		if message and screen.onMessage then
+			screen.onMessage(message)
+		end
+
+		return message
+	end
+
+	ui.caretBlink = 0
+	screen:click(50, 15)
+
+	-- Shift and 1: the key is 1, and what it types is "!".
+	key("keyPress", "1", "!", { shift = true })
+	test.equal(value, "!", "a key types what the keyboard made of it rather than the key itself")
+	test.equal(ctx.repeatKey, "1", "and what is held down is the key, which is what it is named")
+	test.equal(ctx.repeatTyped, "!", "with what it types kept as what it repeats")
+
+	-- The keyboard repeating the key is that key over and over, which is nothing: the clock is what
+	-- is repeating it, and what it repeats is what the press typed.
+	key("keyPress", "1", "!", { shift = true }, true)
+	test.equal(value, "!", "a press the keyboard says is its own repeat types nothing")
+
+	test.equal(assert(beat()).type, "typed", "and the clock repeats the key it holds")
+	test.equal(value, "!!", "as what that key typed rather than as the key")
+
+	-- The release is named after the key, and a shift that changed what it types does not change
+	-- that: a hold that could not be matched to its own release would never be let go of.
+	key("keyRelease", "1")
+
+	test.falsy(ctx.repeatKey, "a release of the key let go of lets the hold go")
+	test.falsy(beat(), "and the clock takes nothing after it")
+
+	-- And a 1 of its own, with no shift, types 1.
+	key("keyPress", "1", "1")
+	test.equal(value, "!!1", "a key pressed again types what the keyboard makes of it now")
+
+	screen:close()
+end)
+
+-- A click in a field is at a character rather than at the end of what it holds: which line and which
+-- character of it a point is at comes from the text the field draws -- the run of it, and where the
+-- walk put it -- so a click in the middle of a word puts the caret in the middle of it.
+test.skipIf(not canRender)("puts the caret where in a field it was clicked", function()
+	local value = "abcd\nef"
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 200 }, height = { abs = 60 } }):children(
+			div():style({ direction = "column", width = { abs = 200 }, height = { abs = 60 },
+				padding = { left = 20 }, bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = value, multiline = true })
+				:children(text(value):style({ fg = { r = 0.5, g = 0.5, b = 0.5, a = 1 } }))
+		)
+	end, { width = 200, height = 60, fontPath = assert(fontPath) })
+
+	local layout = screen.plugins.layout
+
+	screen.plugins.ui.caretBlink = 0
+
+	-- How far into a line of the text a character boundary is, which is where a caret of that column
+	-- is drawn: read from the same run the screen draws, so a click and the caret it comes to are
+	-- measured against one thing rather than two.
+	local fontManager = assert(screen.plugins.render.sharedResources).fontManager
+	local run = fontManager:getBitmap(fontManager:getDefault()):getRun(value)
+
+	---@param line number
+	---@param column number
+	---@return number
+	local function pen(line, column)
+		local line_ = run.lines[line]
+		local total = 0
+
+		for at = 0, math.min(column, line_.count) - 1 do
+			total = total + run.glyphs[line_.first + at].advance
+		end
+
+		return total
+	end
+
+	local PAD = 20
+	local LINE = run.height / run.lineCount
+
+	--- A click, and the byte of the value the caret came to be at.
+	---@param x number
+	---@param y number
+	---@return number
+	local function clickAt(x, y)
+		screen:click(x, y)
+
+		return layout:getCursorPos(screen.window)
+	end
+
+	test.equal(clickAt(2, 5), 0, "a click before the first character is at the start of the line")
+	test.equal(clickAt(PAD + pen(0, 2) - 1, 5), 2, "one just before a character boundary is that boundary")
+	test.equal(clickAt(PAD + pen(0, 2) + 1, 5), 2, "and one just after it is the same one")
+	test.equal(clickAt(PAD + pen(0, 4) + 40, 5), 4, "a click past the end of the line is the end of it")
+
+	-- The line is the one the point is down from the top of the text, so a paragraph is one the
+	-- caret can be put on any line of -- and a point below the last line is the last line.
+	test.equal(clickAt(PAD + pen(1, 1) - 1, LINE + 5), 6, "a click on the second line is on the second line")
+	test.equal(clickAt(2, LINE * 2 + 3), 5, "as is a click below the last one")
+
+	-- And the caret is drawn where that is: the click above was at a boundary of the first line.
+	clickAt(PAD + pen(0, 2) - 1, 5)
+
+	local pixels = assert(screen:getPixels())
+	local caretX = nil
+
+	for x = 0, 199 do
+		for y = 0, 59 do
+			local r, g, b = pixelAt(pixels, 200, x, y)
+
+			if r > 200 and g > 200 and b > 200 then
+				caretX = caretX or x
+				break
+			end
+		end
+
+		if caretX then
+			break
+		end
+	end
+
+	test.truthy(caretX ~= nil, "and the caret is drawn at all")
+	test.truthy(caretX ~= nil and math.abs(caretX - (PAD + pen(0, 2))) <= 1,
+		"at the boundary that was clicked rather than at the end of the value")
+
+	screen:close()
 end)

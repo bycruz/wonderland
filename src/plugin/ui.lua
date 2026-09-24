@@ -340,6 +340,26 @@ local function caretPen(run, line, column)
 	return pen, lineStep
 end
 
+--- Where a line of a run is drawn inside the box it is in: a line may be given more room than it
+--- needs, and then it says where in that room it sits -- which is where the glyphs of it are drawn,
+--- and so where the caret beside them goes and where a click on them lands.
+---@param node wonderland.Node
+---@param line wonderland.font.Line?
+---@return number # From the left edge of the box
+local function lineOffset(node, line)
+	if line == nil or node.run == 0 then
+		return 0
+	end
+
+	if node.justify == 1 then
+		return math.floor((node.width - line.width) / 2 + 0.5)
+	elseif node.justify == 2 then
+		return node.width - line.width
+	end
+
+	return 0
+end
+
 --- Where the caret of a field is drawn this frame, and what it is drawn as, kept on the caret the
 --- walk was handed: a frame is built once and the quad of it is drawn last, so what a blink needs
 --- to put back is the whole of what is decided here.
@@ -372,23 +392,98 @@ local function placeCaret(caret, element, node, x, y, z, clip, fontManager)
 
 	-- A line that is given more room than it needs sits where it says in it, which is where it is
 	-- drawn: the caret goes with it, and a line with no room of its own starts at nought.
-	local offset = 0
-
-	if line ~= nil and node.run ~= 0 then
-		if node.justify == 1 then
-			offset = math.floor((node.width - line.width) / 2 + 0.5)
-		elseif node.justify == 2 then
-			offset = node.width - line.width
-		end
-	end
-
-	caret.left = x + offset + pen
+	caret.left = x + lineOffset(node, line) + pen
 	caret.top = y + caret.line * lineStep + CARET_INSET
 	caret.right = caret.left + CARET_WIDTH
 	caret.bottom = caret.top + (height > 0 and height or lineStep)
 	caret.z = z + 2
 	caret.clip = clip
 	caret.placed = true
+end
+
+--- The first line of text drawn inside an element, and where it ended up: the line a caret is
+--- placed from, found the way the walk finds it -- the field's own, if it draws one, and otherwise
+--- the first line of whatever it draws.
+---@param screen wonderland.Layout.Screen
+---@param index number
+---@param parentX number
+---@param parentY number
+---@param element wonderland.Element
+---@param inField boolean?
+---@return wonderland.Node? node
+---@return number? x
+---@return number? y
+---@return wonderland.font.Run? run
+local function findFieldText(screen, index, parentX, parentY, element, inField)
+	local node = screen:node(index)
+	local x, y = parentX + node.x, parentY + node.y
+	local inside = inField or pointers[node.element] == element
+
+	if inside and node.run ~= 0 and node.visible ~= 0 then
+		return node, x, y, screen.runs[node.run]
+	end
+
+	for at = 0, node.childCount - 1 do
+		local foundNode, foundX, foundY, foundRun = findFieldText(screen,
+			screen.childIndices[node.firstChild + at - 1], x, y, element, inside)
+
+		if foundNode ~= nil then
+			return foundNode, foundX, foundY, foundRun
+		end
+	end
+
+	return nil
+end
+
+--- Where a point in a line of text is, as the caret between two of its characters: which line is
+--- which one the point is down from the top of the text, and the column is the gap between two
+--- glyphs nearest across from it. A point past the end of a line is the end of that line, and one
+--- above the first line or below the last is the first or the last: a point in the box that is not
+--- in the text is still a point in the field, and the nearest line of it is as good an answer as
+--- there is.
+---@param run wonderland.font.Run
+---@param node wonderland.Node # What the line is drawn as, which is what says how it is aligned
+---@param x number # Absolute, where the line starts
+---@param y number
+---@param pointX number
+---@param pointY number
+---@return number line
+---@return number column
+local function caretAtPoint(run, node, x, y, pointX, pointY)
+	local step = run.height / run.lineCount
+	local line = math.floor((pointY - y) / step)
+
+	if line < 0 then
+		line = 0
+	elseif line > run.lineCount - 1 then
+		line = run.lineCount - 1
+	end
+
+	local glyphLine = run.lines[line] ---@type wonderland.font.Line
+	local glyphs = run.glyphs
+
+	if glyphLine == nil or glyphs == nil then
+		return line, 0
+	end
+
+	-- Measured the way the caret is placed: from the same left edge the line is drawn from, and
+	-- across the same whole-pixel advances -- so a click between two glyphs puts the caret where
+	-- those two glyphs are, rather than somewhere the drawing and the arithmetic disagree about.
+	local target = pointX - x - lineOffset(node, glyphLine)
+	local best, bestDistance = 0, math.abs(target)
+	local pen = 0
+
+	for at = 0, glyphLine.count - 1 do
+		pen = pen + glyphs[glyphLine.first + at].advance
+
+		local distance = math.abs(pen - target)
+
+		if distance < bestDistance then
+			best, bestDistance = at + 1, distance
+		end
+	end
+
+	return line, best
 end
 
 ---@param batch wonderland.QuadBatch
@@ -643,6 +738,44 @@ function UI:caretFor(window)
 	}
 end
 
+--- A click in a field, put where the caret goes: the point that was clicked, against the text the
+--- field draws -- the run of it, and where the walk put it -- as the line and the column the layout
+--- is told to put the caret at. It is against the frame that was on screen when the pointer went
+--- down, which is the one the pointer was over.
+---
+--- A field that draws no text of its own is left where the click put it, which is the end of what
+--- it holds: where in a field a click is is a question about the text in it, and a field with none
+--- has no answer to it.
+---@param window wonderland.RenderWindow
+function UI:caretClick(window)
+	local ctx = self.layoutPlugin.contexts[window]
+	local click = ctx and ctx.caretClick
+
+	if click == nil or ctx == nil or ctx.focusedName == nil or ctx.ui == nil or ctx.screen == nil then
+		return
+	end
+
+	-- Taken whatever comes of it: a click that cannot be placed is a click that is done with, and
+	-- one left behind would be put against a frame built later than the one it landed in.
+	ctx.caretClick = nil
+
+	local element = self.layoutPlugin:getCaret(window)
+
+	if element == nil then
+		return
+	end
+
+	local node, x, y, run = findFieldText(assert(ctx.screen), assert(ctx.root), 0, 0, element)
+
+	if node == nil or x == nil or y == nil or run == nil then
+		return
+	end
+
+	local line, column = caretAtPoint(run, node, x, y, click.x, click.y)
+
+	self.layoutPlugin:setCaret(window, line, column)
+end
+
 --- The caret's clock: a caret is drawn for half a second and not for half a second, which is the
 --- one thing in a screen that changes on its own. What comes of it is one quad, so the frame it
 --- belongs to is not built again for it: see `UI:frame`.
@@ -678,34 +811,103 @@ function UI:blink(ctx)
 	return true
 end
 
---- What a screen has to do on its own, and when it next does it: a caret that blinks is the one
---- thing, and the frame that comes of it is one quad.
+--- What a screen has to do on its own, and when it next does it: a caret that blinks, and a key held
+--- down in a field. Neither is a whole screen -- a blink is one quad of the frame the gpu has, and a
+--- repeat is one character -- and both are what a loop with no timer in it has to be woken for.
 ---
---- This is what the loop is asked for the time of: it has no timer in it -- it waits for the next
---- event, of which an idle window has none -- so a screen with something to do is one that has to
---- say when it wants waking. The frame the end of that wait asks for is the caret coming or going,
---- since whether it is due is the same clock this reads.
+--- This is what the loop is asked for the time of: it waits for the next event, of which an idle
+--- window has none, so a screen with something to do is one that has to say when it wants waking.
+--- The frame the end of that wait asks for is the caret coming or going or the key repeating, since
+--- whether either is due is the same clock this reads.
+---
+--- What a repeated key came to is handed back, because the value it edited is the app's: what an edit
+--- is told is the app rather than the screen, and where an event's message goes is the app -- so a
+--- repeat is a message from somewhere other than an event. See `app.run`, which passes it on.
+---
+--- A key held down is repeated here rather than by the keyboard, at the rate the layout was given
+--- rather than at the keyboard's: what a keyboard repeats of a held key is the same key, and taking
+--- its repeats as well would be the two rates added together -- a hold that takes two characters at
+--- some moments and one at others. Which presses are the keyboard's own is not something that can be
+--- worked out from what arrives, so it is not worked out: it is said, by the keyboard in winit,
+--- which marks the press of a repeat -- see `Layout:event`.
 ---@param window wonderland.RenderWindow
 ---@param handler winit.EventManager
+---@return any? message # What a key that was due to repeat came to, if one was due
 function UI:tick(window, handler)
 	local ctx = self.layoutPlugin.contexts[window]
 
-	if not ctx or ctx.focusedName == nil or self.caretBlink <= 0 then
+	if not ctx then
 		return
 	end
 
+	local layout = self.layoutPlugin
 	local at = now()
-	local due = (ctx.caretAt or at) + self.caretBlink
+	local due = nil ---@type number?
+	local message = nil
 
-	if at >= due then
-		-- What is due is a frame, and it is the caret's own clock that has kept it rather than the
-		-- frame's: the frame's time is what holds a frame back, so it is not asked through it. The
-		-- caret's coming or going is `UI:blink`, which the frame that comes of this runs.
-		self:requestRedraw(window, true)
-		due = at + self.caretBlink
+	if ctx.repeatKey ~= nil and layout.keyRepeatInterval > 0 then
+		if ctx.repeatAt == nil then
+			-- A key that has just gone down, which is what having no next repeat yet means: what comes
+			-- first is the wait before it repeats at all.
+			ctx.repeatAt = at + layout.keyRepeatDelay
+		end
+
+		if at >= ctx.repeatAt then
+			message = layout:key(window, ctx.repeatKey, ctx.repeatMods, ctx.repeatTyped or ctx.repeatKey)
+			ctx.repeatAt = at + layout.keyRepeatInterval
+
+			-- A frame of its own, for the same reason a blink is one: a repeat held back for coming
+			-- too soon would leave the last of what a held key did on screen until the next event,
+			-- which is the key coming up -- a character left behind.
+			--
+			-- Only where a repeat was a change, though: a key held at the end of what it can do --
+			-- backspace in a field with nothing in front of the caret -- is a repeat that came to
+			-- nothing, and a frame of the whole screen for nothing is the cost of a hold paid at the
+			-- rate of a hold rather than the rate of what it does.
+			if message ~= nil then
+				self:requestRedraw(window, true)
+			end
+		end
+
+		due = ctx.repeatAt
 	end
 
-	handler:setTimeout(due - at)
+	-- The caret, which is the other thing a screen does with no event behind it.
+	if ctx.focusedName ~= nil and self.caretBlink > 0 then
+		local blink = (ctx.caretAt or at) + self.caretBlink
+
+		if at >= blink then
+			-- What is due is a frame, and it is the caret's own clock that has kept it rather than the
+			-- frame's: the frame's time is what holds a frame back, so it is not asked through it. The
+			-- caret's coming or going is `UI:blink`, which the frame that comes of this runs.
+			self:requestRedraw(window, true)
+			blink = at + self.caretBlink
+		end
+
+		due = due ~= nil and math.min(due, blink) or blink
+	end
+
+	-- What the events left, drawn as soon as the display's time allows it. A frame that came too soon
+	-- to go out is one the event after it would have asked for again -- and an event that never comes
+	-- is a screen left showing what was typed before it, which is what a keystroke that landed on the
+	-- heels of another frame would be. So the ask is made again here, where nothing has to arrive for
+	-- the loop to be woken: the ration is the same one, so this is a frame at the rate of a frame and
+	-- no faster.
+	if ctx.owed then
+		local ready = (ctx.framedAt or 0) + self.frameInterval
+
+		if at >= ready then
+			self:requestRedraw(window, true)
+		else
+			due = due ~= nil and math.min(due, ready) or ready
+		end
+	end
+
+	if due ~= nil then
+		handler:setTimeout(due - at)
+	end
+
+	return message
 end
 
 --- The quads of a frame, built from the screen the layout solved and handed to the gpu: the walk,
@@ -791,6 +993,11 @@ function UI:frame(window)
 		return
 	end
 
+	-- Where a click in a field put the caret, before anything is built out of it: the point is
+	-- against the frame that was on screen when the pointer went down, and the caret it comes to is
+	-- one of the things this frame draws.
+	self:caretClick(window)
+
 	-- An ask is answered by the frame that comes out of it, which is where the window is told the
 	-- frame is ready: see `X11Window:acknowledgeSync`, which is what puts the ask away.
 	local asked = ctx.asked or window.frameAsked
@@ -853,6 +1060,9 @@ end
 --- window loop draws.
 ---@param window wonderland.RenderWindow
 function UI:refreshView(window)
+	-- A click in a field is placed from the frame that was on screen when the pointer went down, so
+	-- it is placed before this repaint builds the next one: see `UI:caretClick`.
+	self:caretClick(window)
 	self.layoutPlugin:refreshView(window)
 
 	local ctx = self.layoutPlugin.contexts[window]
