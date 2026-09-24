@@ -315,6 +315,21 @@ function app.run(self)
 		end
 
 		if event.name == "aboutToWait" then
+			-- What a screen has to do on its own -- a caret that blinks -- is asked about here, and
+			-- this is where the loop can be given an end to its wait: the loop has no timer in it,
+			-- so a screen with something to do is one that says when it wants waking.
+			local owes = false
+
+			for _, window in pairs(eventLoop.windows) do
+				if self.uiPlugin then
+					self.uiPlugin:tick(window, handler)
+				end
+
+				if window.shouldRedraw then
+					owes = true
+				end
+			end
+
 			-- Whether the loop waits for the next event or takes what is already queued. Waiting is
 			-- what an idle window does, and it is what keeps a screen that nothing has happened to
 			-- from spinning. Taking what is queued is what a burst is for, and a pointer being
@@ -322,8 +337,10 @@ function app.run(self)
 			-- comes out of them is the pointer where it is now rather than a frame per event, each
 			-- one drawn -- and each one waiting for the display -- from a state already behind the
 			-- one the event after it left. That is what makes a drag lag behind the pointer, and
-			-- what a wheel turned hard was made to stop doing.
-			handler:setMode(flowed and "poll" or "wait")
+			-- what a wheel turned hard was made to stop doing. A frame that is owed is the same
+			-- thing by another route, and it is what a screen that asked for one while the loop was
+			-- about to wait is waiting for.
+			handler:setMode((flowed or owes) and "poll" or "wait")
 			flowed = false
 		end
 	end)

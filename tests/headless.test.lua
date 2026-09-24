@@ -673,6 +673,301 @@ test.skipIf(not canRender)("a slider is dragged by the middle of its nub", funct
 	screen:close()
 end)
 
+-- The first frame of a window is the one frame that is built whether anything is owed it or not:
+-- a window that has just been made has nothing to show, and nothing asking for a frame is what a
+-- loop does before anything has happened in it.
+test.skipIf(not canRender)("draws the first frame a loop asks for", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 20 }, height = { abs = 20 },
+			bg = { r = 1, g = 0, b = 0, a = 1 } })
+	end, { width = 20, height = 20, fontPath = assert(fontPath) })
+
+	-- The frame a window loop asks for, rather than a screen drawn by hand.
+	screen.window.frameAsked = true
+	screen.plugins.ui:frame(screen.window)
+
+	local r, g = pixelAt(assert(screen:getPixels()), 20, 10, 10)
+
+	test.equal(r, 255, "the first frame of a window is drawn")
+	test.equal(g, 0)
+
+	screen:close()
+end)
+
+-- A caret is drawn by the library, in the field that has the keyboard: where it is comes from the
+-- value -- the run of it is what has the advances -- and how tall it is comes from the font, so a
+-- field that says nothing about its caret still has one.
+test.skipIf(not canRender)("draws a caret where the typing is", function()
+	local value = ""
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 60 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 60 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = value, oninput = function(typed)
+					return { type = "typed", value = typed }
+				end })
+		)
+	end, { width = 100, height = 60, fontPath = assert(fontPath), onMessage = function(message)
+		if message.type == "typed" then
+			value = message.value
+		end
+	end })
+
+	-- The caret is the only ink in the field, so anything of the field's own colour is it.
+	---@param row number
+	---@return number # Where it starts, or nought less where there is none on that row
+	local function caretLeft(row)
+		screen.plugins.ui:frame(screen.window)
+
+		local pixels = assert(screen:getPixels())
+
+		for x = 0, 99 do
+			local r, g, b = pixelAt(pixels, 100, x, row)
+
+			if r > 200 and g > 200 and b > 200 then
+				return x
+			end
+		end
+
+		return -1
+	end
+
+	local blink = screen.plugins.ui.caretBlink
+
+	screen.plugins.ui.caretBlink = 0
+	test.equal(caretLeft(10), -1, "a field nothing has clicked in has no caret")
+
+	screen:click(50, 10)
+	test.equal(screen.plugins.layout:getFocusedId(screen.window), "field", "clicking it takes the keyboard")
+	test.equal(caretLeft(10), 0, "and the caret is at the start of what is typed")
+
+	screen:event({ name = "keyPress", window = screen.window, key = "a", modifiers = {} })
+	test.equal(value, "a", "what is typed is the app's")
+
+	local typed = caretLeft(10)
+	test.greater(typed, 0, "so the caret is drawn after it")
+
+	screen:event({ name = "keyPress", window = screen.window, key = "home", modifiers = {} })
+	test.equal(caretLeft(10), 0, "and home takes it back to the start of the line")
+
+	-- A paragraph: the caret of the second line is a line's height down, which is the line it is on
+	-- rather than the box it is in.
+	value = "a\nb"
+
+	-- Drawn first, because the key is handled against the field the last frame built: what the app
+	-- hands back is what is in the field from the frame after it. This is a screen drawn by hand
+	-- rather than a frame the state asked for, which is what an app changing its own state is.
+	screen:draw()
+	screen:event({ name = "keyPress", window = screen.window, key = "down", modifiers = {} })
+	test.equal(caretLeft(30), 0, "the caret of a paragraph is on the line the typing is on")
+	test.equal(caretLeft(10), -1, "and not on the line above it")
+
+	screen:event({ name = "keyPress", window = screen.window, key = "end", modifiers = {} })
+	test.greater(caretLeft(30), 0, "which is a line of its own, placed in that line")
+
+	screen.plugins.ui.caretBlink = blink
+	screen:close()
+end)
+
+-- A field that puts the text it draws somewhere of its own -- centred, as the todo example's field
+-- is -- is one whose caret follows the text rather than the box: a caret at the top of a box whose
+-- text is in the middle is a caret in the wrong place.
+test.skipIf(not canRender)("draws a caret beside the text a field draws, wherever it put it", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 40 } }):children(
+			div():style({ direction = "row", align = "center", width = { abs = 100 }, height = { abs = 40 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = "a" })
+				:children(text("a"):style({ fg = { r = 0.5, g = 0.5, b = 0.5, a = 1 } }))
+		)
+	end, { width = 100, height = 40, fontPath = assert(fontPath) })
+
+	screen.plugins.ui.caretBlink = 0
+	screen:click(50, 20)
+
+	---@param find fun(r: number, g: number, b: number): boolean
+	---@return number? first
+	---@return number? last # The rows that colour is drawn on
+	local function rows(find)
+		screen.plugins.ui:frame(screen.window)
+
+		local pixels = assert(screen:getPixels())
+		local first, last = nil, nil
+
+		for y = 0, 39 do
+			for x = 0, 99 do
+				local r, g, b = pixelAt(pixels, 100, x, y)
+
+				if find(r, g, b) then
+					first = first or y
+					last = y
+					break
+				end
+			end
+		end
+
+		return first, last
+	end
+
+	-- The caret is the field's own colour, and the text is the colour the line was given: two
+	-- different greys, so which rows are whose is plain.
+	local caretFirst, caretLast = rows(function(r) return r > 200 end)
+	local textFirst, textLast = rows(function(r) return r > 100 and r < 200 end)
+
+	-- Compared by the end and the middle of each rather than by their first row: the top of a
+	-- glyph is the faintest part of it, so where the ink starts is not where the pixels start.
+	test.truthy(caretFirst, "the caret is drawn")
+	test.truthy(textFirst, "and so is the text")
+	test.truthy((caretLast or 0) >= (textLast or 0) - 2, "the caret ends where the line of text does")
+	test.truthy(((caretFirst or 0) + (caretLast or 0)) / 2 >= ((textFirst or 0) + (textLast or 0)) / 2 - 4,
+		"and is beside it rather than at the top of the box")
+
+	screen:close()
+end)
+
+-- A blink is a frame half a second away, and the loop has no timer: what a screen with something
+-- to do on its own asks for is the end of its wait, and the frame that comes with it.
+test.skipIf(not canRender)("asks the loop for the time a blinking caret is due", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 30 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 30 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = "typed" })
+		)
+	end, { width = 100, height = 30, fontPath = assert(fontPath) })
+
+	local ui = screen.plugins.ui
+	local ctx = assert(screen.plugins.layout.contexts[screen.window])
+	local asked, seconds = 0, nil
+
+	-- Only the deadline is looked at: what a screen asks a loop for is when to come back, and this
+	-- is a loop that does nothing else.
+	---@diagnostic disable-next-line: missing-fields
+	local handler = {
+		setTimeout = function(_, value)
+			asked, seconds = asked + 1, value
+		end,
+	}
+
+	ui.caretBlink = 0.5
+	screen:click(50, 15)
+
+	ui:tick(screen.window, handler)
+	test.equal(asked, 1, "the loop is told when to come back")
+	test.truthy(seconds ~= nil and seconds > 0 and seconds <= 0.5,
+		"which is within the half second the caret blinks for")
+
+	screen.window.shouldRedraw = false
+	ctx.caretAt = 0
+	ui:tick(screen.window, handler)
+	test.truthy(screen.window.shouldRedraw, "and a caret that is due asks for a frame")
+	test.equal(asked, 2, "with the one after it asked for as well")
+
+	screen:close()
+end)
+
+-- A key held down arrives several times between two frames, and each of those keys is applied to
+-- what the one before it left. Applied to the field the last frame drew, every one of them takes the
+-- same character while the caret walks back: a backspace that skips over what is in front of it.
+test.skipIf(not canRender)("takes a held key one character at a time", function()
+	local value = "abc"
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 30 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 30 }, bg = { r = 0, g = 0, b = 0, a = 1 },
+				fg = WHITE })
+				:input({ name = "field", value = value, oninput = function(typed)
+					return { type = "typed", value = typed }
+				end })
+		)
+	end, { width = 100, height = 30, fontPath = assert(fontPath), onMessage = function(message)
+		if message.type == "typed" then
+			value = message.value
+		end
+	end })
+
+	---@return nil
+	local function backspace()
+		screen:event({ name = "keyPress", window = screen.window, key = "backspace", modifiers = {} })
+	end
+
+	-- Clicking takes the keyboard and puts the caret at the end of what is in the field.
+	screen:click(50, 15)
+
+	backspace()
+	test.equal(value, "ab", "one backspace takes the character before the caret")
+
+	-- Three more before the frame that would show the first: what they are applied to is what the
+	-- key before them left, which is not what is on screen.
+	backspace()
+	test.equal(value, "a", "and the one after it takes the one before that")
+	backspace()
+	test.equal(value, "", "and the next one the last of them")
+
+	screen:close()
+end)
+
+-- What a caret costs is one quad: a blink is the last quad of the frame the gpu already has, going
+-- out and coming back, and a frame the window asks for with nothing behind it is a frame of what is
+-- already there. Neither of them looks at the view, the measure or the solve.
+test.skipIf(not canRender)("a blink is one quad and no screen is built for it", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 100 }, height = { abs = 30 } }):children(
+			div():style({ width = { abs = 100 }, height = { abs = 30 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = "typed" })
+		)
+	end, { width = 100, height = 30, fontPath = assert(fontPath) })
+
+	local ui = screen.plugins.ui
+	local layout = screen.plugins.layout
+	local ctx = assert(layout.contexts[screen.window])
+
+	ui.frameInterval = 0
+	ui.caretBlink = 0
+
+	screen:click(50, 15)
+	screen:draw()
+
+	local refreshes = 0
+	local refresh = layout.refreshView
+
+	layout.refreshView = function(plugin, window)
+		refreshes = refreshes + 1
+
+		return refresh(plugin, window)
+	end
+
+	-- A frame the window asked for, with nothing behind it: what is already built is what it gets.
+	screen.window.frameAsked = true
+	ui:frame(screen.window)
+	test.equal(refreshes, 0, "an ask with nothing behind it does not solve the screen")
+
+	local quads = ui.batch.quads
+
+	ui.caretBlink = 0.5
+	ctx.caretAt = 0
+	ui:frame(screen.window)
+	test.equal(ui.batch.quads, quads - 1, "a blink takes the caret's quad out of the frame")
+	test.equal(refreshes, 0, "and nothing is solved or walked for it")
+
+	ctx.caretAt = 0
+	ui:frame(screen.window)
+	test.equal(ui.batch.quads, quads, "and the next one puts it back")
+	test.equal(refreshes, 0, "which is the same frame with one more quad in it")
+
+	-- A frame that is owed is still a frame a caret can blink in: the clock it blinks on is its own,
+	-- and what a screen with something to do asks for is the end of the loop's wait, which is a
+	-- frame it asked for itself.
+	ctx.caretAt = 0
+	ui:requestRedraw(screen.window, true)
+	ui:frame(screen.window)
+	test.equal(ui.batch.quads, quads - 1, "and a blink in a frame that was owed is the same one quad")
+
+	screen:close()
+end)
+
 -- A field that takes more than one line: return breaks the line rather than sending it,
 -- control with return sends it, and the caret moves between the lines and the ends of them. What
 -- is typed is the app's to keep, as it is in a field of one line: the message comes back and the

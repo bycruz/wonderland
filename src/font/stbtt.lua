@@ -16,6 +16,9 @@ ffi.cdef [[
 	typedef struct {
 		int32_t x, y, width, height;  // where the ink is drawn, in whole pixels
 		float u0, v0, u1, v1;         // and where it is in the atlas
+		int32_t advance;              // how far the pen moves for it, which is where the next one
+		                              // starts -- and where a caret before it sits, which is the
+		                              // one place the ink's own edge is not the answer
 	} wl_glyph;
 
 	// One line of a run: the range of the run's glyphs that are its own, and how wide it came
@@ -81,6 +84,9 @@ local FIRST_CHAR = 32
 ---@field v0 number
 ---@field u1 number
 ---@field v1 number
+---@field advance number # How far the pen moved for it, which is where a caret in front of it sits
+--- The ink's own left edge is not that: ink sits inside the advance by its side bearing, so a
+--- caret drawn at it would sit inside the character rather than in front of it.
 
 --- A line of text: what it measures, and where each glyph goes inside it. This is the
 --- whole of what drawing text needs, so a text element can stay one element instead of
@@ -412,8 +418,9 @@ function Atlas:getRun(text)
 			glyph.height = math.ceil(quad.height)
 			glyph.u0, glyph.v0 = quad.u0, quad.v0
 			glyph.u1, glyph.v1 = quad.u1, quad.v1
+			glyph.advance = math.floor(quad.advance + 0.5)
 
-			pen = pen + math.floor(quad.advance + 0.5)
+			pen = pen + glyph.advance
 			placed = placed + 1
 		end
 

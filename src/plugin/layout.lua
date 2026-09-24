@@ -101,12 +101,18 @@ end
 ---@field asked boolean? # Whether the screen is what asked for the next frame
 ---@field owed boolean? # Whether a frame it asked for was held back, waiting for the display
 ---@field framedAt number? # When the last frame of this window went out, on the clock frames are paced by
+---@field caretOn boolean? # Whether the caret is drawn in this frame, which is what it blinks
+---@field caretAt number? # And when it last came or went
+---@field frameKey string? # What the caret was when the gpu was last given a frame: where it is, not whether it shows
+---@field caretBase number? # How many quads the frame's screen is, which is what the caret's is added to
+---@field caret wonderland.plugin.UI.Caret? # Where the caret was last placed, and what it is drawn as
 ---@field presented boolean? # And whether the gpu has drawn one for it
 ---@field focusedName string?
 ---@field dragging wonderland.plugin.Layout.Drag? # The slider being dragged, while one is
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
 ---@field pointing boolean? # Whether the pointer cursor is the one for something clickable
 ---@field cursorPos number
+---@field typed string? # What has been typed into the focused field since the frame that built it
 ---@field lastPressX any
 ---@field lastPressY any
 
@@ -150,6 +156,7 @@ function Layout:setFocus(window, id)
 	if not ctx then return end
 	ctx.focusedName = id
 	ctx.cursorPos = 0
+	ctx.typed = nil
 end
 
 ---@param window wonderland.RenderWindow
@@ -170,6 +177,10 @@ function Layout:refreshView(window)
 
 	ctx.ui = self.textPlugin:measure(self.view(window))
 	ctx.root = screen:fromElement(ctx.ui)
+
+	-- What the app says the field holds is the truth again: what has been typed since the last frame
+	-- is a value the app has not been told about yet, and by this frame it has.
+	ctx.typed = nil
 
 	-- What the pointer is over is worked out from the boxes a solve produced, and a style kept for
 	-- the pointer may lay an element out differently -- so a screen where one of them is used is
@@ -224,6 +235,7 @@ local function findElementById(element, id)
 end
 
 local DOUBLE_CLICK_THRESHOLD = 0.3 -- seconds
+
 
 --- Where the pointer is. It is one table per window rather than one per event, because a
 --- pointer moves: what changes is what it says.
@@ -384,6 +396,39 @@ local function lineAcross(value, at, by)
 	return math.min(belowStart - 1 + column, belowStop)
 end
 
+
+--- The caret of the field that has the keyboard: which element it is for, the line of it the
+--- caret is on and how far along that line -- the two numbers a caret is drawn by, since the byte
+--- it is at only says something to whoever has the value. Nothing is returned where no field has
+--- the keyboard, which is a caret there is none of.
+---@param window wonderland.RenderWindow
+---@return wonderland.Element? element
+---@return number? line # From nought, so a field of one line is always on line nought
+---@return number? column # How many characters of that line come before the caret
+function Layout:getCaret(window)
+	local ctx = self.contexts[window]
+
+	if not ctx or not ctx.focusedName or ctx.ui == nil then
+		return nil, nil, nil
+	end
+
+	local element = findElementById(ctx.ui, ctx.focusedName)
+
+	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
+		return nil, nil, nil
+	end
+
+	local value = wonderlandElement.inputOf(element)
+	local start = lineStart(value, ctx.cursorPos)
+	local line = 0
+
+	for _ in value:sub(1, start - 1):gmatch("\n") do
+		line = line + 1
+	end
+
+	return element, line, ctx.cursorPos - (start - 1)
+end
+
 ---@generic Message
 ---@param self wonderland.plugin.Layout<Message>
 ---@param event winit.Event
@@ -452,6 +497,7 @@ function Layout:event(event)
 		if info and bit.band(info.element.flags, TEXT_INPUT) ~= 0 then
 			ctx.focusedName = wonderlandElement.nameOf(info.element)
 			ctx.cursorPos = #wonderlandElement.inputOf(info.element)
+			ctx.typed = nil
 		else
 			ctx.focusedName = nil
 			ctx.cursorPos = 0
@@ -503,9 +549,27 @@ function Layout:event(event)
 		if ctx and ctx.focusedName then
 			local element = findElementById(ctx.ui, ctx.focusedName)
 			if element and bit.band(element.flags, TEXT_INPUT) ~= 0 then
-				local value = wonderlandElement.inputOf(element)
+				-- What is typed into is the value as it is now, which is not necessarily the one the
+				-- last frame drew: a key is handled as it arrives, and a key held down arrives several
+				-- times between two frames. Every key applied to the field the frame drew would apply
+				-- it to the same value over and over -- a backspace held down taking the same
+				-- character each time while the caret walks back, which is a caret that leaves the
+				-- text behind rather than deleting it.
+				local value = ctx.typed or wonderlandElement.inputOf(element)
 				local cursor = ctx.cursorPos
 				local key = event.key
+
+				--- The value an edit left the field with, kept for the keys before the next frame and
+				--- reported to the app.
+				---@param edited string
+				---@return any?
+				local function edit(edited)
+					ctx.typed = edited
+
+					local handler = callbacks[element.oninput]
+
+					return handler and handler(edited) or { type = "_inputRefresh" }
+				end
 
 				if key == "escape" then
 					ctx.focusedName = nil
@@ -520,8 +584,7 @@ function Layout:event(event)
 						and not (event.modifiers and event.modifiers.ctrl) then
 						value = value:sub(1, cursor) .. "\n" .. value:sub(cursor + 1)
 						ctx.cursorPos = cursor + 1
-						local typed = callbacks[element.oninput]
-						if typed then return typed(value) end
+						return edit(value)
 					elseif submit then
 						return submit(value)
 					end
@@ -529,14 +592,12 @@ function Layout:event(event)
 					if cursor > 0 then
 						value = value:sub(1, cursor - 1) .. value:sub(cursor + 1)
 						ctx.cursorPos = cursor - 1
-						local typed = callbacks[element.oninput]
-						if typed then return typed(value) end
+						return edit(value)
 					end
 				elseif key == "delete" then
 					if cursor < #value then
 						value = value:sub(1, cursor) .. value:sub(cursor + 2)
-						local typed = callbacks[element.oninput]
-						if typed then return typed(value) end
+						return edit(value)
 					end
 				elseif key == "left" then
 					ctx.cursorPos = math.max(0, cursor - 1)
@@ -564,13 +625,11 @@ function Layout:event(event)
 				elseif key == "space" then
 					value = value:sub(1, cursor) .. " " .. value:sub(cursor + 1)
 					ctx.cursorPos = cursor + 1
-					local typed = callbacks[element.oninput]
-					if typed then return typed(value) end
+					return edit(value)
 				elseif #key == 1 and key:byte(1) >= 32 then
 					value = value:sub(1, cursor) .. key .. value:sub(cursor + 1)
 					ctx.cursorPos = cursor + 1
-					local typed = callbacks[element.oninput]
-					if typed then return typed(value) end
+					return edit(value)
 				end
 			end
 		end

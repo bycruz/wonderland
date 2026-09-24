@@ -146,8 +146,6 @@ function App:view(window)
 
 	if typed == "" and not focused then
 		typed = "what needs doing?"
-	elseif focused then
-		typed = typed .. "|"
 	end
 
 	return div():style(SCREEN):children(

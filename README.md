@@ -97,15 +97,24 @@ div():style(TRACK)
 	end })
 	:children(div():style(sty():h(14):wrel(self.volume):bg("#4a6dbd")))
 
--- A field takes the keyboard from the click that focuses it. With `multiline` it is a paragraph:
--- return breaks the line rather than sending it, control with return is what sends it, and the
--- caret moves between the lines and the ends of them with the arrow keys, home and end.
+-- A field takes the keyboard from the click that focuses it, and the caret comes with it: it is
+-- drawn where the value says, in the field's own colour, one line down for each line before the
+-- one the typing is on. With `multiline` it is a paragraph: return breaks the line rather than
+-- sending it, control with return is what sends it, and the caret moves between the lines and the
+-- ends of them with the arrow keys, home and end.
 div():style(NOTES)
 	:input({ name = "notes", value = self.notes, multiline = true, oninput = function(value)
 		return { type = "notes", value = value }
 	end })
 	:children(text(self.notes))
 ```
+
+The caret is placed beside the line of text a field draws -- the first one inside it, wherever the
+app put it, centred or padded -- or at the field's own content origin where it draws no text at all.
+It blinks half a second on and half a second off, and that is the one thing in a screen that changes
+on its own: the loop has no timer, so `winit.EventManager:setTimeout` is what the screen uses to say
+when it wants waking, and a platform whose loop cannot be given a deadline has a caret that is woken
+by its events instead. `screen.plugins.ui.caretBlink` is the time, and nought is a caret that stays.
 
 Text with newlines in it is drawn as lines, for a `text` element as much as for a field, and each
 line is aligned by its own width.
@@ -122,7 +131,14 @@ For example, the window handling, rendering, layout engine and text rendering ar
 | render | the device, the frame buffers, and a screenshot |
 | text | measuring lines into runs the quad pass draws |
 | layout | solving the screen, and turning events into messages |
-| ui | the layout's quads, and the diff that skips a frame that came out the same |
+| ui | the layout's quads, the diff that skips a frame that came out the same, and the caret |
+
+A frame is built from the state the events left, and a frame the display asks for with nothing
+behind it is a frame of what is already built: the view, the measure and the solve happen when
+something changed, not once per frame. `UI.frameInterval` is the least time between frames, and a
+window manager that asks for frames -- X11's sync request, which winit passes on -- is a display's
+own clock and is not held back by it. A caret that blinks asks for its frames the same way: the end
+of the loop's wait is the clock a screen with something to do on its own is given.
 
 These are used by your app implicitly when you :run() without any arguments.
 

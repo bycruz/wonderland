@@ -89,6 +89,7 @@ function headless.new(view, opts)
 	-- screen with no loop has none, so the events that would ask it for something do nothing.
 	self.handler = {
 		setMode = function() end,
+		setTimeout = function() end,
 		exit = function() end,
 		close = function() end,
 		requestRedraw = function() end,
@@ -154,8 +155,15 @@ function Headless:event(event)
 		end
 	end
 
-	if message and self.onMessage then
-		self.onMessage(message)
+	if message then
+		-- A message is what an event came to, and what it left behind is owed a frame: this is the
+		-- half of the window loop an app gets from `App:handle`, which a screen with no loop has to
+		-- be told by whoever is driving it.
+		self.plugins.ui:requestRedraw(self.window)
+
+		if self.onMessage then
+			self.onMessage(message)
+		end
 	end
 
 	return message
