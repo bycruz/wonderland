@@ -38,27 +38,34 @@ ffi.cdef [[
 	int memcmp(const void *a, const void *b, size_t n);
 
 	typedef struct {
-		// what the node asks for. A share of the space is a fraction, and a fraction in a
-		// float32 is not the fraction: 0.7 becomes 0.69999999, which is 1.4e-5 of a 1200
-		// pixel screen and enough to round a position the wrong way.
-		double wantWidth;
-		double wantHeight;
-		int32_t gap;
+		// The style this node was made with, in the same order and the same types as `wl_style`,
+		// so that the whole of it is one ffi.copy: see the check below, which refuses to load if
+		// the two ever disagree. Every field of a node being written one at a time is what made
+		// the build long, and a build the recorder gives up on runs in the interpreter.
+		//
+		// A share of the space is a fraction, and a fraction in a float32 is not the fraction:
+		// 0.7 becomes 0.69999999, which is 1.4e-5 of a 1200 pixel screen and enough to round a
+		// position the wrong way. So the numbers the solver works in are doubles.
+		double wantWidth, wantHeight;
+		double bgR, bgG, bgB, bgA;     // what it is painted with, if anything
+		double borderR, borderG, borderB, borderA;
+		double u0, v0, u1, v1;         // and the part of its texture to use
+		int32_t gap, zIndex;
 		int32_t paddingTop, paddingRight, paddingBottom, paddingLeft;
 		int32_t marginTop, marginRight, marginBottom, marginLeft;
 		int32_t top, left, right, bottom;
-		int32_t zIndex;
 		int32_t borderTop, borderRight, borderBottom, borderLeft;
-		double bgR, bgG, bgB, bgA;     // what it is painted with, if anything
-		double borderR, borderG, borderB, borderA;
-		uint32_t texture;              // uploaded texture to paint, 0 for none
-		double u0, v0, u1, v1;         // and the part of it to use
-		uint32_t style;                // the slot it was styled with
-		uint32_t styleFlags;           // and which of that style's fields were set
-		double bright;                 // a multiplier on the colours, 1.0 for not one
-		double scroll;                 // and how far its content is moved up
 		uint32_t fgR, fgG, fgB, fgA;   // text colour as bytes, 0 for nothing
-		uint32_t font;                 // font id + 1, 0 for none
+		uint32_t texture, font;        // the texture it paints, and the font it is drawn in
+		double bright;                 // a multiplier on the colours, 1.0 for not one
+		uint32_t styleFlags;           // and which of that style's fields were set
+		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
+
+		// -- nothing above this line is the node's own: it is the style it was built from.
+
+		uint32_t style;                // the slot it was styled with
+		uint32_t scrolls;              // whether it clips its content to its own box
+		double scroll;                 // and how far its content is moved up
 		uint32_t run;                  // which run of the screen's runs to draw
 		uint32_t runId;                // and which measured line that was
 		uint32_t element;              // the element this came from, 1 based, 0 for none
@@ -67,14 +74,50 @@ ffi.cdef [[
 		double x, y;
 		double width, height;
 		uint32_t firstChild, childCount;
-
-		uint8_t widthUnit, heightUnit;  // 1 absolute, 2 a share, 3 automatic
-		uint8_t scrolls;                // whether it clips its content to its own box
-		uint8_t direction, align, justify, position, visible, paint;
 	} wl_node;
 ]]
 
+-- The build is one long function by nature: every field of every node is written from the style
+-- it was made with, and that is what makes a repaint a copy of a struct rather than a walk of a
+-- tree of tables. It is long enough that the recorder gives up on it -- "trace too long" -- and a
+-- loop it gives up on is a loop that runs in the interpreter, which measured ten times slower
+-- than the same work compiled. So it is allowed to record more before it gives up, and this is
+-- the only thing in the library that asks for that. The proper fix is a shorter function -- the
+-- style of a node copied into it with one ffi.copy rather than a write per field -- and until
+-- then this is the number that keeps the loop compiled.
+jit.opt.start("maxrecord=12000")
+
+-- What a scroll bar is told: how far there is to scroll, and how it is drawn. It lives beside the
+-- nodes rather than in them because only a box that scrolls has one, and every field of a node is
+-- written for every node of every frame -- which is what makes the build one long function, and a
+-- function the recorder gives up on is a build that runs in the interpreter, ten times slower.
+ffi.cdef [[
+	typedef struct {
+		double max;                    // how far the content goes past what the box shows
+		int32_t width, least;          // the strip it takes, and the least a thumb of it is
+		double r, g, b, a;
+	} wl_bar;
+]]
+
+-- The two structs have to agree, field for field and type for type, for as many bytes as a node
+-- copies: a field added to one and not the other would have every node reading a style's worth of
+-- memory that does not line up, which shows up as a screen that draws nonsense. Checked once, at
+-- load, so it is the library that refuses rather than a frame that comes out wrong.
+for _, field in ipairs({ "wantWidth", "wantHeight", "bgR", "borderR", "u0", "gap", "zIndex", "paddingTop",
+	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "widthUnit", "paint" }) do
+	assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
+		"wl_node and wl_style disagree about " .. field .. ": the build copies one into the other")
+end
+
+assert(ffi.offsetof("wl_node", "styleFlags") == ffi.offsetof("wl_style", "flags"),
+	"wl_node and wl_style disagree about their flags")
+
+--- How many bytes of a style a node takes: all of it but the scroll bar's, which a box that
+--- scrolls keeps beside its nodes.
+local STYLE_COPY = ffi.offsetof("wl_style", "barWidth")
+
 local nodeArray = ffi.typeof("wl_node[?]")
+local barArray = ffi.typeof("wl_bar[?]")
 local NODE_SIZE = assert(ffi.sizeof("wl_node"))
 
 --- A position is put on a whole pixel. Glyph quads are exactly as wide as their ink, so
@@ -165,6 +208,7 @@ local layout = {}
 ---@class wonderland.Layout.Screen
 ---@field nodes wonderland.Node[] # The node array itself
 ---@field childIndices ffi.cdata* # uint32_t, one run per node
+---@field bars ffi.cdata* # `wl_bar` per node, for the ones that scroll
 ---@field count number # Nodes in use
 ---@field childCount number # Child indices in use
 ---@field capacity number
@@ -186,6 +230,8 @@ function layout.new(capacity)
 	return setmetatable({
 		nodes = nodeArray(capacity),
 		childIndices = ffi.new("uint32_t[?]", capacity),
+		bars = barArray(capacity),
+		barNone = ffi.new("wl_bar"),
 		last = nodeArray(capacity),
 		capacity = capacity,
 		count = 0,
@@ -213,6 +259,7 @@ function Screen:reserve(nodes)
 	-- to come along, and the runs of child indices move with their nodes.
 	local nodes_ = nodeArray(capacity)
 	local childIndices = ffi.new("uint32_t[?]", capacity)
+	local bars = barArray(capacity)
 
 	if self.count > 0 then
 		ffi.copy(nodes_, self.nodes, self.count * NODE_SIZE)
@@ -222,8 +269,13 @@ function Screen:reserve(nodes)
 		ffi.copy(childIndices, self.childIndices, self.childCount * ffi.sizeof("uint32_t"))
 	end
 
+	if self.count > 0 and self.bars ~= nil then
+		ffi.copy(bars, self.bars, self.count * ffi.sizeof("wl_bar"))
+	end
+
 	self.nodes = nodes_
 	self.childIndices = childIndices
+	self.bars = bars
 	self.last = nodeArray(capacity)
 	self.lastCount = 0
 	self.capacity = capacity
@@ -309,8 +361,6 @@ local function applyOver(given, node)
 
 	if bit.band(present, PRESENT.bright) ~= 0 then
 		node.bright = given.bright
-	node.scrolls = bit.band(element.flags, SCROLLS) ~= 0 and 1 or 0
-	node.scroll = snap(element.scroll)
 	end
 end
 
@@ -360,32 +410,36 @@ function Screen:add(element)
 	-- The arrays are reused, so nothing is zero because it is new: every field is written
 	-- from the style whether the style named it or not, which is also why a style that
 	-- names nothing is a slot like any other -- the layout has one path through here.
+	-- The whole style in one copy: the node's first fields are laid out as a style is, so this is
+	-- the work of thirty writes in one call, and the reason the build is short enough for the
+	-- recorder. Everything below is the node's own.
+	ffi.copy(node, given, STYLE_COPY)
+
 	node.element = element.index
 	node.style = over ~= 0 and over or element.baseStyle
-	node.styleFlags = given.flags
-	node.paint = given.paint
-	node.texture = given.texture
-	node.u0, node.v0, node.u1, node.v1 = given.u0, given.v0, given.u1, given.v1
-	node.bgR, node.bgG, node.bgB, node.bgA = given.bgR, given.bgG, given.bgB, given.bgA
-	node.borderR, node.borderG, node.borderB, node.borderA =
-		given.borderR, given.borderG, given.borderB, given.borderA
-	node.borderTop, node.borderRight = given.borderTop, given.borderRight
-	node.borderBottom, node.borderLeft = given.borderBottom, given.borderLeft
-	node.paddingTop, node.paddingRight = given.paddingTop, given.paddingRight
-	node.paddingBottom, node.paddingLeft = given.paddingBottom, given.paddingLeft
-	node.marginTop, node.marginRight = given.marginTop, given.marginRight
-	node.marginBottom, node.marginLeft = given.marginBottom, given.marginLeft
-	node.top, node.left, node.right, node.bottom = given.top, given.left, given.right, given.bottom
-	node.widthUnit, node.wantWidth = given.widthUnit, given.wantWidth
-	node.heightUnit, node.wantHeight = given.heightUnit, given.wantHeight
-	node.gap, node.zIndex = given.gap, given.zIndex
-	node.direction, node.align, node.justify = given.direction, given.align, given.justify
-	node.position, node.visible = given.position, given.visible
-	node.fgR, node.fgG, node.fgB, node.fgA = given.fgR, given.fgG, given.fgB, given.fgA
-	node.bright = given.bright
 	node.x, node.y, node.width, node.height = 0, 0, 0, 0
 	node.firstChild, node.childCount = 0, 0
 	node.run, node.runId = 0, 0
+
+	-- A box that scrolls shows only what is inside it: how far its content is moved up is the
+	-- app's, and snapped to a whole pixel so the text in it stays crisp.
+	node.scrolls = bit.band(element.flags, SCROLLS) ~= 0 and 1 or 0
+	node.scroll = snap(element.scrollOffset)
+
+	-- A bar is taken out of the content rather than drawn over it, so nothing is under the strip it
+	-- is in. A box that does not scroll has no bar, whatever its style says -- and no bar is
+	-- written for it either, since the nodes the frame is not longer than keep theirs.
+	if node.scrolls ~= 0 then
+		local bar = self.bars[self.count - 1]
+
+		bar.max = 0
+		bar.width, bar.least = given.barWidth, given.barLeast
+		bar.r, bar.g, bar.b, bar.a = given.barR, given.barG, given.barB, given.barA
+
+		if bar.width > 0 then
+			node.paddingRight = node.paddingRight + bar.width
+		end
+	end
 
 	-- A style kept for the pointer stands in for the base one and says what it names: what it
 	-- does not name is what the base style says, so a hover style that only names a background
@@ -659,6 +713,37 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 			end
 
 		end
+
+	end
+
+	-- What is scrolled is shifted, and its own children come with it: their places are relative to
+	-- it, so moving it moves the lot. How far it is shifted is what the content came out to less
+	-- what the box shows -- which is only known once every child is placed -- so an offset past
+	-- the end of the content draws the end rather than a hole. What the app keeps is its own.
+	if node.scrolls ~= 0 then
+		local most = math.max(0, offset - containerMain)
+
+		-- Both ends, not just the far one: an offset below the start would put the content below
+		-- the box and the thumb above it, and a thumb above its box is a bar that walks out of
+		-- the pane as it is scrolled -- which is what a bar that would not stay put looked like.
+		local scroll = math.min(math.max(node.scroll, 0), most)
+
+		-- Kept, not just used: the bar is drawn from this, and an offset the app is still holding
+		-- would walk the thumb out of the box its content was correctly clamped inside.
+		node.scroll = scroll
+		screen.bars[index - 1].max = most
+
+		if scroll > 0 then
+			for at = 0, count - 1 do
+				local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+
+				if isRow then
+					child.x = child.x - scroll
+				else
+					child.y = child.y - scroll
+				end
+			end
+		end
 	end
 
 	local x = node.marginLeft
@@ -702,13 +787,20 @@ local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	local absX, absY = parentX + node.x, parentY + node.y
 	local marked = false
 
+	local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
+
+	-- What a box that scrolls has scrolled out of it is not drawn, hovered, or pressed either.
+	if node.scrolls ~= 0 and not inside then
+		return marked
+	end
+
 	for at = 0, node.childCount - 1 do
 		if markNode(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, pressed) then
 			marked = true
 		end
 	end
 
-	if node.visible == 0 or x < absX or x > absX + node.width or y < absY or y > absY + node.height then
+	if node.visible == 0 or not inside then
 		return marked
 	end
 

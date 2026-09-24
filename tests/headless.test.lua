@@ -209,7 +209,9 @@ test.skipIf(not canRender)("draws a screen bigger than the buffers it started wi
 			direction = "column",
 			bg = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 },
 		}):children(rows)
-	end, { width = 400, height = 300, fontPath = assert(fontPath) })
+	-- The window is the clip a frame starts with, so a screen whose frame is meant to be enormous
+	-- has to be enormous: what is outside it is not drawn.
+	end, { width = 400, height = 6200, fontPath = assert(fontPath) })
 
 	screen:draw()
 
@@ -219,7 +221,7 @@ test.skipIf(not canRender)("draws a screen bigger than the buffers it started wi
 	local pixels = assert(screen:getPixels())
 	screen:close()
 
-	local runs = inkRuns(pixels, 400, 300)
+	local runs = inkRuns(pixels, 400, 6200)
 	test.greater(#runs, 0, "and it drew the first rows of it")
 end)
 
@@ -417,6 +419,71 @@ end)
 -- repaint goes through here: a pointer moving across the same element, a window resized back to
 -- the size it was, a message that changed nothing on screen. Asking for a frame for those spends
 -- one on nothing, and spends it waiting for the display, with the next event queued behind it.
+-- A box that scrolls shows only what is inside it. Without that, a list would draw over whatever
+-- is below it, and the row that is half out of the pane would be half a row too many.
+test.skipIf(not canRender)("a box that scrolls draws only what is inside it", function()
+	local screen = wonderland.headless.new(function()
+		local pane = div():style({ direction = "column", width = { abs = 200 }, height = { abs = 100 } })
+			:scroll(50)
+
+		pane:children(
+			div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 1.0, g = 0.0, b = 0.0, a = 1.0 } }),
+			div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 0.0, g = 0.0, b = 1.0, a = 1.0 } })
+		)
+
+		return pane
+	end, { width = 200, height = 200, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	local r, _, b = pixelAt(pixels, 200, 100, 25)
+	test.equal(r, 255, "the row scrolled up shows the part of it that is left")
+	test.equal(b, 0)
+
+	local overR, _, overB = pixelAt(pixels, 200, 100, 75)
+	test.equal(overR, 0, "and the next one is below it")
+	test.equal(overB, 255)
+
+	local outsideR, _, outsideB = pixelAt(pixels, 200, 100, 150)
+	test.equal(outsideR, 0, "and below the pane there is nothing at all")
+	test.equal(outsideB, 0)
+	test.equal(select(2, pixelAt(pixels, 200, 100, 150)), 0, "not even a colour of its own")
+
+	screen:close()
+end)
+
+-- A box scrolled past either end shows the end, not a hole and not a bar walking out of it. An
+-- app that keeps its own offset can go below zero -- a bounce, a wheel turned the other way -- and
+-- the box it is in is the only thing that can put it back.
+test.skipIf(not canRender)("a box scrolled past its start draws as if it were at the start", function()
+	local function at(offset)
+		local screen = wonderland.headless.new(function()
+			local pane = div():style({ direction = "column", width = { abs = 200 }, height = { abs = 100 },
+				bar = { width = 8, least = 20, color = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 } } }):scroll(offset)
+
+			pane:children(
+				div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 1.0, g = 0.0, b = 0.0, a = 1.0 } }),
+				div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 0.0, g = 0.0, b = 1.0, a = 1.0 } })
+			)
+
+			return pane
+		end, { width = 200, height = 100, fontPath = assert(fontPath) })
+
+		screen:draw()
+		local pixels = assert(screen:getPixels())
+
+		local bar = pixelAt(pixels, 200, 196, 5)
+		screen:close()
+
+		return bar
+	end
+
+	local above, atStart = at(-500), at(0)
+
+	test.equal(above, atStart, "an offset above the start is the start")
+end)
+
 test.skipIf(not canRender)("a repaint that comes out the same asks for no frame", function()
 	local screen = withButton()
 

@@ -28,7 +28,7 @@ ffi.cdef [[
 		uint32_t childFirst, childCount, nextSibling;  // the children, as a chain
 		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit;
 		uint32_t userdata;           // whatever the app carries, by handle
-		double scroll;               // how far its content is scrolled up, 0 for not
+		double scrollOffset;         // how far its content is scrolled up, 0 for not
 		uint32_t fontId;             // the font its text is measured in, from the top down
 		uint32_t flags;              // hovered, pressed, focused, takes typing
 		uint32_t index;              // which element this is, from one
@@ -66,7 +66,7 @@ element.SCROLLS = 16
 ---@field onsubmit number
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
----@field scroll number # How far its content is scrolled up, and what clips it to its box
+---@field scrollOffset number # How far its content is scrolled up, and what clips it to its box
 ---@field flags number
 ---@field index number
 ---@field frame number
@@ -460,7 +460,7 @@ end
 function methods:scroll(offset)
 	check(self)
 	self.flags = bit.bor(self.flags, element.SCROLLS)
-	self.scroll = offset or 0
+	self.scrollOffset = offset or 0
 
 	return self
 end

@@ -30,6 +30,12 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 	local node = screen:node(index)
 	local absX, absY = parentX + node.x, parentY + node.y
 
+	-- A box that scrolls shows only what is inside it, so what is scrolled out of it is not there
+	-- to be clicked either.
+	if node.scrolls ~= 0 and (x < absX or x > absX + node.width or y < absY or y > absY + node.height) then
+		return nil
+	end
+
 	-- Always recurse into children: relative-positioned children may extend outside their
 	-- parent's bounds.
 	for at = 0, node.childCount - 1 do
@@ -63,6 +69,10 @@ local function findElementsAtPosition(screen, index, x, y, parentX, parentY, res
 		local element = pointers[node.element]
 
 		results[element] = { element = element, node = node, absX = absX, absY = absY }
+	end
+
+	if node.scrolls ~= 0 and (x < absX or x > absX + node.width or y < absY or y > absY + node.height) then
+		return
 	end
 
 	-- Always recurse: relative-positioned children may extend outside parent bounds
@@ -154,17 +164,22 @@ function Layout:refreshView(window)
 	ctx.ui = self.textPlugin:measure(self.view(window))
 	ctx.root = screen:fromElement(ctx.ui)
 
-	-- The first solve is not the frame. What the pointer is over is worked out from the boxes a
-	-- solve produced, and a style kept for the pointer may lay an element out differently, so a
-	-- screen where one of them is used is built again with it. Only the last solve is compared
-	-- against the frame the gpu has, which is what says whether a frame is needed at all: a
-	-- first solve counted as a frame would make every frame look like a change of the last one.
-	screen:solve(ctx.window.width, ctx.window.height, true)
-
+	-- What the pointer is over is worked out from the boxes a solve produced, and a style kept for
+	-- the pointer may lay an element out differently -- so a screen where one of them is used is
+	-- built and solved again with it. Only the last solve is compared against the frame the gpu
+	-- has, which is what says whether a frame is needed at all: a first solve counted as a frame
+	-- would make every frame look like a change of the last one.
+	--
+	-- Both of those are only worth it when there is a pointer to have a state about: a screen
+	-- nobody is pointing at solves once, which is most frames and every frame of a benchmark.
 	local pointer = ctx.pointer
 
-	if pointer and screen:markPointer(pointer.x, pointer.y, pointer.pressed) then
-		ctx.root = screen:fromElement(ctx.ui)
+	if pointer then
+		screen:solve(ctx.window.width, ctx.window.height, true)
+
+		if screen:markPointer(pointer.x, pointer.y, pointer.pressed) then
+			ctx.root = screen:fromElement(ctx.ui)
+		end
 	end
 
 	screen:solve(ctx.window.width, ctx.window.height)

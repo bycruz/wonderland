@@ -7,7 +7,7 @@
 -- to add; click a row to tick it off; click the x to remove it.
 local wonderland = require("wonderland")
 
-local div, sty = wonderland.div, wonderland.sty
+local div, text, sty = wonderland.div, wonderland.text, wonderland.sty
 
 -- Styles are values: written once and handed to everything that should look the same. Hover and
 -- active are the colours an element already has, lit: `bright(1.25)` is lighter, `bright(0.6)`
@@ -21,9 +21,25 @@ local TITLE = sty():row():wrel(1.0):h(28):justify("space-between"):align("center
 -- its children gives them a size to spread with.
 local HEADING = sty():w(140):fg("#ffffff")
 local COUNT = sty():w(90):justify("end"):fg("#7d8697")
-local LIST = sty():column():wrel(1.0):h("auto"):gap(4)
+-- The pane: as wide as the window, as tall as the window leaves for it, and with a bar drawn down
+-- the strip that width is taken from. The bar is its width, the least its thumb may be, and the
+-- colour the thumb and the fainter track are drawn in. It appears when there is more to show than
+-- fits, which is what "shows up" means. Its height is kept up to date rather than written every
+-- frame, because a style is interned by what it says and the same one interned again is work for
+-- nothing.
+local PANE = sty():column():wrel(1.0):gap(4):bar(8, 24, "#4a6dbd")
+
+-- What a row takes, and what the rest of the window takes. The pane is what the window leaves for
+-- it, and how far the list can scroll is its content less the pane -- all of which is the app's to
+-- work out, because the offset is state. The library clips the pane to itself and moves the
+-- content; an app whose screen fits would not need any of this.
+local ROW_STEP = 40
+local CHROME = 136
 local ROW = sty():row():wrel(1.0):h(36):gap(12):pad(0, 12):align("center"):bg("#1b2029")
 local TICK = sty():size(18, 18):align("center"):justify("center"):bg("#242a35"):fg("#a8b2c4")
+-- The line itself, not a box around it: a text element is as tall as the line it measured into,
+-- so the row's `align` has something to centre. A box round it would be as tall as the row, and
+-- the line would sit at the top of it.
 local LABEL = sty():w("auto")
 local DONE = sty():w("auto"):fg("#5c6473")
 local DELETE = sty():size(20, 20):align("center"):justify("center"):fg("#7d8697")
@@ -35,7 +51,7 @@ local EMPTY = sty():w("auto"):fg("#5c6473")
 ---@field text string
 ---@field done boolean
 
----@type wonderland.App<{ todos: Todo[], draft: string, nextId: number }>
+---@type wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
 local App = wonderland.app("Todos")
 
 function App:init()
@@ -46,6 +62,18 @@ function App:init()
 	}
 	self.draft = ""
 	self.nextId = 4
+	self.offset = 0
+	self.paneHeight = 0
+end
+
+--- The height of the pane, and how far the list can scroll inside it.
+---@param window wonderland.RenderWindow
+---@return number, number
+local function extent(self, window)
+	local height = math.max(ROW_STEP, window.height - CHROME)
+	local content = #self.todos * ROW_STEP - (ROW_STEP - 36)
+
+	return height, math.max(0, content - height)
 end
 
 ---@param id number
@@ -74,6 +102,13 @@ end
 ---@param window wonderland.RenderWindow
 ---@return wonderland.Element
 function App:view(window)
+	local height = extent(self, window)
+
+	if self.paneHeight ~= height then
+		self.paneHeight = height
+		PANE:h(height)
+	end
+
 	local focused = App.layoutPlugin ~= nil and App.layoutPlugin:getFocusedId(window) == "new"
 	local children = {}
 
@@ -86,7 +121,7 @@ function App:view(window)
 			:onClick({ type = "toggle", id = todo.id })
 			:children(
 				div():style(TICK):children(todo.done and "x" or ""),
-				div():style(todo.done and DONE or LABEL):children(todo.text),
+				text(todo.text):style(todo.done and DONE or LABEL),
 				div()
 					:style(DELETE)
 					:hover(sty():bright(1.8))
@@ -117,7 +152,7 @@ function App:view(window)
 			div():style(HEADING):children("Todos"),
 			div():style(COUNT):children(leftOver(self.todos))
 		),
-		div():style(LIST):children(children),
+		div():style(PANE):scroll(self.offset):children(children),
 		div()
 			:style(FIELD)
 			:input({
@@ -130,21 +165,40 @@ function App:view(window)
 	)
 end
 
+--- The wheel is a message like anything else: a notch is a row. What an event does is say what
+--- happened, and what a message does is change the state -- which is also what asks for the frame
+--- that shows it, since the view is a function of the state and nothing else would repaint.
+---@param event winit.Event
+---@return any?
+function App:event(event)
+	if event.name == "mouseScroll" then
+		return { type = "scroll", by = event.dy * ROW_STEP }
+	end
+end
+
 ---@param message any
-function App:update(message)
+---@param window wonderland.RenderWindow
+function App:update(message, window)
 	local kind = type(message) == "table" and message.type
 
 	if kind == "draft" then
 		self.draft = message.value
 	elseif kind == "add" then
 		-- Whitespace is not a todo, and a todo is not whitespace around one.
-		local text = message.value:match("^%s*(.-)%s*$")
+		local trimmed = message.value:match("^%s*(.-)%s*$")
 
-		if text ~= "" then
-			self.todos[#self.todos + 1] = { id = self.nextId, text = text, done = false }
+		if trimmed ~= "" then
+			self.todos[#self.todos + 1] = { id = self.nextId, text = trimmed, done = false }
 			self.nextId = self.nextId + 1
 			self.draft = ""
 		end
+	elseif kind == "scroll" then
+		-- Clamped where it is changed. The library clamps what it draws, so a drifting offset
+		-- still looks right -- but the app is the one holding it, and one let past the end of the
+		-- list has to be scrolled all the way back before anything moves.
+		local _, most = extent(self, window)
+
+		self.offset = math.max(0, math.min(most, self.offset + message.by))
 	elseif kind == "toggle" then
 		local todo = find(self.todos, message.id)
 
@@ -157,6 +211,13 @@ function App:update(message)
 		if index then
 			table.remove(self.todos, index)
 		end
+	end
+
+	-- The list may have lost its last row, and the pane does not scroll past what is left.
+	local _, most = extent(self, window)
+
+	if self.offset > most then
+		self.offset = most
 	end
 end
 

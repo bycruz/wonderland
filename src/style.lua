@@ -43,6 +43,12 @@ ffi.cdef [[
 		double bright;    // a multiplier on the colours, 1.0 for not one
 		uint32_t flags;   // which of the fields that have no neutral value were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
+
+		// Everything above is what a node is made of, in the order a node holds it, so a node
+		// copies a style into itself in one go. Everything below is only ever looked at when a
+		// box scrolls, which is why it is kept out of that copy -- and out of the nodes.
+		int32_t barWidth, barLeast;
+		double barR, barG, barB, barA;
 	} wl_style;
 ]]
 
@@ -76,12 +82,13 @@ local P = {
 	position = 32768,
 	visible = 65536,
 	bright = 131072,
+	bar = 262144,
 }
 
 style.PRESENT = P
 
 -- What a style that named no width or height says, and what it is painted with.
-local PAINT = 262144
+local PAINT = 524288
 
 --- One style, as the arena holds it: the fields the layout reads. The language server
 --- cannot see an ffi.cdef, so they are spelled out here, which is the only way to get
@@ -125,6 +132,12 @@ local PAINT = 262144
 ---@field fgA number
 ---@field texture number
 ---@field font number
+---@field barWidth number
+---@field barLeast number
+---@field barR number
+---@field barG number
+---@field barB number
+---@field barA number
 ---@field bright number
 ---@field flags number
 ---@field widthUnit number
@@ -174,6 +187,7 @@ local PAINT = 262144
 ---@class wonderland.VisualStyle
 ---@field bg wonderland.Color?
 ---@field bright number? # A multiplier on the colours: 1.0 as they are, 0 black
+---@field bar { width: number, least: number, color: wonderland.Color }? # A scroll bar
 ---@field bgImage Texture?
 ---@field bgImageUV { u0: number?, u1: number?, v0: number?, v1: number? }?
 ---@field fg wonderland.Color?
@@ -214,6 +228,7 @@ local Style = {}
 ---@field font fun(self: wonderland.StyleBuilder, font: Font): wonderland.StyleBuilder
 ---@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: { u0: number?, u1: number?, v0: number?, v1: number? }?): wonderland.StyleBuilder
 ---@field bright fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
+---@field bar fun(self: wonderland.StyleBuilder, width: number, least: number, color: string | wonderland.Color): wonderland.StyleBuilder
 local methods = {}
 methods.__index = methods
 
@@ -469,6 +484,21 @@ function methods:bright(value)
 	return self
 end
 
+--- A scroll bar for a box that scrolls, written down the right hand side of it and only drawn
+--- when there is something to scroll. Its width is the strip it takes -- which the content gives
+--- up, so nothing is drawn under it -- and the least height is how small the thumb may get, so a
+--- list of a thousand lines still shows something to drag. The bar is drawn in the colour it is
+--- given, and the track behind it in the same colour made fainter.
+---@param width number
+---@param least number # The least height a thumb of it is, in pixels
+---@param color string | wonderland.Color
+---@return wonderland.StyleBuilder
+function methods:bar(width, least, color)
+	self.values.bar = { width = width, least = least, color = toColor(color) }
+	self.version = self.version + 1
+	return self
+end
+
 --- Which uploaded texture text is drawn with.
 ---@param font Font
 ---@return wonderland.StyleBuilder
@@ -702,6 +732,16 @@ local function fill(fields)
 	if fields.font ~= nil then
 		scratch.font = fields.font
 		flags = flags + P.font
+	end
+
+	local bar = fields.bar
+	if bar then
+		local color = assert(bar.color)
+
+		scratch.barWidth, scratch.barLeast = bar.width, bar.least
+		scratch.barR, scratch.barG = color.r, color.g
+		scratch.barB, scratch.barA = color.b, color.a
+		flags = flags + P.bar
 	end
 
 	-- A multiplier rather than a colour of its own: a hover style that says this is the element's

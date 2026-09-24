@@ -29,6 +29,78 @@ end
 -- A box with no colour of its own is drawn with its texture as it is, which is white.
 local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 
+--- Where a box that scrolls shows through: a quad is drawn down to this, and the part of the
+--- texture that goes with the part that is left, so a glyph half out of a pane is cut rather
+--- than squashed into the half of itself that shows.
+---@class wonderland.plugin.UI.Clip
+---@field left number
+---@field top number
+---@field right number
+---@field bottom number
+
+---@param batch wonderland.QuadBatch
+---@param clip wonderland.plugin.UI.Clip
+---@param windowWidth number
+---@param windowHeight number
+---@param left number
+---@param top number
+---@param right number
+---@param bottom number
+---@param z number
+---@param r number
+---@param g number
+---@param b number
+---@param a number
+---@param texture number
+---@param u0 number
+---@param v0 number
+---@param u1 number
+---@param v1 number
+local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, right, bottom, z, r, g, b, a,
+	texture, u0, v0, u1, v1)
+	-- The quad the box asked for, when all of it shows. Most quads are inside the clip -- only the
+	-- ones at the edge of a pane that scrolls are not -- and working out where a quad is cut costs
+	-- a pair of divisions, so the ones that need nothing are the ones that get nothing.
+	if left >= clip.left and top >= clip.top and right <= clip.right and bottom <= clip.bottom then
+		batch:quad(
+			toNDC(left, windowWidth),
+			-toNDC(top, windowHeight),
+			toNDC(right, windowWidth),
+			-toNDC(bottom, windowHeight),
+			z,
+			r, g, b, a,
+			texture,
+			u0, v0, u1, v1
+		)
+
+		return
+	end
+
+	local atLeft = left < clip.left and clip.left or left
+	local atTop = top < clip.top and clip.top or top
+	local atRight = right > clip.right and clip.right or right
+	local atBottom = bottom > clip.bottom and clip.bottom or bottom
+
+	if atRight <= atLeft or atBottom <= atTop then
+		return
+	end
+
+	local du = (u1 - u0) / (right - left)
+	local dv = (v1 - v0) / (bottom - top)
+
+	batch:quad(
+		toNDC(atLeft, windowWidth),
+		-toNDC(atTop, windowHeight),
+		toNDC(atRight, windowWidth),
+		-toNDC(atBottom, windowHeight),
+		z,
+		r, g, b, a,
+		texture,
+		u0 + du * (atLeft - left), v0 + dv * (atTop - top),
+		u0 + du * (atRight - left), v0 + dv * (atBottom - top)
+	)
+end
+
 ---@param batch wonderland.QuadBatch
 ---@param bx number
 ---@param by number
@@ -41,20 +113,13 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@param z number
 ---@param windowWidth number
 ---@param windowHeight number
-local function addBorderQuad(batch, bx, by, bw, bh, r, g, b, a, z, windowWidth, windowHeight)
+local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowWidth, windowHeight)
 	if bw <= 0 or bh <= 0 then
 		return
 	end
 
-	batch:quad(
-		toNDC(bx, windowWidth),
-		-toNDC(by, windowHeight),
-		toNDC(bx + bw, windowWidth),
-		-toNDC(by + bh, windowHeight),
-		convertZ(z + 1),
-		r, g, b, a,
-		0
-	)
+	clippedQuad(batch, clip, windowWidth, windowHeight, bx, by, bx + bw, by + bh, convertZ(z + 1), r, g, b, a, 0,
+		0, 0, 1, 1)
 end
 
 --- A line is drawn from the run it measured into, which is where its glyphs are.
@@ -67,7 +132,7 @@ end
 ---@param fontManager FontManager
 ---@param windowWidth number
 ---@param windowHeight number
-local function generateTextQuads(batch, run, node, x, y, z, fontManager, windowWidth, windowHeight)
+local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, windowWidth, windowHeight)
 	local r, g, b = node.fgR / 255, node.fgG / 255, node.fgB / 255
 	local font = node.font ~= 0 and (node.font - 1)
 		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
@@ -89,16 +154,9 @@ local function generateTextQuads(batch, run, node, x, y, z, fontManager, windowW
 	for index = 0, run.count - 1 do
 		local glyph = run.glyphs[index]
 
-		batch:quad(
-			toNDC(originX + glyph.x, windowWidth),
-			-toNDC(originY + glyph.y, windowHeight),
-			toNDC(originX + glyph.x + glyph.width, windowWidth),
-			-toNDC(originY + glyph.y + glyph.height, windowHeight),
-			zIndex,
-			r, g, b, node.fgA / 255,
-			font,
-			glyph.u0, glyph.v0, glyph.u1, glyph.v1
-		)
+		clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, originY + glyph.y,
+			originX + glyph.x + glyph.width, originY + glyph.y + glyph.height, zIndex, r, g, b,
+			node.fgA / 255, font, glyph.u0, glyph.v0, glyph.u1, glyph.v1)
 	end
 end
 
@@ -113,7 +171,7 @@ end
 ---@param windowHeight number
 ---@param parentZ number?
 ---@param fontManager FontManager
-local function generateNodeQuads(batch, screen, index, parentX, parentY, windowWidth, windowHeight, parentZ,
+local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, windowWidth, windowHeight, parentZ,
 	fontManager)
 	local node = screen:node(index)
 	local x, y = parentX + node.x, parentY + node.y
@@ -126,20 +184,13 @@ local function generateNodeQuads(batch, screen, index, parentX, parentY, windowW
 			r, g, b, a = WHITE_R, WHITE_G, WHITE_B, WHITE_A
 		end
 
-		batch:quad(
-			toNDC(x, windowWidth),
-			-toNDC(y, windowHeight),
-			toNDC(x + node.width, windowWidth),
-			-toNDC(y + node.height, windowHeight),
-			convertZ(z),
-			r, g, b, a,
-			node.texture,
-			node.u0, node.v0, node.u1, node.v1
-		)
+		clippedQuad(batch, clip, windowWidth, windowHeight, x, y, x + node.width, y + node.height,
+			convertZ(z), r, g, b, a, node.texture, node.u0, node.v0, node.u1, node.v1)
 	end
 
 	if node.visible ~= 0 and node.run ~= 0 then
-		generateTextQuads(batch, assert(screen.runs[node.run]), node, x, y, z, fontManager, windowWidth, windowHeight)
+		generateTextQuads(batch, clip, assert(screen.runs[node.run]), node, x, y, z, fontManager, windowWidth,
+			windowHeight)
 	end
 
 	-- Borders come after the box they are on, so they land on top of it.
@@ -148,27 +199,72 @@ local function generateNodeQuads(batch, screen, index, parentX, parentY, windowW
 		local width, height = node.width, node.height
 
 		if node.borderTop > 0 then
-			addBorderQuad(batch, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight)
+			addBorderQuad(batch, clip, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight)
 		end
 
 		if node.borderBottom > 0 then
-			addBorderQuad(batch, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
+			addBorderQuad(batch, clip, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
 				windowWidth, windowHeight)
 		end
 
 		if node.borderLeft > 0 then
-			addBorderQuad(batch, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight)
+			addBorderQuad(batch, clip, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight)
 		end
 
 		if node.borderRight > 0 then
-			addBorderQuad(batch, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
+			addBorderQuad(batch, clip, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
 				windowWidth, windowHeight)
 		end
 	end
 
+	-- What a box that scrolls shows of its children is what is inside it: the clip is narrowed to
+	-- it, and stays narrowed for everything below.
+	local below = clip
+
+	if node.scrolls ~= 0 then
+		below = {
+			left = math.max(clip.left, x),
+			top = math.max(clip.top, y),
+			right = math.min(clip.right, x + node.width),
+			bottom = math.min(clip.bottom, y + node.height),
+		}
+	end
+
 	for at = 0, node.childCount - 1 do
-		generateNodeQuads(batch, screen, screen.childIndices[node.firstChild + at - 1], x, y, windowWidth,
+		generateNodeQuads(batch, screen, below, screen.childIndices[node.firstChild + at - 1], x, y, windowWidth,
 			windowHeight, z, fontManager)
+	end
+
+	-- A scroll bar is drawn over the strip it reserved, once the content is down: the track is the
+	-- colour it was given made fainter, and the thumb is as much of the track as the box shows of
+	-- the content. It is only there when there is something to scroll, which is what "shows up"
+	-- means -- a list that fits has no bar.
+	local bar = node.scrolls ~= 0 and screen.bars[index - 1]
+
+	if node.visible ~= 0 and bar and bar.width > 0 and bar.max > 0 then
+		local left = x + node.width - bar.width
+		local thumb = node.height * (node.height / (node.height + bar.max))
+
+		if thumb < bar.least then
+			thumb = bar.least
+		end
+
+		if thumb > node.height then
+			thumb = node.height
+		end
+
+		-- Where the thumb may travel is what is left of the box once the thumb is in it, so the
+		-- end of the list puts the thumb's end at the end of the box rather than past it.
+		local span = node.height - thumb
+		local at = math.min(math.max(node.scroll / bar.max, 0), 1)
+		local top = y + (span > 0 and at * span or 0)
+
+		-- Drawn inside its own pane rather than the clip it is under, so a bar cannot come out of
+		-- the box it belongs to and over whatever is beside it.
+		clippedQuad(batch, below, windowWidth, windowHeight, left, y, left + bar.width, y + node.height,
+			convertZ(z), bar.r, bar.g, bar.b, bar.a * 0.25, 0, 0, 0, 1, 1)
+		clippedQuad(batch, below, windowWidth, windowHeight, left, top, left + bar.width, top + thumb,
+			convertZ(z + 1), bar.r, bar.g, bar.b, bar.a, 0, 0, 0, 1, 1)
 	end
 end
 
@@ -219,7 +315,8 @@ function UI:refreshView(window)
 	-- a window that has never been given a frame has nothing to show.
 	if screen.changed or not ctx.uploaded then
 		self.batch:reset()
-		generateNodeQuads(self.batch, screen, assert(ctx.root), 0, 0, window.width, window.height, nil, fontManager)
+		generateNodeQuads(self.batch, screen, { left = 0, top = 0, right = window.width, bottom = window.height },
+			assert(ctx.root), 0, 0, window.width, window.height, nil, fontManager)
 
 		self.renderPlugin:setRenderData(window, self.batch)
 		ctx.uploaded = true

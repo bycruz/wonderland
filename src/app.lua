@@ -298,6 +298,15 @@ function app.run(self)
 				end
 			end
 		end
+
+		-- Whether the loop waits for the next event or takes what is already queued. Waiting is
+		-- what an idle window does, and it is what keeps a screen that nothing has happened to
+		-- from spinning. Taking what is queued is what a burst is for: a wheel turned hard is
+		-- dozens of events, and waiting between them means a frame each, drawn from a state that
+		-- is already behind the events -- which is what makes a fast scroll lag behind the wheel.
+		local owes = event.window ~= nil and event.window.shouldRedraw
+
+		handler:setMode(owes and "poll" or "wait")
 	end)
 end
 
