@@ -1,0 +1,79 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+          - os: ubuntu-24.04-arm
+            android: true
+          - os: windows-latest
+          - os: windows-11-arm
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup lde
+        uses: lde-org/setup-lde@master
+        with:
+          version: nightly
+          platform: ${{ matrix.android && 'Android' || '' }}
+
+
+      # The headless tests render a screen offscreen, which needs a vulkan driver:
+      # lavapipe is the software one, and the only one a bare runner has. Elsewhere
+      # they skip and say so.
+      - name: Install a software vulkan driver
+        if: runner.os == 'Linux' && !matrix.android
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+
+      - name: Run tests
+        if: "!matrix.android"
+        run: lde test
+
+      # The termux container mounts the workspace, so lde has to be inside it and
+      # the lockfile it writes has to be readable from the host
+      - name: Fix workspace permissions (Android)
+        if: matrix.android
+        run: |
+          chmod -R a+rw ${{ github.workspace }}
+          cp ~/.lde/lde ${{ github.workspace }}/lde
+
+      - name: Cache termux image (Android)
+        if: matrix.android
+        id: cache-android
+        uses: actions/cache@v4
+        with:
+          path: /tmp/termux-android.tar
+          key: termux-android-v1
+
+      # clang is what compiles the vendored decoders
+      - name: Run tests (Android)
+        if: matrix.android
+        run: |
+          if [[ "${{ steps.cache-android.outputs.cache-hit }}" != "true" ]]; then
+            docker run --privileged --platform linux/arm64 \
+              --name termux-build termux/termux-docker:aarch64 \
+              bash -c "apt update && apt install -y clang"
+            docker commit termux-build termux-android:latest
+            docker rm termux-build
+            docker save termux-android:latest -o /tmp/termux-android.tar
+          fi
+
+          docker load -i /tmp/termux-android.tar
+
+          docker run --rm --privileged --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            termux-android:latest \
+            bash -c "/workspace/lde test"
