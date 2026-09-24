@@ -33,9 +33,34 @@ jobs:
       # The headless tests render a screen offscreen, which needs a vulkan driver:
       # lavapipe is the software one, and the only one a bare runner has. Elsewhere
       # they skip and say so.
-      - name: Install a software vulkan driver
+      #
+      # The build compiles the shaders to SPIR-V, which takes glslc (shaderc) or
+      # glslangValidator (glslang) and neither is on a bare runner. Ubuntu packages
+      # shaderc's glslc as glslc.
+      - name: Install a software vulkan driver and a shader compiler
         if: runner.os == 'Linux' && !matrix.android
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers glslc
+
+      # glslang's own releases are the only prebuilt windows one -- the Vulkan SDK has
+      # glslc but is a gigabyte, and the runner does not carry it. The exe is x64 and
+      # runs on the arm64 runner the same way the rest of the toolchain's x64 parts do.
+      - name: Install a shader compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "16.6.0"
+          $zip = "$env:RUNNER_TEMP\glslang.zip"
+          $url = "https://github.com/KhronosGroup/glslang/releases/download/$version/glslang-$version-windows-x86_64-release.zip"
+
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\glslang" -Force
+
+          $bin = Get-ChildItem -Path "$env:RUNNER_TEMP\glslang" -Recurse -Filter glslang.exe | Select-Object -First 1
+          if (-not $bin) {
+            throw "no glslang.exe in $url"
+          }
+
+          Add-Content -Path $env:GITHUB_PATH -Value $bin.DirectoryName
 
       - name: Run tests
         if: "!matrix.android"
@@ -55,16 +80,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/termux-android.tar
-          key: termux-android-v1
+          key: termux-android-v2
 
-      # clang is what compiles the vendored decoders
+      # clang is what compiles the vendored decoders and glslang what compiles the shaders
       - name: Run tests (Android)
         if: matrix.android
         run: |
           if [[ "${{ steps.cache-android.outputs.cache-hit }}" != "true" ]]; then
             docker run --privileged --platform linux/arm64 \
               --name termux-build termux/termux-docker:aarch64 \
-              bash -c "apt update && apt install -y clang"
+              bash -c "apt update && apt install -y clang glslang"
             docker commit termux-build termux-android:latest
             docker rm termux-build
             docker save termux-android:latest -o /tmp/termux-android.tar
