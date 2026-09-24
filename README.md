@@ -25,7 +25,13 @@ Use this package with the [lde](https://lde.sh/) package manager.
 lde add wonderland
 ```
 
-## Example
+## Examples
+
+You can run the examples in ./examples with:
+
+```bash
+lde run -C ./examples/app
+```
 
 ```lua
 local wonderland = require("wonderland")

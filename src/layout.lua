@@ -24,6 +24,7 @@ local runs = wonderlandElement.runs
 local HOVERED, PRESSED = wonderlandElement.HOVERED, wonderlandElement.PRESSED
 local ABS, REL, AUTO = style.ABS, style.REL, style.AUTO
 local PRESENT = style.PRESENT
+local SCROLLS = wonderlandElement.SCROLLS
 local WIDTH, HEIGHT = PRESENT.width, PRESENT.height
 
 -- Which style array the nodes are read out of. It is replaced when the arena grows, and
@@ -55,6 +56,7 @@ ffi.cdef [[
 		uint32_t style;                // the slot it was styled with
 		uint32_t styleFlags;           // and which of that style's fields were set
 		double bright;                 // a multiplier on the colours, 1.0 for not one
+		double scroll;                 // and how far its content is moved up
 		uint32_t fgR, fgG, fgB, fgA;   // text colour as bytes, 0 for nothing
 		uint32_t font;                 // font id + 1, 0 for none
 		uint32_t run;                  // which run of the screen's runs to draw
@@ -67,6 +69,7 @@ ffi.cdef [[
 		uint32_t firstChild, childCount;
 
 		uint8_t widthUnit, heightUnit;  // 1 absolute, 2 a share, 3 automatic
+		uint8_t scrolls;                // whether it clips its content to its own box
 		uint8_t direction, align, justify, position, visible, paint;
 	} wl_node;
 ]]
@@ -127,6 +130,8 @@ local layout = {}
 ---@field style number
 ---@field styleFlags number
 ---@field bright number
+---@field scrolls number
+---@field scroll number
 ---@field fgR number
 ---@field fgG number
 ---@field fgB number
@@ -304,6 +309,8 @@ local function applyOver(given, node)
 
 	if bit.band(present, PRESENT.bright) ~= 0 then
 		node.bright = given.bright
+	node.scrolls = bit.band(element.flags, SCROLLS) ~= 0 and 1 or 0
+	node.scroll = snap(element.scroll)
 	end
 end
 

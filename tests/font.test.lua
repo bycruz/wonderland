@@ -92,6 +92,15 @@ end)
 -- lines go when it is full. Counting the entries needs its own number: the keys are strings, so
 -- # is 0. It is sized for a screen, because a screen showing more lines than the cache holds
 -- would miss on every one of them on every repaint.
+test.skipIf(fontPath == nil)("an empty line measures to nothing, rather than failing", function()
+	local atlas = assert(Atlas.fromPath({ characters = CHARACTERS, pixelHeight = 18 }, assert(fontPath)))
+	local run = atlas:getRun("")
+
+	test.equal(run.count, 0, "there are no glyphs in a line with no characters")
+	test.equal(run.width, 0)
+	test.equal(run.glyphs, nil, "and no array to put them in")
+end)
+
 test.skipIf(fontPath == nil)("keeps a screen's worth of lines and drops the oldest", function()
 	local atlas = assert(Atlas.fromPath({ characters = CHARACTERS, pixelHeight = 18 }, assert(fontPath)))
 

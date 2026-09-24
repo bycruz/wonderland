@@ -1,0 +1,10 @@
+{
+	"$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+	"name": "wonderland-example-todo",
+	"description": "A wonderland example",
+	"authors": ["David Cruz <david@bycruz.dev>"],
+	"version": "0.1.0",
+	"dependencies": {
+		"wonderland": { "path": "../.." }
+	}
+}

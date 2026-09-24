@@ -23,11 +23,12 @@ local element = {}
 ffi.cdef [[
 	typedef struct {
 		uint32_t baseStyle, hoverStyle, activeStyle, focusStyle;  // what it looks like
-		uint32_t text, name, input;  // strings of this frame, by handle
+		uint32_t text, name, inputValue;  // strings of this frame, by handle
 		uint32_t run;                // the line it measured into, by handle
 		uint32_t childFirst, childCount, nextSibling;  // the children, as a chain
 		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit;
 		uint32_t userdata;           // whatever the app carries, by handle
+		double scroll;               // how far its content is scrolled up, 0 for not
 		uint32_t fontId;             // the font its text is measured in, from the top down
 		uint32_t flags;              // hovered, pressed, focused, takes typing
 		uint32_t index;              // which element this is, from one
@@ -38,6 +39,7 @@ ffi.cdef [[
 -- What state an element is in. A hover or press style is used in place of the base one,
 -- so this is what the layout reads to pick which style it is.
 element.HOVERED, element.PRESSED, element.FOCUSED, element.TEXT_INPUT = 1, 2, 4, 8
+element.SCROLLS = 16
 
 --- One element, as the arena holds it. The language server cannot see an ffi.cdef, so the
 --- fields are spelled out here: it is the only way to get them checked. The ones that
@@ -50,7 +52,7 @@ element.HOVERED, element.PRESSED, element.FOCUSED, element.TEXT_INPUT = 1, 2, 4,
 ---@field focusStyle number
 ---@field text number # The line it draws, by handle, 0 for none
 ---@field name number # Its own name, for input focus and for finding it
----@field input number # What has been typed into it
+---@field inputValue number # What has been typed into it, by handle
 ---@field run number # The line it measured into, by handle
 ---@field childFirst number
 ---@field childCount number
@@ -64,6 +66,7 @@ element.HOVERED, element.PRESSED, element.FOCUSED, element.TEXT_INPUT = 1, 2, 4,
 ---@field onsubmit number
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
+---@field scroll number # How far its content is scrolled up, and what clips it to its box
 ---@field flags number
 ---@field index number
 ---@field frame number
@@ -74,7 +77,8 @@ element.HOVERED, element.PRESSED, element.FOCUSED, element.TEXT_INPUT = 1, 2, 4,
 ---@field children fun(self: wonderland.Element, ...: wonderland.IntoElement | wonderland.IntoElement[]): wonderland.Element
 ---@field named fun(self: wonderland.Element, name: string): wonderland.Element
 ---@field data fun(self: wonderland.Element, data: any): wonderland.Element
----@field textInput fun(self: wonderland.Element, opts: wonderland.TextInputOpts<any>): wonderland.Element
+---@field input fun(self: wonderland.Element, opts: wonderland.InputOpts<any>): wonderland.Element
+---@field scroll fun(self: wonderland.Element, offset: number): wonderland.Element
 ---@field onMouseMove fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onClick fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onMouseDown fun(self: wonderland.Element, cons: fun(x: number, y: number, elementWidth: number, elementHeight: number): any): wonderland.Element
@@ -446,21 +450,38 @@ function methods:onDoubleClick(message)
 	return self
 end
 
----@class wonderland.TextInputOpts<T>
+--- How far a box's content is scrolled up. It is what an app keeps, because it is state: the
+--- library clips the box to itself, moves the content by this much, and answers a click by what
+--- it lands on, and how far is up to the app -- which is what the wheel does, and where a scroll
+--- bar is drawn from. A box that scrolls and does not clip would draw its content over whatever
+--- is under it, so the two are one call.
+---@param offset number
+---@return wonderland.Element
+function methods:scroll(offset)
+	check(self)
+	self.flags = bit.bor(self.flags, element.SCROLLS)
+	self.scroll = offset or 0
+
+	return self
+end
+
+---@class wonderland.InputOpts<T>
 ---@field name string
 ---@field value string
 ---@field oninput fun(value: string): T
 ---@field onsubmit fun(value: string): T
 
---- Takes the keyboard, and sends what is typed.
+--- Takes the keyboard, and sends what is typed. It is called `input` rather than `textInput`
+--- because a field of an element is read before a call is asked for, and it is the call an app
+--- makes.
 ---@generic T
----@param opts wonderland.TextInputOpts<T>
+---@param opts wonderland.InputOpts<T>
 ---@return wonderland.Element
-function methods:textInput(opts)
+function methods:input(opts)
 	check(self)
 	self.flags = bit.bor(self.flags, element.TEXT_INPUT)
 	self.name = pushString(opts.name)
-	self.input = pushString(opts.value or "")
+	self.inputValue = pushString(opts.value or "")
 	self.oninput = pushCallback(opts.oninput)
 	self.onsubmit = pushCallback(opts.onsubmit)
 
@@ -541,7 +562,7 @@ end
 ---@param self wonderland.Element
 ---@return string
 function element.inputOf(self)
-	return self.input ~= 0 and strings[self.input] or ""
+	return self.inputValue ~= 0 and strings[self.inputValue] or ""
 end
 
 --- Whatever the app carries on an element.

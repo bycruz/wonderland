@@ -373,6 +373,11 @@ function Layout:event(event)
 						ctx.cursorPos = #value
 						return { type = "_inputRefresh" }
 					end
+				elseif key == "space" then
+					value = value:sub(1, cursor) .. " " .. value:sub(cursor + 1)
+					ctx.cursorPos = cursor + 1
+					local typed = callbacks[element.oninput]
+					if typed then return typed(value) end
 				elseif #key == 1 and key:byte(1) >= 32 then
 					value = value:sub(1, cursor) .. key .. value:sub(cursor + 1)
 					ctx.cursorPos = cursor + 1

@@ -343,12 +343,11 @@ function Atlas:getRun(text)
 	local pen = 0
 	local baseline = math.floor(self.ascent + 0.5)
 
-	-- One array, written once: the count is what says it is there, so the loop is the
-	-- only place that has to know it is.
-	local array = assert(glyphs)
 	local quads = self.quads
 	local byByte = self.byByte
+	local array = glyphs
 
+	-- A line of nothing is a line of nothing: no glyphs to place, and no array to place them in.
 	-- By byte, not by taking a one-character string out of the line: a string per character per
 	-- line is what measuring cost before the quads were structs, and it is most of what was left.
 	for at = 1, count do
@@ -359,7 +358,7 @@ function Atlas:getRun(text)
 		end
 
 		local quad = quads[place - 1]
-		local glyph = array[at - 1]
+		local glyph = assert(array)[at - 1]
 
 		glyph.x = math.floor(pen + quad.x + 0.5)
 		glyph.y = math.floor(baseline + quad.y + 0.5)
