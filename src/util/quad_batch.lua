@@ -8,23 +8,28 @@
 -- The vertex is the one the render plugin's descriptor declares, and it asserts the two
 -- agree so the pair cannot drift apart:
 --
---   position (3) | colour (4) | uv (2) | texture (1) | corners (4) | radius (1)
+--   position (3) | colour (4) | uv (2) | texture (1) | corners (4) | edge (2)
 --
--- The corners are the four numbers a rounded box is cut with: where this corner of the quad is
--- from the middle of the box, and where the arc's own box starts, both in pixels measured across
--- the window -- so a radius means the same thing sideways as down. A quad that is not round says
--- so in the one radius, which is the last number and the only one written every time.
+-- The corners are the four numbers a box is cut with: where this corner of the quad is from the
+-- middle of the box, and where the arc's own box starts, both in pixels measured across the
+-- window -- so a radius means the same thing sideways as down. The two after them are how round
+-- that cut is and how sharp it is: a radius, and a band that says over how many pixels the edge
+-- changes. A band of one is the whole of a pixel either side of the edge, which is what a box
+-- with round corners wants; a wider one is a shadow, whose edge is spread out over its blur.
+-- A quad that is not cut at all says so in a band of nought, which is the number written for
+-- every quad that is not asked to be round.
 local ffi = require("ffi")
 
 local batch = {}
 
 local VERTICES_PER_QUAD = 4
 local INDICES_PER_QUAD = 6
-local FLOATS_PER_VERTEX = 15
+local FLOATS_PER_VERTEX = 16
 
---- Where a vertex holds what: the corner numbers and the radius, as floats from the start.
+--- Where a vertex holds what, as floats from the start of it: the corner numbers, then the
+--- radius and the band beside it.
 local ROUND = 10
-local RADIUS = 14
+local EDGE = 14
 
 local quadArray = ffi.typeof("float[?]")
 local indexArray = ffi.typeof("uint32_t[?]")
@@ -122,7 +127,8 @@ local function put(vertices, index, x, y, u, v, z, r, g, b, a, texture)
 
 	-- Written every time, and to nothing: the corners of the quad written into this slot
 	-- before it are still there, and the gpu would cut this one with them.
-	vertices[index + RADIUS] = 0
+	vertices[index + EDGE] = 0
+	vertices[index + EDGE + 1] = 0
 end
 
 --- A vertex of a quad whose corners are round: where it is from the middle of the box, where the
@@ -144,15 +150,17 @@ end
 ---@param innerX number
 ---@param innerY number
 ---@param radius number
+---@param band number
 local function putRound(vertices, index, x, y, u, v, z, r, g, b, a, texture, cornerX, cornerY, innerX, innerY,
-	radius)
+	radius, band)
 	put(vertices, index, x, y, u, v, z, r, g, b, a, texture)
 
 	vertices[index + ROUND] = cornerX
 	vertices[index + ROUND + 1] = cornerY
 	vertices[index + ROUND + 2] = innerX
 	vertices[index + ROUND + 3] = innerY
-	vertices[index + RADIUS] = radius
+	vertices[index + EDGE] = radius
+	vertices[index + EDGE + 1] = band
 end
 
 --- The quad the vertices just written make: its six indices, and one more in the batch.
@@ -236,8 +244,9 @@ end
 ---@param boxTop number?
 ---@param boxRight number?
 ---@param boxBottom number?
+---@param band number? # How sharp the edge is, over one pixel either side by default
 function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0, u1, v1, radius, boxLeft,
-	boxTop, boxRight, boxBottom)
+	boxTop, boxRight, boxBottom, band)
 	if self.quads >= self.capacity then
 		self:reserve(self.capacity + 1)
 	end
@@ -246,6 +255,10 @@ function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u
 	local index = self.quads * VERTICES_PER_QUAD * FLOATS_PER_VERTEX
 
 	u0, v0, u1, v1 = u0 or 0, v0 or 0, u1 or 1, v1 or 1
+
+	-- One pixel either side of the edge unless the caller says otherwise, which is what a box
+	-- with round corners wants and what a shadow does not.
+	band = band or 1
 
 	-- Where the corners are cut from: the middle of the box, how far the arcs sit inside it, and
 	-- the radius itself. All of it in pixels either way, so that an arc is a circle.
@@ -271,13 +284,13 @@ function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u
 	local centreX, centreY = (boxLeft + boxRight) * 0.5, (boxTop + boxBottom) * 0.5
 
 	putRound(vertices, index, left, top, u0, v0, z, r, g, b, a, texture,
-		(left - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius)
+		(left - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius, band)
 	putRound(vertices, index + FLOATS_PER_VERTEX, right, top, u1, v0, z, r, g, b, a, texture,
-		(right - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius)
+		(right - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius, band)
 	putRound(vertices, index + FLOATS_PER_VERTEX * 2, right, bottom, u1, v1, z, r, g, b, a, texture,
-		(right - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius)
+		(right - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius, band)
 	putRound(vertices, index + FLOATS_PER_VERTEX * 3, left, bottom, u0, v1, z, r, g, b, a, texture,
-		(left - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius)
+		(left - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius, band)
 
 	finish(self)
 end

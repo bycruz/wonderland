@@ -61,6 +61,26 @@ test.it("a bright style lights the colours the element already has", function()
 	test.equal(node.fgA, 0, "with nothing said about a colour it did not have")
 end)
 
+-- A shadow is what a box says about itself just as its corners are, so a style that stands in
+-- for it and says nothing about one leaves it alone: a card that lights up under the pointer
+-- does not lose the shadow it was drawn with.
+test.it("a style that stands in for another keeps the shadow it did not name", function()
+	local card = div():style(sty():size(200, 44):bg("#426bd9"):shadow(0, 4, 8)):hover(sty():bright(1.25))
+
+	wonderlandElement.hovering(card, true)
+
+	local node = solve(card, 400, 300):node(1)
+	test.equal(node.shadowY, 4, "the shadow is where the style it stood in for put it")
+	test.equal(node.shadowBlur, 8, "blurred by what that style said")
+	test.equal(node.shadowA, 102, "and drawn in the colour it left out, which is black at a bit under half")
+
+	local flat = div():style(sty():size(200, 44):bg("#426bd9"):shadow(0, 4, 8))
+		:hover(sty():shadow(0, 0, 0, "clear"))
+
+	wonderlandElement.hovering(flat, true)
+	test.equal(solve(flat, 400, 300):node(1).shadowA, 0, "while one that does name a shadow is what is used")
+end)
+
 test.it("brightness stops at white and leaves transparency alone", function()
 	local lit = solve(div():style(sty():bg("#808080"):fg("#404040"):bright(4)), 400, 300):node(1)
 

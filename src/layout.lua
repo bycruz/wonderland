@@ -59,6 +59,9 @@ ffi.cdef [[
 		uint32_t texture, font;        // the texture it paints, and the font it is drawn in
 		double bright;                 // a multiplier on the colours, 1.0 for not one
 		double radius;                 // how round its corners are, in pixels, 0 for square
+		int32_t shadowX, shadowY;      // where its shadow sits, how far it fades out, and
+		int32_t shadowBlur;
+		uint8_t shadowR, shadowG, shadowB, shadowA;  // what colour it is, 0 alpha for none
 		uint32_t styleFlags;           // and which of that style's fields were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
 
@@ -105,8 +108,8 @@ ffi.cdef [[
 -- memory that does not line up, which shows up as a screen that draws nonsense. Checked once, at
 -- load, so it is the library that refuses rather than a frame that comes out wrong.
 for _, field in ipairs({ "wantWidth", "wantHeight", "bgR", "borderR", "u0", "gap", "zIndex", "paddingTop",
-	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "widthUnit",
-	"paint" }) do
+	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "shadowX",
+	"shadowBlur", "shadowA", "widthUnit", "paint" }) do
 	assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
 		"wl_node and wl_style disagree about " .. field .. ": the build copies one into the other")
 end
@@ -176,6 +179,13 @@ local layout = {}
 ---@field styleFlags number
 ---@field bright number
 ---@field radius number
+---@field shadowX number
+---@field shadowY number
+---@field shadowBlur number
+---@field shadowR number
+---@field shadowG number
+---@field shadowB number
+---@field shadowA number
 ---@field scrolls number
 ---@field scroll number
 ---@field fgR number
@@ -368,6 +378,12 @@ local function applyOver(given, node)
 
 	if bit.band(present, PRESENT.radius) ~= 0 then
 		node.radius = given.radius
+	end
+
+	if bit.band(present, PRESENT.shadow) ~= 0 then
+		node.shadowX, node.shadowY, node.shadowBlur = given.shadowX, given.shadowY, given.shadowBlur
+		node.shadowR, node.shadowG = given.shadowR, given.shadowG
+		node.shadowB, node.shadowA = given.shadowB, given.shadowA
 	end
 end
 

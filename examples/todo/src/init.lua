@@ -46,7 +46,9 @@ local TICK = sty():size(18, 18):align("center"):justify("center"):bg("#242a35"):
 local LABEL = sty():w("auto")
 local DONE = sty():w("auto"):fg("#5c6473")
 local DELETE = sty():size(20, 20):align("center"):justify("center"):fg("#7d8697")
-local FIELD = sty():row():wrel(1.0):h(40):pad(0, 12):align("center"):bg("#1b2029"):fg("#8d97a8"):radius(10)
+-- A shadow is behind the box, offset from it and faded out over its blur: it is what makes the
+-- field look like it is above the list rather than another row in it.
+local FIELD = sty():row():wrel(1.0):h(40):pad(0, 12):align("center"):bg("#1b2029"):fg("#8d97a8"):radius(10):shadow(0, 3, 8, "#00000070")
 local EMPTY = sty():w("auto"):fg("#5c6473")
 
 ---@class Todo

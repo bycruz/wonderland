@@ -170,8 +170,9 @@ end
 ---@return wonderland.plugin.Render.Context
 function RenderPlugin:createContext(window, swapchain)
 
-	-- The last two are what a round box is cut with, in pixels: where this corner of the quad is
-	-- from the middle of the box and how far the arcs sit inside it, then the radius itself.
+	-- The last two are what a cut box is cut with, in pixels: where this corner of the quad is from
+	-- the middle of the box and how far the arcs sit inside it, then the radius of the cut and how
+	-- sharp its edge is.
 	local vertexDescriptor = VertexLayout
 		.new()
 		:withAttribute({ type = "f32", size = 3, offset = 0 }) -- position (vec3)
@@ -179,13 +180,13 @@ function RenderPlugin:createContext(window, swapchain)
 		:withAttribute({ type = "f32", size = 2, offset = 28 }) -- uv
 		:withAttribute({ type = "f32", size = 1, offset = 36 }) -- texture id
 		:withAttribute({ type = "f32", size = 4, offset = 40 }) -- corner (vec4)
-		:withAttribute({ type = "f32", size = 1, offset = 56 }) -- radius
+		:withAttribute({ type = "f32", size = 2, offset = 56 }) -- edge (radius, band)
 
 	-- The ui writes vertices itself, so the two have to describe the same vertex.
 	assert(QuadBatch.FLOATS_PER_VERTEX * ffi.sizeof("float") == vertexDescriptor:getStride(),
 		"The quad batch and the vertex descriptor disagree about the vertex size")
 
-	-- Room for a full screen of text to start with: 240 KB of vertices and 96 KB of
+	-- Room for a full screen of text to start with: 256 KB of vertices and 96 KB of
 	-- indices, where the same pair used to reserve 4 MB for a screen that never came.
 	local vertexCapacity = vertexDescriptor:getStride() * INITIAL_QUADS
 	local indexCapacity = ffi.sizeof("uint32_t") * 6 * INITIAL_QUADS

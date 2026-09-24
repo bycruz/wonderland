@@ -507,6 +507,76 @@ test.skipIf(not canRender)("draws a box with round corners", function()
 	test.equal(b, 0)
 end)
 
+-- A shadow is the box it belongs to, moved and drawn with its edge spread out: it is drawn
+-- behind the box, so what shows of it is what the box does not cover, and it is soft, so what
+-- shows fades with the distance from the box rather than stopping at it.
+test.skipIf(not canRender)("draws a shadow behind the box", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { abs = 60 }, height = { abs = 60 },
+			bg = { r = 0.5, g = 0.5, b = 0.5, a = 1.0 } }):children(
+			div():style({
+				width = { abs = 20 },
+				height = { abs = 20 },
+				top = 10,
+				left = 20,
+				position = "relative",
+				bg = WHITE,
+				radius = 4,
+				shadow = { x = 0, y = 8, blur = 6, color = { r = 0.0, g = 0.0, b = 0.0, a = 0.4 } },
+			})
+		)
+	end, { width = 60, height = 60, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	-- The box is where it was put, and the side the shadow was not moved towards has nothing
+	-- on it but the screen.
+	test.equal(select(1, pixelAt(pixels, 60, 30, 20)), 255, "the box is the box")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 4)), 127, "and above it there is nothing but the screen")
+
+	-- Below it the shadow is: darker than the screen, lighter than the box, and lighter the
+	-- further from the box it gets, which is what spreading its edge over six pixels means.
+	local near = select(1, pixelAt(pixels, 60, 30, 31))
+	local far = select(1, pixelAt(pixels, 60, 30, 41))
+
+	test.truthy(near < 100, "the shadow darkens what is under it")
+	test.truthy(near > 0, "and is not the box")
+	test.truthy(far > near, "while fading out with the distance")
+	test.truthy(far < 127, "and is still there eleven pixels past the box")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 50)), 127, "and is gone further down than it was blurred")
+end)
+
+-- What is not asked to fade has an edge where the box does: the same shadow with no blur is a
+-- band the width of the offset below it, and nothing at all past that.
+test.skipIf(not canRender)("a shadow with no blur has a hard edge", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { abs = 60 }, height = { abs = 60 },
+			bg = { r = 0.5, g = 0.5, b = 0.5, a = 1.0 } }):children(
+			div():style({
+				width = { abs = 20 },
+				height = { abs = 20 },
+				top = 10,
+				left = 20,
+				position = "relative",
+				bg = WHITE,
+				shadow = { x = 0, y = 8, blur = 0, color = { r = 0.0, g = 0.0, b = 0.0, a = 0.4 } },
+			})
+		)
+	end, { width = 60, height = 60, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	test.truthy(select(1, pixelAt(pixels, 60, 30, 34)) < 90, "the band under the box is the shadow")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 40)), 127, "and past the offset there is none of it")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 28)), 255, "and the box is still the box")
+end)
+
 -- A box cut down by the pane it is in is still a box with round corners: only what is left of it
 -- is drawn, and where it was cut it is cut square, because those are not its own corners. The
 -- corners it does have are still round, which is what a box scrolled to the middle of its list

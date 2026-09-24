@@ -42,6 +42,9 @@ ffi.cdef [[
 		uint32_t texture, font;
 		double bright;    // a multiplier on the colours, 1.0 for not one
 		double radius;    // how round the corners are, in pixels, 0 for square ones
+		int32_t shadowX, shadowY;  // where its shadow sits, and how far it fades out
+		int32_t shadowBlur;
+		uint8_t shadowR, shadowG, shadowB, shadowA;  // and what colour it is, 0 alpha for none
 		uint32_t flags;   // which of the fields that have no neutral value were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
 
@@ -85,12 +88,13 @@ local P = {
 	bright = 131072,
 	bar = 262144,
 	radius = 524288,
+	shadow = 1048576,
 }
 
 style.PRESENT = P
 
 -- What a style that named no width or height says, and what it is painted with.
-local PAINT = 1048576
+local PAINT = 2097152
 
 --- One style, as the arena holds it: the fields the layout reads. The language server
 --- cannot see an ffi.cdef, so they are spelled out here, which is the only way to get
@@ -142,6 +146,13 @@ local PAINT = 1048576
 ---@field barA number
 ---@field bright number
 ---@field radius number
+---@field shadowX number
+---@field shadowY number
+---@field shadowBlur number
+---@field shadowR number
+---@field shadowG number
+---@field shadowB number
+---@field shadowA number
 ---@field flags number
 ---@field widthUnit number
 ---@field heightUnit number
@@ -160,6 +171,13 @@ local PAINT = 1048576
 ---@alias Alignment "start" | "center" | "end"
 ---@alias Justify "start" | "center" | "end" | "space-between" | "space-around"
 ---@alias Visibility "visible" | "none"
+--- A shadow drawn behind a box: offset from it, blurred by how far its edge fades, in pixels.
+---@class wonderland.Shadow
+---@field x number
+---@field y number
+---@field blur number
+---@field color wonderland.Color
+
 ---@alias Padding { top: number?, bottom: number?, left: number?, right: number? }
 ---@alias Margin { top: number?, bottom: number?, left: number?, right: number? }
 ---@alias BorderStyle "solid" | "dashed" | "dotted" | "none"
@@ -191,6 +209,7 @@ local PAINT = 1048576
 ---@field bg wonderland.Color?
 ---@field bright number? # A multiplier on the colours: 1.0 as they are, 0 black
 ---@field radius number? # How round the corners of the box are, in pixels
+---@field shadow wonderland.Shadow? # A shadow behind the box
 ---@field bar { width: number, least: number, color: wonderland.Color }? # A scroll bar
 ---@field bgImage Texture?
 ---@field bgImageUV { u0: number?, u1: number?, v0: number?, v1: number? }?
@@ -233,6 +252,7 @@ local Style = {}
 ---@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: { u0: number?, u1: number?, v0: number?, v1: number? }?): wonderland.StyleBuilder
 ---@field bright fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
 ---@field radius fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
+---@field shadow fun(self: wonderland.StyleBuilder, x: number, y: number, blur: number, color: string | wonderland.Color?): wonderland.StyleBuilder
 ---@field bar fun(self: wonderland.StyleBuilder, width: number, least: number, color: string | wonderland.Color): wonderland.StyleBuilder
 local methods = {}
 methods.__index = methods
@@ -497,6 +517,21 @@ end
 ---@return wonderland.StyleBuilder
 function methods:radius(value)
 	self.values.radius = value
+	self.version = self.version + 1
+	return self
+end
+
+--- A shadow behind the box: where it sits, how far it fades out, and what colour it is. The
+--- offset is in pixels, and positive goes down and right, the way the box's own `offset`
+--- does. `blur` is how far the edge of it fades -- nought is a shadow with a hard edge -- and
+--- the colour is anything a background takes, black at about half alpha if none is named.
+---@param x number
+---@param y number
+---@param blur number
+---@param color string | wonderland.Color?
+---@return wonderland.StyleBuilder
+function methods:shadow(x, y, blur, color)
+	self.values.shadow = { x = x, y = y, blur = blur, color = toColor(color or "#00000066") }
 	self.version = self.version + 1
 	return self
 end
@@ -775,6 +810,20 @@ local function fill(fields)
 
 	if fields.radius ~= nil then
 		flags = flags + P.radius
+	end
+
+	-- A shadow is behind the box, so it is nothing at all until a style names one: the colour
+	-- is rounded to bytes, like a text colour, and its alpha is what says whether there is one.
+	local shadow = fields.shadow
+	if shadow then
+		local color = assert(shadow.color)
+
+		scratch.shadowX, scratch.shadowY, scratch.shadowBlur = shadow.x, shadow.y, shadow.blur
+		scratch.shadowR = math.floor(color.r * 255 + 0.5)
+		scratch.shadowG = math.floor(color.g * 255 + 0.5)
+		scratch.shadowB = math.floor(color.b * 255 + 0.5)
+		scratch.shadowA = math.floor(color.a * 255 + 0.5)
+		flags = flags + P.shadow
 	end
 
 	-- A style with a background is one that paints, whether or not it said anything else: a

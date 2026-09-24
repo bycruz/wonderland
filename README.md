@@ -41,9 +41,11 @@ local div, sty = wonderland.div, wonderland.sty
 -- A style is a value: write one once and hand it to everything that should look the same.
 -- Text takes the colour and the font of the nearest element above it that names them.
 -- `radius` is how round a box's corners are, in pixels: the corners are cut where the box is
--- drawn rather than built out of more geometry, so a round box is one quad like any other.
+-- drawn rather than built out of more geometry, so a round box is one quad like any other. And
+-- `shadow(x, y, blur, color)` puts one behind the box: offset from it, faded out over `blur`
+-- pixels, and black at a bit under half alpha when no colour is named.
 local SCREEN = sty():column():align("center"):justify("center"):gap(16):bg("#12141c"):fg("#edf0f7")
-local BUTTON = sty():row():align("center"):justify("center"):size(200, 44):bg("#426bd9"):radius(10)
+local BUTTON = sty():row():align("center"):justify("center"):size(200, 44):bg("#426bd9"):radius(10):shadow(0, 4, 10)
 
 -- One app, and what it keeps on itself: another wonderland.app() call would be another app
 -- with its own clicks and its own window. The generic is the app's own state.

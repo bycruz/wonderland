@@ -3,7 +3,7 @@ local wonderland = require("wonderland")
 local div, sty = wonderland.div, wonderland.sty
 
 local SCREEN = sty():column():align("center"):justify("center"):gap(16):bg("#12141c"):fg("#edf0f7")
-local BUTTON = sty():row():align("center"):justify("center"):size(200, 44):bg("#426bd9")
+local BUTTON = sty():row():align("center"):justify("center"):size(200, 44):bg("#426bd9"):radius(10):shadow(0, 4, 10)
 
 ---@type wonderland.App<{ clicks: number }>
 local App = wonderland.app("Wonderland")

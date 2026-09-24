@@ -57,25 +57,36 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@param u1 number
 ---@param v1 number
 ---@param radius number? # How round the box's corners are, in pixels, nothing for square ones
+---@param band number? # How sharp the edge of it is, one pixel either side by default
+---@param grow number? # How far past the box the quad is drawn: a shadow is its own blur
 local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, right, bottom, z, r, g, b, a,
-	texture, u0, v0, u1, v1, radius)
+	texture, u0, v0, u1, v1, radius, band, grow)
+	-- A quad that is drawn past its box is one whose edge is spread out, so what is drawn is the
+	-- box and the space the spreading needs; the box itself is what the corner arithmetic is about.
+	local drawnLeft, drawnTop = left - (grow or 0), top - (grow or 0)
+	local drawnRight, drawnBottom = right + (grow or 0), bottom + (grow or 0)
 	-- The quad the box asked for, when all of it shows. Most quads are inside the clip -- only the
 	-- ones at the edge of a pane that scrolls are not -- and working out where a quad is cut costs
 	-- a pair of divisions, so the ones that need nothing are the ones that get nothing.
-	if left >= clip.left and top >= clip.top and right <= clip.right and bottom <= clip.bottom then
-		-- Round and square are a call each rather than one argument to the same call: they are not
+	if drawnLeft >= clip.left and drawnTop >= clip.top and drawnRight <= clip.right and drawnBottom <= clip.bottom then
+		-- Cut and square are a call each rather than one argument to the same call: they are not
 		-- drawn in the same numbers, and a screen of text is nearly all of one of them.
-		if radius and radius > 0 then
+		if band or (radius and radius > 0) then
 			batch:roundQuad(
-				toNDC(left, windowWidth),
-				-toNDC(top, windowHeight),
-				toNDC(right, windowWidth),
-				-toNDC(bottom, windowHeight),
+				toNDC(drawnLeft, windowWidth),
+				-toNDC(drawnTop, windowHeight),
+				toNDC(drawnRight, windowWidth),
+				-toNDC(drawnBottom, windowHeight),
 				z,
 				r, g, b, a,
 				texture,
 				u0, v0, u1, v1,
-				radius
+				radius or 0,
+				toNDC(left, windowWidth),
+				-toNDC(top, windowHeight),
+				toNDC(right, windowWidth),
+				-toNDC(bottom, windowHeight),
+				band
 			)
 		else
 			batch:quad(
@@ -93,22 +104,22 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		return
 	end
 
-	local atLeft = left < clip.left and clip.left or left
-	local atTop = top < clip.top and clip.top or top
-	local atRight = right > clip.right and clip.right or right
-	local atBottom = bottom > clip.bottom and clip.bottom or bottom
+	local atLeft = drawnLeft < clip.left and clip.left or drawnLeft
+	local atTop = drawnTop < clip.top and clip.top or drawnTop
+	local atRight = drawnRight > clip.right and clip.right or drawnRight
+	local atBottom = drawnBottom > clip.bottom and clip.bottom or drawnBottom
 
 	if atRight <= atLeft or atBottom <= atTop then
 		return
 	end
 
-	local du = (u1 - u0) / (right - left)
-	local dv = (v1 - v0) / (bottom - top)
+	local du = (u1 - u0) / (drawnRight - drawnLeft)
+	local dv = (v1 - v0) / (drawnBottom - drawnTop)
 
 	-- What is drawn is what is inside the clip but the corners are the corners of the whole box: a
 	-- box cut down to a sliver by the pane it is in is still a box with round corners, and the
 	-- corners of the sliver are not corners of it.
-	if radius and radius > 0 then
+	if band or (radius and radius > 0) then
 		batch:roundQuad(
 			toNDC(atLeft, windowWidth),
 			-toNDC(atTop, windowHeight),
@@ -117,13 +128,14 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 			z,
 			r, g, b, a,
 			texture,
-			u0 + du * (atLeft - left), v0 + dv * (atTop - top),
-			u0 + du * (atRight - left), v0 + dv * (atBottom - top),
-			radius,
+			u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop),
+			u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop),
+			radius or 0,
 			toNDC(left, windowWidth),
 			-toNDC(top, windowHeight),
 			toNDC(right, windowWidth),
-			-toNDC(bottom, windowHeight)
+			-toNDC(bottom, windowHeight),
+			band
 		)
 
 		return
@@ -137,8 +149,8 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		z,
 		r, g, b, a,
 		texture,
-		u0 + du * (atLeft - left), v0 + dv * (atTop - top),
-		u0 + du * (atRight - left), v0 + dv * (atBottom - top)
+		u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop),
+		u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop)
 	)
 end
 
@@ -217,6 +229,19 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 	local node = screen:node(index)
 	local x, y = parentX + node.x, parentY + node.y
 	local z = math.max(node.zIndex, parentZ or 0)
+
+	-- The shadow first, so the box is drawn over it. It is the box itself, moved and drawn with
+	-- its edge spread out: the quad it is drawn as is the box grown by that spreading, and the
+	-- cut the shader makes is of the box, so what shows is the box's own shape going soft.
+	if node.visible ~= 0 and node.shadowA > 0 then
+		local blur = node.shadowBlur
+		local band = blur > 0 and (1 / (2 * blur)) or 1
+
+		clippedQuad(batch, clip, windowWidth, windowHeight, x + node.shadowX, y + node.shadowY,
+			x + node.shadowX + node.width, y + node.shadowY + node.height, convertZ(z),
+			node.shadowR / 255, node.shadowG / 255, node.shadowB / 255, node.shadowA / 255,
+			0, 0, 0, 1, 1, node.radius, band, blur + 1)
+	end
 
 	if node.visible ~= 0 and node.paint ~= 0 then
 		local r, g, b, a = node.bgR, node.bgG, node.bgB, node.bgA
