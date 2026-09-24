@@ -41,6 +41,7 @@ ffi.cdef [[
 		uint32_t fgR, fgG, fgB, fgA;
 		uint32_t texture, font;
 		double bright;    // a multiplier on the colours, 1.0 for not one
+		double radius;    // how round the corners are, in pixels, 0 for square ones
 		uint32_t flags;   // which of the fields that have no neutral value were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
 
@@ -83,12 +84,13 @@ local P = {
 	visible = 65536,
 	bright = 131072,
 	bar = 262144,
+	radius = 524288,
 }
 
 style.PRESENT = P
 
 -- What a style that named no width or height says, and what it is painted with.
-local PAINT = 524288
+local PAINT = 1048576
 
 --- One style, as the arena holds it: the fields the layout reads. The language server
 --- cannot see an ffi.cdef, so they are spelled out here, which is the only way to get
@@ -139,6 +141,7 @@ local PAINT = 524288
 ---@field barB number
 ---@field barA number
 ---@field bright number
+---@field radius number
 ---@field flags number
 ---@field widthUnit number
 ---@field heightUnit number
@@ -187,6 +190,7 @@ local PAINT = 524288
 ---@class wonderland.VisualStyle
 ---@field bg wonderland.Color?
 ---@field bright number? # A multiplier on the colours: 1.0 as they are, 0 black
+---@field radius number? # How round the corners of the box are, in pixels
 ---@field bar { width: number, least: number, color: wonderland.Color }? # A scroll bar
 ---@field bgImage Texture?
 ---@field bgImageUV { u0: number?, u1: number?, v0: number?, v1: number? }?
@@ -228,6 +232,7 @@ local Style = {}
 ---@field font fun(self: wonderland.StyleBuilder, font: Font): wonderland.StyleBuilder
 ---@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: { u0: number?, u1: number?, v0: number?, v1: number? }?): wonderland.StyleBuilder
 ---@field bright fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
+---@field radius fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
 ---@field bar fun(self: wonderland.StyleBuilder, width: number, least: number, color: string | wonderland.Color): wonderland.StyleBuilder
 local methods = {}
 methods.__index = methods
@@ -480,6 +485,18 @@ end
 ---@return wonderland.StyleBuilder
 function methods:bright(value)
 	self.values.bright = value
+	self.version = self.version + 1
+	return self
+end
+
+--- How round the corners of the box are, in pixels: 0 or nothing at all is square corners, and
+--- a radius taller than the box it is asked for is drawn as a box that is round all the way
+--- down its short side. The corners are cut in the shader rather than drawn as their own
+--- geometry, so a round box is one quad and its edge is as smooth as the rest of the screen.
+---@param value number
+---@return wonderland.StyleBuilder
+function methods:radius(value)
+	self.values.radius = value
 	self.version = self.version + 1
 	return self
 end
@@ -750,6 +767,14 @@ local function fill(fields)
 
 	if fields.bright ~= nil then
 		flags = flags + P.bright
+	end
+
+	-- Named by a style that stands in for another one, a radius is what the box it stands in for
+	-- already had, so a hover style that only lights a card up does not square its corners off.
+	scratch.radius = fields.radius or 0
+
+	if fields.radius ~= nil then
+		flags = flags + P.radius
 	end
 
 	-- A style with a background is one that paints, whether or not it said anything else: a

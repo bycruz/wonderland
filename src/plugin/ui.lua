@@ -56,22 +56,39 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@param v0 number
 ---@param u1 number
 ---@param v1 number
+---@param radius number? # How round the box's corners are, in pixels, nothing for square ones
 local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, right, bottom, z, r, g, b, a,
-	texture, u0, v0, u1, v1)
+	texture, u0, v0, u1, v1, radius)
 	-- The quad the box asked for, when all of it shows. Most quads are inside the clip -- only the
 	-- ones at the edge of a pane that scrolls are not -- and working out where a quad is cut costs
 	-- a pair of divisions, so the ones that need nothing are the ones that get nothing.
 	if left >= clip.left and top >= clip.top and right <= clip.right and bottom <= clip.bottom then
-		batch:quad(
-			toNDC(left, windowWidth),
-			-toNDC(top, windowHeight),
-			toNDC(right, windowWidth),
-			-toNDC(bottom, windowHeight),
-			z,
-			r, g, b, a,
-			texture,
-			u0, v0, u1, v1
-		)
+		-- Round and square are a call each rather than one argument to the same call: they are not
+		-- drawn in the same numbers, and a screen of text is nearly all of one of them.
+		if radius and radius > 0 then
+			batch:roundQuad(
+				toNDC(left, windowWidth),
+				-toNDC(top, windowHeight),
+				toNDC(right, windowWidth),
+				-toNDC(bottom, windowHeight),
+				z,
+				r, g, b, a,
+				texture,
+				u0, v0, u1, v1,
+				radius
+			)
+		else
+			batch:quad(
+				toNDC(left, windowWidth),
+				-toNDC(top, windowHeight),
+				toNDC(right, windowWidth),
+				-toNDC(bottom, windowHeight),
+				z,
+				r, g, b, a,
+				texture,
+				u0, v0, u1, v1
+			)
+		end
 
 		return
 	end
@@ -87,6 +104,30 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 
 	local du = (u1 - u0) / (right - left)
 	local dv = (v1 - v0) / (bottom - top)
+
+	-- What is drawn is what is inside the clip but the corners are the corners of the whole box: a
+	-- box cut down to a sliver by the pane it is in is still a box with round corners, and the
+	-- corners of the sliver are not corners of it.
+	if radius and radius > 0 then
+		batch:roundQuad(
+			toNDC(atLeft, windowWidth),
+			-toNDC(atTop, windowHeight),
+			toNDC(atRight, windowWidth),
+			-toNDC(atBottom, windowHeight),
+			z,
+			r, g, b, a,
+			texture,
+			u0 + du * (atLeft - left), v0 + dv * (atTop - top),
+			u0 + du * (atRight - left), v0 + dv * (atBottom - top),
+			radius,
+			toNDC(left, windowWidth),
+			-toNDC(top, windowHeight),
+			toNDC(right, windowWidth),
+			-toNDC(bottom, windowHeight)
+		)
+
+		return
+	end
 
 	batch:quad(
 		toNDC(atLeft, windowWidth),
@@ -185,7 +226,7 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		end
 
 		clippedQuad(batch, clip, windowWidth, windowHeight, x, y, x + node.width, y + node.height,
-			convertZ(z), r, g, b, a, node.texture, node.u0, node.v0, node.u1, node.v1)
+			convertZ(z), r, g, b, a, node.texture, node.u0, node.v0, node.u1, node.v1, node.radius)
 	end
 
 	if node.visible ~= 0 and node.run ~= 0 then
@@ -315,6 +356,7 @@ function UI:refreshView(window)
 	-- a window that has never been given a frame has nothing to show.
 	if screen.changed or not ctx.uploaded then
 		self.batch:reset()
+		self.batch:setViewport(window.width, window.height)
 		generateNodeQuads(self.batch, screen, { left = 0, top = 0, right = window.width, bottom = window.height },
 			assert(ctx.root), 0, 0, window.width, window.height, nil, fontManager)
 

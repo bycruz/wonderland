@@ -35,15 +35,18 @@ local PANE = sty():column():wrel(1.0):gap(4):bar(8, 24, "#4a6dbd")
 -- content; an app whose screen fits would not need any of this.
 local ROW_STEP = 40
 local CHROME = 136
-local ROW = sty():row():wrel(1.0):h(36):gap(12):pad(0, 12):align("center"):bg("#1b2029")
-local TICK = sty():size(18, 18):align("center"):justify("center"):bg("#242a35"):fg("#a8b2c4")
+-- A radius is how round the corners of a box are, in pixels, and it is cut where the box is drawn:
+-- a row stays one quad whatever its corners do. A box cut by the pane it scrolls in keeps them --
+-- only what is left of it is drawn, and where it was cut it is cut square.
+local ROW = sty():row():wrel(1.0):h(36):gap(12):pad(0, 12):align("center"):bg("#1b2029"):radius(8)
+local TICK = sty():size(18, 18):align("center"):justify("center"):bg("#242a35"):fg("#a8b2c4"):radius(5)
 -- The line itself, not a box around it: a text element is as tall as the line it measured into,
 -- so the row's `align` has something to centre. A box round it would be as tall as the row, and
 -- the line would sit at the top of it.
 local LABEL = sty():w("auto")
 local DONE = sty():w("auto"):fg("#5c6473")
 local DELETE = sty():size(20, 20):align("center"):justify("center"):fg("#7d8697")
-local FIELD = sty():row():wrel(1.0):h(40):pad(0, 12):align("center"):bg("#1b2029"):fg("#8d97a8")
+local FIELD = sty():row():wrel(1.0):h(40):pad(0, 12):align("center"):bg("#1b2029"):fg("#8d97a8"):radius(10)
 local EMPTY = sty():w("auto"):fg("#5c6473")
 
 ---@class Todo
@@ -139,11 +142,9 @@ function App:view(window)
 	-- What has been typed, and a caret where the end of it is while the field has the keyboard.
 	local typed = self.draft
 
-	if typed == "" then
+	if typed == "" and not focused then
 		typed = "what needs doing?"
-	end
-
-	if focused then
+	elseif focused then
 		typed = typed .. "|"
 	end
 

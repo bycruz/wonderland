@@ -69,6 +69,21 @@ test.it("brightness stops at white and leaves transparency alone", function()
 	test.equal(lit.fgR, 255, "a text colour stops at white too")
 end)
 
+-- Where the corners are round is what a box says about itself, so a style that stands in for it
+-- and says nothing about them leaves them alone: a card that lights up under the pointer is still
+-- a card with round corners.
+test.it("a style that stands in for another keeps the corners it did not name", function()
+	local card = div():style(sty():size(200, 44):bg("#426bd9"):radius(8)):hover(sty():bright(1.25))
+
+	wonderlandElement.hovering(card, true)
+	test.equal(solve(card, 400, 300):node(1).radius, 8, "the corners are what the style it stood in for said")
+
+	local squared = div():style(sty():size(200, 44):bg("#426bd9"):radius(8)):hover(sty():radius(0))
+
+	wonderlandElement.hovering(squared, true)
+	test.equal(solve(squared, 400, 300):node(1).radius, 0, "and one that does name them is what is used")
+end)
+
 test.it("a bright style is not a size", function()
 	local button = div():style(sty():size(200, 44)):active(sty():bright(0.5))
 

@@ -58,6 +58,7 @@ ffi.cdef [[
 		uint32_t fgR, fgG, fgB, fgA;   // text colour as bytes, 0 for nothing
 		uint32_t texture, font;        // the texture it paints, and the font it is drawn in
 		double bright;                 // a multiplier on the colours, 1.0 for not one
+		double radius;                 // how round its corners are, in pixels, 0 for square
 		uint32_t styleFlags;           // and which of that style's fields were set
 		uint8_t widthUnit, heightUnit, direction, align, justify, position, visible, paint;
 
@@ -104,7 +105,8 @@ ffi.cdef [[
 -- memory that does not line up, which shows up as a screen that draws nonsense. Checked once, at
 -- load, so it is the library that refuses rather than a frame that comes out wrong.
 for _, field in ipairs({ "wantWidth", "wantHeight", "bgR", "borderR", "u0", "gap", "zIndex", "paddingTop",
-	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "widthUnit", "paint" }) do
+	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "widthUnit",
+	"paint" }) do
 	assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
 		"wl_node and wl_style disagree about " .. field .. ": the build copies one into the other")
 end
@@ -173,6 +175,7 @@ local layout = {}
 ---@field style number
 ---@field styleFlags number
 ---@field bright number
+---@field radius number
 ---@field scrolls number
 ---@field scroll number
 ---@field fgR number
@@ -361,6 +364,10 @@ local function applyOver(given, node)
 
 	if bit.band(present, PRESENT.bright) ~= 0 then
 		node.bright = given.bright
+	end
+
+	if bit.band(present, PRESENT.radius) ~= 0 then
+		node.radius = given.radius
 	end
 end
 

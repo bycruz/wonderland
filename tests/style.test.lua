@@ -94,6 +94,17 @@ test.it("a style written twice interns to one slot", function()
 	test.falsy(style.intern(other) == style.intern(first))
 end)
 
+-- A radius is a field of the style like any other, so a style that differs only in how round
+-- its corners are is a style of its own: interning compares the whole struct.
+test.it("how round the corners are is part of what a style says", function()
+	local round = sty():bg("red"):radius(8)
+	local square = sty():bg("red")
+
+	test.equal(style.at(style.intern(round)).radius, 8, "what it names is in the slot")
+	test.equal(style.at(style.intern(square)).radius, 0, "and a style that names none is square")
+	test.falsy(style.intern(round) == style.intern(square), "so they are two slots, not one")
+end)
+
 test.it("hover, active and focus are kept on the element", function()
 	local el = div():hover(sty():fg("red")):active(sty():bg("blue")):focus(sty():bg("green"))
 

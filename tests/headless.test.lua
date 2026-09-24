@@ -484,6 +484,64 @@ test.skipIf(not canRender)("a box scrolled past its start draws as if it were at
 	test.equal(above, atStart, "an offset above the start is the start")
 end)
 
+-- A box with round corners is drawn as the box it is and cut in the shader, which is why it
+-- costs one quad: what is left is the box, with the corners taken off it and the middle of every
+-- side where it was.
+test.skipIf(not canRender)("draws a box with round corners", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { abs = 40 }, height = { abs = 40 }, bg = WHITE, radius = 12 })
+	end, { width = 40, height = 40, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	test.equal(select(1, pixelAt(pixels, 40, 20, 20)), 255, "the middle of the box is the box")
+	test.equal(select(1, pixelAt(pixels, 40, 20, 0)), 255, "and so is the middle of a side")
+	test.equal(select(1, pixelAt(pixels, 40, 0, 20)), 255)
+
+	local r, g, b = pixelAt(pixels, 40, 0, 0)
+	test.equal(r, 0, "while the corner is drawn as what is behind it")
+	test.equal(g, 0)
+	test.equal(b, 0)
+end)
+
+-- A box cut down by the pane it is in is still a box with round corners: only what is left of it
+-- is drawn, and where it was cut it is cut square, because those are not its own corners. The
+-- corners it does have are still round, which is what a box scrolled to the middle of its list
+-- has at both ends.
+test.skipIf(not canRender)("a rounded box cut by a pane keeps only the corners it has", function()
+	local screen = wonderland.headless.new(function()
+		local pane = div():style({ direction = "column", width = { abs = 100 }, height = { abs = 60 } }):scroll(30)
+
+		pane:children(
+			div():style({ width = { abs = 100 }, height = { abs = 60 }, bg = WHITE, radius = 20 }),
+			div():style({ width = { abs = 100 }, height = { abs = 20 } }),
+			div():style({ width = { abs = 100 }, height = { abs = 60 }, bg = WHITE, radius = 20 })
+		)
+
+		return pane
+	end, { width = 100, height = 60, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	-- The first box is scrolled 30 up, so its own top is above the pane and the pane cuts it: at
+	-- the pane's first row the box is at its left edge, square. Its last row is 30 down, inside
+	-- the pane, and there its own round corner is.
+	test.equal(select(1, pixelAt(pixels, 100, 0, 0)), 255, "where it was cut it is still the box")
+	test.equal(select(1, pixelAt(pixels, 100, 20, 20)), 255, "and so is the middle of it")
+	test.equal(select(1, pixelAt(pixels, 100, 0, 29)), 0, "while its own corner is cut off")
+
+	-- The second box starts 50 down, so the pane does not cut it: its own top corner is, and it is
+	-- drawn where it landed.
+	test.equal(select(1, pixelAt(pixels, 100, 0, 50)), 0, "the box below is round at the top too")
+	test.equal(select(1, pixelAt(pixels, 100, 50, 58)), 255, "and it is drawn where it lands")
+end)
+
 test.skipIf(not canRender)("a repaint that comes out the same asks for no frame", function()
 	local screen = withButton()
 
