@@ -1,10 +1,15 @@
 -- A screen with no window behind it, which is how the ui is checked: it is rendered
 -- offscreen and the pixels it produced are asserted.
 local test = require("lde-test")
+local image = require("image")
 local wonderland = require("wonderland")
 local Atlas = require("wonderland.font.stbtt")
 
 local div, text = wonderland.div, wonderland.text
+
+-- The fixtures are found beside this file rather than by the working directory a test is run from.
+local HERE = (debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or ".")
+local SPINNER = HERE .. "/fixtures/spinner.gif"
 
 local CHARACTERS = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
@@ -51,6 +56,7 @@ end
 local canRender = fontPath ~= nil and gpuErr == nil
 
 local WHITE = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 }
+local BLACK = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 }
 
 ---@param pixels string
 ---@param width number
@@ -1702,6 +1708,173 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked", fun
 	test.truthy(caretX ~= nil, "and the caret is drawn at all")
 	test.truthy(caretX ~= nil and math.abs(caretX - (PAD + pen(0, 2))) <= 1,
 		"at the boundary that was clicked rather than at the end of the value")
+
+	screen:close()
+end)
+
+-- ────────────────────────────────────────────────────────────────
+-- pictures
+-- ────────────────────────────────────────────────────────────────
+
+--- A picture of four pixels, one colour each in the order a file holds them -- red, green, blue and
+--- white, across and then down. Three channels, so what is drawn is a picture the upload had to
+--- widen as well as place: a texture array holds rgba and nothing else.
+---@param path string
+local function writePicture(path)
+	local picture = image.new(2, 2, 3)
+
+	picture:setPixel(0, 0, 255, 0, 0)
+	picture:setPixel(1, 0, 0, 255, 0)
+	picture:setPixel(0, 1, 0, 0, 255)
+	picture:setPixel(1, 1, 255, 255, 255)
+
+	assert(picture:save(path))
+end
+
+test.skipIf(not canRender)("draws a picture where the box it was given is, the right way up", function()
+	local path = os.tmpname() .. ".png"
+
+	writePicture(path)
+
+	local screen = wonderland.headless.new(function(_, assets)
+		local logo = assets:image(path)
+
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children({
+			div():style({ width = logo.width, height = logo.height, bgImage = logo.texture, bgImageUV = logo.uv }),
+		})
+	end, { width = 3, height = 3, fontPath = assert(fontPath) })
+
+	screen:draw()
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	local r, g, b, a = pixelAt(pixels, 3, 0, 0)
+	test.equal(r, 255, "the pixel the file holds first is drawn at the corner the layout put it in")
+	test.equal(g, 0)
+	test.equal(b, 0)
+	test.equal(a, 255, "and is opaque, whatever the file said about alpha")
+
+	local tr, tg, tb = pixelAt(pixels, 3, 1, 0)
+	test.equal(tr, 0, "the one the file holds beside it is drawn beside it")
+	test.equal(tg, 255)
+	test.equal(tb, 0)
+
+	local bl, bg, bb = pixelAt(pixels, 3, 0, 1)
+	test.equal(bl, 0, "and the row below it is the row below it, not the one above")
+	test.equal(bg, 0)
+	test.equal(bb, 255)
+
+	local br, brg, brb = pixelAt(pixels, 3, 1, 1)
+	test.equal(br, 255, "the last one the file holds is the bottom right corner")
+	test.equal(brg, 255)
+	test.equal(brb, 255)
+
+	local er, eg, eb = pixelAt(pixels, 3, 2, 2)
+	test.equal(er, 0, "and it is two pixels wide, so the rest is what was behind it")
+	test.equal(eg, 0)
+	test.equal(eb, 0)
+
+	os.remove(path)
+end)
+
+test.skipIf(not canRender)("draws the frame of a gif the clock is on", function()
+	local dance = nil
+
+	local screen = wonderland.headless.new(function(_, assets)
+		dance = dance or assets:gif(SPINNER)
+		local frame = dance:current()
+
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children({
+			div():style({ width = frame.width, height = frame.height, bgImage = frame.texture,
+				bgImageUV = frame.uv }),
+		})
+	end, { width = 4, height = 4, fontPath = assert(fontPath) })
+
+	--- The colour of the pixel the first frame's picture covers.
+	---@return number r, number g, number b, number a
+	local function drawn()
+		screen:draw()
+
+		return pixelAt(assert(screen:getPixels()), 4, 1, 1)
+	end
+
+	local r, g, b = drawn()
+	test.equal(r, 255, "the first frame of the gif is red")
+	test.equal(g, 0)
+
+	-- The clock is the test's, and the frames are played from the delay each one came with: the
+	-- first frame is a tenth of a second, the third two of them. See `wonderland.util.assets`.
+	local assets = screen.assets
+
+	assets:advance(0)
+	assets:advance(0.1)
+
+	local secondR, secondG = drawn()
+	test.equal(secondR, 0, "the second frame is green")
+	test.equal(secondG, 255)
+
+	assets:advance(0.2)
+
+	local thirdB = select(3, drawn())
+	test.equal(thirdB, 255, "and the third is blue")
+
+	assets:advance(0.4)
+
+	local wrappedR = select(1, drawn())
+	test.equal(wrappedR, 255, "and then it is red again")
+
+	test.truthy(dance ~= nil, "the screen is drawn from a gif at all")
+	screen:close()
+end)
+
+test.skipIf(not canRender)("asks the loop for the time the next frame of a gif is due", function()
+	local dance = nil
+
+	local screen = wonderland.headless.new(function(_, assets)
+		dance = dance or assets:gif(SPINNER)
+		local frame = dance:current()
+
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children({
+			div():style({ width = frame.width, height = frame.height, bgImage = frame.texture,
+				bgImageUV = frame.uv }),
+		})
+	end, { width = 4, height = 4, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local waited = nil
+	local handler = {
+		setMode = function() end,
+		setTimeout = function(_, seconds) waited = seconds end,
+		close = function() end,
+		exit = function() end,
+	}
+
+	-- What the ui reads is the wall clock, and a gif that started before the beginning of it is one
+	-- whose next frame is due now: the frame it is on was started a very long time ago.
+	---@cast dance wonderland.Gif
+	dance.at = 0
+
+	local was = dance.index
+	local ctx = assert(screen.plugins.layout.contexts[screen.window])
+
+	screen.plugins.ui:tick(screen.window, handler)
+
+	test.equal(dance.index, was + 1, "the tick moved it on to its next frame")
+	test.truthy(ctx.owed, "and left the screen it is on owed a frame")
+	test.truthy(waited ~= nil and waited > 0, "and told the loop when to come back")
+
+	-- The frame it owes is drawn as the display's time allows, and once it has been the loop is
+	-- woken for the gif's own next frame rather than for a frame that is already there.
+	ctx.owed = false
+	waited = nil
+
+	screen.plugins.ui:tick(screen.window, handler)
+
+	test.equal(dance.index, was + 1, "which is not due yet")
+	test.truthy(waited ~= nil, "so the loop is told when it is")
+	test.greater(waited or 0, 0.05, "which is most of the tenth of a second the frame is shown for")
+	test.lessEqual(waited or 0, 0.1)
 
 	screen:close()
 end)

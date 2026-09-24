@@ -69,9 +69,10 @@ local WINDOW_CREATED = { type = "windowCreated" }
 ---@field font string? # A ttf to draw text with: the first one this machine is likely to have, otherwise
 ---@field pixelHeight number # How tall the font is baked
 ---@field characters string # And what it is baked for
+---@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
 ---@field plugins wonderland.Plugin[] # In the order they were added
 ---@field init (fun(self: wonderland.App): any?)? # Once the shell has filled the app in
----@field view (fun(self: wonderland.App, window: wonderland.RenderWindow): wonderland.Element)? # What the screen looks like
+---@field view (fun(self: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element)? # What the screen looks like
 ---@field update (fun(self: wonderland.App, message: any, window: winit.Window): wonderland.Task?)? # What a message does
 ---@field event (fun(self: wonderland.App, event: winit.Event, handler: winit.EventManager): any?)? # Events no plugin claimed
 ---@field private installed boolean
@@ -129,10 +130,12 @@ end
 -- layout needs the text, and the ui is the layout's quads in the renderer.
 ---@param self wonderland.App
 local function screenPlugins(self)
+	-- The view is handed the assets rather than reaching for them, because it is called again by
+	-- the layout and the field is only filled in when a window is made: see `App:created`.
 	self.windowPlugin = WindowPlugin.new(WINDOW_CREATED)
 	self.renderPlugin = RenderPlugin.new(self.windowPlugin)
 	self.textPlugin = TextPlugin.new(self.renderPlugin)
-	self.layoutPlugin = LayoutPlugin.new(function(w) return self:view(w) end, self.textPlugin)
+	self.layoutPlugin = LayoutPlugin.new(function(w) return self:view(w, self.assets) end, self.textPlugin)
 	self.uiPlugin = UIPlugin.new(self.layoutPlugin, self.renderPlugin)
 
 	-- Named as well, so an app that wants the renderer, or to replace one of these, can ask
@@ -179,10 +182,13 @@ function App:setup(...)
 end
 
 --- The screen, as a function of the state it shows. Empty by default: an app that has not said
---- what its screen looks like draws nothing.
+--- what its screen looks like draws nothing. `assets` is what an image or a gif is loaded with,
+--- and it is an argument rather than a field an app reads because the first screen is built
+--- before the app is handed one.
 ---@param _window wonderland.RenderWindow
+---@param _assets wonderland.Assets
 ---@return wonderland.Element
-function App:view(_window)
+function App:view(_window, _assets)
 	return require("wonderland").div()
 end
 
@@ -196,6 +202,11 @@ function App:created(window)
 
 	if render then
 		render:register(window)
+
+		-- What a view function loads pictures with. It is taken here rather than by the app,
+		-- because it only exists once there is a device: this is the window being made, which is
+		-- before the first screen is built. See `App:view`.
+		self.assets = assert(render.sharedResources).assets
 
 		if self.font then
 			local fonts = assert(render.sharedResources).fontManager

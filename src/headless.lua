@@ -2,7 +2,7 @@
 -- plugin draws into an offscreen target instead of a swapchain, and events are handed
 -- in by hand.
 --
---   local screen = headless.new(function(window) return view end, { width = 800, height = 600 })
+--   local screen = headless.new(function(window, assets) return view end, { width = 800, height = 600 })
 --   screen:draw()
 --   screen:save("ui.png")
 --
@@ -20,8 +20,10 @@ local CHARACTERS = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 local DEFAULT_PIXEL_HEIGHT = 18
 
---- The screen, as a function of the state it shows: this is what gets rendered.
----@alias wonderland.Headless.View fun(window: wonderland.RenderWindow): wonderland.Element
+--- The screen, as a function of the state it shows: this is what gets rendered. `assets` is
+--- what an image or a gif is loaded with, and it is handed over because the first screen is
+--- built while the screen itself is still being made.
+---@alias wonderland.Headless.View fun(window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element
 
 ---@class wonderland.headless
 ---@field new fun(view: wonderland.Headless.View, opts: wonderland.Headless.Options): wonderland.Headless
@@ -37,6 +39,7 @@ local headless = {}
 ---@field width number
 ---@field height number
 ---@field shouldRedraw boolean?
+---@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
 ---@field window wonderland.RenderWindow # The stand-in the plugins lay out against
 ---@field plugins { window: wonderland.plugin.Window<any>, render: wonderland.plugin.Render, text: wonderland.plugin.Text, layout: wonderland.plugin.Layout<any>, ui: wonderland.plugin.UI }
 ---@field order wonderland.Plugin[] # The plugins, in the order an event goes down them
@@ -64,7 +67,7 @@ function headless.new(view, opts)
 	self.plugins.render = RenderPlugin.new(self.plugins.window)
 	self.plugins.text = TextPlugin.new(self.plugins.render)
 	self.plugins.layout = LayoutPlugin.new(function(window)
-		return self.view(window)
+		return self.view(window, self.assets)
 	end, self.plugins.text)
 	self.plugins.ui = UIPlugin.new(self.plugins.layout, self.plugins.render)
 
@@ -95,6 +98,9 @@ function headless.new(view, opts)
 		requestRedraw = function() end,
 	}
 	self.plugins.render:registerHeadless(self.window)
+
+	-- What a view function loads pictures with, as an app is handed one when its window is made.
+	self.assets = assert(self.plugins.render.sharedResources).assets
 
 	if opts.fontPath then
 		local fontManager = assert(self.plugins.render.sharedResources).fontManager

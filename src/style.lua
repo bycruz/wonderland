@@ -172,6 +172,9 @@ local PAINT = 1 << 21
 ---@alias Alignment "start" | "center" | "end"
 ---@alias Justify "start" | "center" | "end" | "space-between" | "space-around"
 ---@alias Visibility "visible" | "none"
+--- The part of a texture a box is drawn with, from its top left corner to its bottom right one:
+--- the whole of it unless something -- a glyph in an atlas, a frame of a gif -- is less than that.
+---@alias wonderland.UV { u0: number, v0: number, u1: number, v1: number }
 --- A shadow drawn behind a box: offset from it, blurred by how far its edge fades, in pixels.
 ---@class wonderland.Shadow
 ---@field x number
@@ -213,7 +216,7 @@ local PAINT = 1 << 21
 ---@field shadow wonderland.Shadow? # A shadow behind the box
 ---@field bar { width: number, least: number, color: wonderland.Color }? # A scroll bar
 ---@field bgImage Texture?
----@field bgImageUV { u0: number?, u1: number?, v0: number?, v1: number? }?
+---@field bgImageUV wonderland.UV?
 ---@field fg wonderland.Color?
 ---@field font Font?
 
@@ -250,7 +253,7 @@ local Style = {}
 ---@field bg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
 ---@field fg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
 ---@field font fun(self: wonderland.StyleBuilder, font: Font): wonderland.StyleBuilder
----@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: { u0: number?, u1: number?, v0: number?, v1: number? }?): wonderland.StyleBuilder
+---@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: wonderland.UV?): wonderland.StyleBuilder
 ---@field bright fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
 ---@field radius fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
 ---@field shadow fun(self: wonderland.StyleBuilder, x: number, y: number, blur: number, color: string | wonderland.Color?): wonderland.StyleBuilder
@@ -561,9 +564,11 @@ function methods:font(font)
 	return self
 end
 
---- An uploaded texture across the box, and the part of it to use.
+--- An uploaded texture across the box, and the part of it to use: what an asset from
+--- `wonderland.Assets` hands over, which is the whole of a picture and the part of a layer a
+--- frame of a gif is.
 ---@param texture Texture
----@param uv { u0: number?, u1: number?, v0: number?, v1: number? }?
+---@param uv wonderland.UV?
 ---@return wonderland.StyleBuilder
 function methods:image(texture, uv)
 	self.values.bgImage = texture

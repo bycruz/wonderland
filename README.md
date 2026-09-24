@@ -119,6 +119,44 @@ by its events instead. `screen.plugins.ui.caretBlink` is the time, and nought is
 Text with newlines in it is drawn as lines, for a `text` element as much as for a field, and each
 line is aligned by its own width.
 
+## Pictures
+
+An image or a gif is loaded with the asset manager the view function is handed, and what comes back
+is a texture and the part of it to draw, which is all a style needs to put it on a box.
+
+```lua
+function App:view(window, assets)
+	-- A png, a jpeg, a tga, a qoi: whichever it is, what it is is what the bytes say.
+	local logo = assets:image("assets/logo.png")
+
+	return div():style(sty():size(logo.width, logo.height):image(logo.texture, logo.uv))
+end
+```
+
+The decoding is [image](https://github.com/lde-org/image)'s, so png, jpeg, tga, bmp, psd, gif, hdr,
+pic, pnm, qoi and ppm are read, and a file of one, two or three channels is widened to the four a
+texture holds. A path is decoded once and remembered, so a view that names the same picture on every
+repaint pays a lookup for it. A picture the app drew itself rather than read from a file goes through
+`assets:upload(picture)`, and is the app's to keep. The same manager is on an app as `self.assets` and
+on a headless screen as `screen.assets`; a screen wired up by hand makes one with
+`wonderland.Assets.new(textureManager)`.
+
+A gif comes back with every frame of it, and is played by the delay each frame carries:
+
+```lua
+local dance = assets:gif("assets/spinner.gif")
+local frame = dance:current()
+
+div():style(sty():size(frame.width, frame.height):image(frame.texture, frame.uv))
+```
+
+Which frame is current is the screen's own clock: a gif that has been asked for is advanced by
+`wonderland.plugin.UI:tick`, the frame it moved on to is drawn by a repaint, and the loop is woken
+for the time the frame after it is due -- so nothing but the app drawing it decides whether one is
+playing. The frames are packed into as few layers of the texture array as they fit, a gif of small
+frames being one layer for the whole of it, so a large or a long one wants a render plugin given
+more: `textures = { size = 1024, layers = 64 }` in the render plugin's options.
+
 ## Plugins
 
 The internals of wonderland consist of plugins.
@@ -128,7 +166,7 @@ For example, the window handling, rendering, layout engine and text rendering ar
 | plugin | what it owns |
 | ------- | ------------ |
 | window | the gpu instance, and a surface per window |
-| render | the device, the frame buffers, and a screenshot |
+| render | the device, the frame buffers, the pictures, and a screenshot |
 | text | measuring lines into runs the quad pass draws |
 | layout | solving the screen, and turning events into messages |
 | ui | the layout's quads, the diff that skips a frame that came out the same, and the caret |
@@ -187,14 +225,18 @@ App:run(myPlugin, myOtherPlugin)
 You can make wonderland render headless and save the output to a file.
 
 ```lua
-local screen = wonderland.headless.new(|window| -> view(window), { width = 800, height = 600, fontPath = "/path/to/font.ttf" })
+local screen = wonderland.headless.new(|window, assets| -> view(window, assets), { width = 800, height = 600, fontPath = "/path/to/font.ttf" })
 
 screen:draw()
-screen:save("ui.png")
+screen:save("ui.png") -- and ui.jpg, ui.qoi: the extension is what says the format
 
 -- Events go in by hand, and whatever they produce comes back out.
 screen:click(120, 40)
 ```
+
+A headless screen is handed pictures the same way an app is: `screen.assets`, or the second
+argument of the view function, which is what the first frame is built with -- the screen is still
+being made when that happens.
 
 You can also save screenshots from a windowed screen:
 

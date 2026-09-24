@@ -224,5 +224,5 @@ test.it("a view is empty until the app says what it looks like", function()
 	local app = wonderland.app():setup(nil)
 
 	---@diagnostic disable-next-line: param-type-mismatch
-	test.equal(app:view(nil).childCount, 0)
+	test.equal(app:view(nil, nil).childCount, 0)
 end)

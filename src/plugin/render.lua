@@ -1,8 +1,10 @@
 local ffi = require("ffi")
 local hood = require("hood")
+local image = require("image")
 
 local VertexLayout = require("hood").VertexLayout
 local TextureManager = require("wonderland.util.texture_manager")
+local Assets = require("wonderland.util.assets")
 local QuadBatch = require("wonderland.util.quad_batch")
 local FontManager = require("wonderland.util.font_manager")
 local backend = require("wonderland.backend")
@@ -10,7 +12,6 @@ local backend = require("wonderland.backend")
 local isVulkan = backend.isVulkan
 local shaderType = backend.shaderType
 local shaderExt = backend.shaderExt
-local png = require("wonderland.util.png")
 
 ---@class wonderland.plugin.Render.Context
 ---@field window wonderland.RenderWindow
@@ -42,6 +43,7 @@ local png = require("wonderland.util.png")
 ---@class wonderland.plugin.Render.SharedResources
 ---@field textureManager TextureManager
 ---@field fontManager FontManager
+---@field assets wonderland.Assets
 ---@field bindGroup hood.BindGroup
 
 ---@class wonderland.plugin.Render<Message>: wonderland.Plugin, { onWindowCreate: Message }
@@ -283,7 +285,8 @@ function RenderPlugin:createContext(window, swapchain)
 			bindGroup = bindGroup,
 			bindGroupLayout = bindGroupLayout,
 			textureManager = textureManager,
-			fontManager = fontManager
+			fontManager = fontManager,
+			assets = Assets.new(textureManager)
 		}
 	end
 
@@ -519,7 +522,9 @@ function RenderPlugin:getPixels(ctx)
 	return pixels
 end
 
---- Writes what the context last drew to a PNG.
+--- Writes what the context last drew to a file, in the format its extension names: png, jpg,
+--- bmp, tga, qoi and the rest of what the image package writes. It costs a render and a read
+--- back, so it is for a screenshot or a test rather than a frame.
 ---@param ctx wonderland.plugin.Render.Context
 ---@param path string
 ---@return boolean? ok
@@ -532,7 +537,13 @@ function RenderPlugin:saveScreenshot(ctx, path)
 
 	local capture = assert(ctx.capture)
 
-	return png.write(path, capture.width, capture.height, pixels)
+	-- What was read back is a string, and the encoder takes the buffer a texture is written
+	-- from, so it is copied into one rather than handed over: a string is not a pointer, and
+	-- the encode happens inside the call below.
+	local buffer = ffi.new("uint8_t[?]", #pixels)
+	ffi.copy(buffer, pixels, #pixels)
+
+	return image.new(capture.width, capture.height, 4, buffer):save(path)
 end
 
 --- hood's OpenGL backend does not implement every destroy its types declare, so a

@@ -811,9 +811,10 @@ function UI:blink(ctx)
 	return true
 end
 
---- What a screen has to do on its own, and when it next does it: a caret that blinks, and a key held
---- down in a field. Neither is a whole screen -- a blink is one quad of the frame the gpu has, and a
---- repeat is one character -- and both are what a loop with no timer in it has to be woken for.
+--- What a screen has to do on its own, and when it next does it: a caret that blinks, a key held
+--- down in a field, and a gif moving on to its next frame. None of them is a whole screen -- a blink
+--- is one quad of the frame the gpu has, and a repeat is one character -- and all of them are what a
+--- loop with no timer in it has to be woken for.
 ---
 --- This is what the loop is asked for the time of: it waits for the next event, of which an idle
 --- window has none, so a screen with something to do is one that has to say when it wants waking.
@@ -885,6 +886,26 @@ function UI:tick(window, handler)
 		end
 
 		due = due ~= nil and math.min(due, blink) or blink
+	end
+
+	-- A gif, which is the other thing a screen draws that changes with no event behind it. What
+	-- frame of one is being shown is the clock's, and the frame is a texture and the part of a
+	-- layer, which are what a style names: nothing short of a rebuild shows the next one. So a
+	-- gif that moved on leaves the screen owed a frame, which the block below asks for at the
+	-- display's own rate, and the time the one after it is due is what the loop is woken for.
+	local shared = self.renderPlugin.sharedResources
+	local assets = shared and shared.assets
+
+	if assets ~= nil then
+		if assets:advance(at) then
+			ctx.owed = true
+		end
+
+		local frames = assets:due()
+
+		if frames ~= nil then
+			due = due ~= nil and math.min(due, frames) or frames
+		end
 	end
 
 	-- What the events left, drawn as soon as the display's time allows it. A frame that came too soon

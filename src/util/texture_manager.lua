@@ -172,6 +172,10 @@ function TextureManager:update(texture, image)
 		"A %dx%d texture does not fit a %dx%d layer: give the render plugin a larger texture size.",
 		image.width, image.height, self.size, self.size))
 
+	-- The array is rgba8unorm and the shader reads it as such, so a buffer of fewer
+	-- channels would be sampled as if its bytes were pixels of four.
+	assert(image.channels == 4, "A texture takes four channels")
+
 	self:setTextureDimensions(texture, image.width, image.height)
 	self.device.queue:writeTexture(self.texture, { layer = texture, width = image.width, height = image.height },
 		image.pixels)
@@ -182,6 +186,97 @@ function TextureManager:upload(image)
 	local texture = self:allocate(image.width, image.height)
 	self:update(texture, image)
 	return texture
+end
+
+-- What sits between two frames packed into one layer, in pixels. A frame drawn at the size it
+-- was decoded samples its own pixels and nothing else, but one drawn larger -- or moved by half
+-- a pixel -- reads past its edge, and the sampler clamps at the end of a layer rather than at the
+-- end of a frame.
+local PACK_GUTTER = 1
+
+---@param destination ffi.cdata* # uint8_t*, a layer's worth of pixels
+---@param source ffi.cdata* # uint8_t*, one frame of four channels
+---@param width number
+---@param height number
+---@param x number
+---@param y number
+---@param stride number # How wide a row of the destination is, in pixels
+local function blit(destination, source, width, height, x, y, stride)
+	local rowBytes = width * 4
+
+	for row = 0, height - 1 do
+		ffi.copy(destination + (y + row) * stride * 4 + x * 4, source + row * rowBytes, rowBytes)
+	end
+end
+
+--- Every frame of an animation, packed into as few layers as fit: a gif of thirty frames of a
+--- hundred pixels is one layer rather than thirty, which is the difference between a picture that
+--- plays and one that runs a texture array out of layers.
+---
+--- Each frame comes back with the layer it landed in and the part of it to sample, and a layer is
+--- written whole -- the frames, and nothing around them -- so that what a frame's edge reads past
+--- it is transparent rather than whatever the last upload left there.
+---@param frames Image[] # in playback order, all the same size, four channels
+---@return { texture: Texture, uv: wonderland.UV }[]
+function TextureManager:uploadFrames(frames)
+	local count = #frames
+	local first = assert(frames[1], "An animation needs at least one frame")
+	local width, height = first.width, first.height
+
+	for index = 2, count do
+		assert(frames[index].width == width and frames[index].height == height,
+			"Every frame of an animation is the same size")
+	end
+
+	assert(width > 0 and height > 0 and width <= self.size and height <= self.size, string.format(
+		"A %dx%d frame does not fit a %dx%d layer: give the render plugin a larger texture size.",
+		width, height, self.size, self.size))
+
+	-- How many frames sit in one layer: the cells are the frame plus the gutter, and the last one
+	-- of a row or a column may have its gutter cut off by the edge of the layer.
+	local stepX, stepY = width + PACK_GUTTER, height + PACK_GUTTER
+	local columns = math.max(1, math.floor((self.size - width) / stepX) + 1)
+	local rows = math.max(1, math.floor((self.size - height) / stepY) + 1)
+	local perLayer = columns * rows
+
+	local layers = math.ceil(count / perLayer)
+	local pixels = ffi.new("uint8_t[?]", self.size * self.size * 4)
+	local placed = {}
+
+	for layer = 0, layers - 1 do
+		local from = layer * perLayer
+		local to = math.min(from + perLayer, count) - 1
+		-- Taken first, because a frame that lands in this layer is drawn from it either way: what
+		-- is allocated is the layer the frame is going into.
+		local texture = self:allocate(self.size, self.size)
+
+		ffi.fill(pixels, self.size * self.size * 4)
+
+		for index = from, to do
+			local slot = index - from
+			local column, row = slot % columns, math.floor(slot / columns)
+			local x, y = column * stepX, row * stepY
+
+			blit(pixels, frames[index + 1].pixels, width, height, x, y, self.size)
+
+			-- The part of the layer a frame is, in the coordinates a sampler reads it in: a
+			-- layer's own uv scale is one, so a frame is where in it that it was written.
+			placed[index + 1] = {
+				texture = texture,
+				uv = {
+					u0 = x / self.size,
+					v0 = y / self.size,
+					u1 = (x + width) / self.size,
+					v1 = (y + height) / self.size,
+				},
+			}
+		end
+
+		self.device.queue:writeTexture(self.texture,
+			{ layer = texture, width = self.size, height = self.size }, pixels)
+	end
+
+	return placed
 end
 
 ---@param binding number The binding index for the texture array
