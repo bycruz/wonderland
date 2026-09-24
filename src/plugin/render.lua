@@ -1,7 +1,7 @@
 local ffi = require("ffi")
 local hood = require("hood")
 
-local VertexLayout = require("hood.vertex_layout")
+local VertexLayout = require("hood").VertexLayout
 local TextureManager = require("wonderland.util.texture_manager")
 local QuadBatch = require("wonderland.util.quad_batch")
 local FontManager = require("wonderland.util.font_manager")

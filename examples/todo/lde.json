@@ -5,6 +5,7 @@
 	"authors": ["David Cruz <david@bycruz.dev>"],
 	"version": "0.1.0",
 	"dependencies": {
-		"wonderland": { "path": "../.." }
+		"wonderland": { "path": "../.." },
+		"hood": { "version": "0.2", "features": ["vk", "gl"] }
 	}
 }
