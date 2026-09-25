@@ -141,6 +141,9 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@field value number # The string handle of what has been typed into the field
 ---@field line number # Which line of it the caret is on, from nought
 ---@field column number # And how many bytes of that line come before it
+---@field from number? # The first byte of the value a selection covers, where there is one
+---@field to number?
+---@field covered boolean? # Whether the walk has drawn the selection, which is once a frame
 ---@field placed boolean? # Whether the field was walked, which is what says the quad is there
 ---@field left number?
 ---@field top number?
@@ -152,6 +155,16 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@field g number?
 ---@field b number?
 ---@field a number?
+
+-- What a selection is drawn in: the blue a desktop draws one in, and the colour of the text over it.
+-- A highlight of the text's own colour would be invisible on a background of a shade near it, which
+-- is the one thing a highlight cannot be.
+local SELECTION_R, SELECTION_G, SELECTION_B = 0.23, 0.51, 0.96
+local SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B = 1.0, 1.0, 1.0
+
+-- How wide a highlight is at the least, which is what an empty line inside a selection is drawn as:
+-- a line of nothing selected still has to look like it is part of what is selected.
+local SELECTION_LEAST = 6
 
 -- A byte past the end of a line, which is what a click at the left of a right-to-left line comes to:
 -- the bytes of such a line run from its right, so its left end is past every byte of it. The layout
@@ -317,8 +330,14 @@ end
 ---@param fontManager FontManager
 ---@param windowWidth number
 ---@param windowHeight number
-local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, windowWidth, windowHeight)
+---@param value string? # What the run was measured from, where a selection is counted in its bytes
+---@param from number? # The first byte of it a selection covers, where there is one
+---@param to number?
+local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, windowWidth, windowHeight,
+	value, from, to)
 	local r, g, b = node.fgR / 255, node.fgG / 255, node.fgB / 255
+	local selecting = value ~= nil and from ~= nil and to ~= nil and from < to
+	local lineBase = 0
 
 	-- The picture a glyph is drawn from is the one it was measured in, because a line may be drawn
 	-- by more than one face: a character the font an app named has no glyph for is drawn from the
@@ -348,13 +367,33 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 		for at = 0, line.count - 1 do
 			local glyph = assert(run.glyphs)[line.first + at]
 			local picture = glyph.texture ~= 0 and glyph.texture or font:picture()
+			local gr, gg, gb = r, g, b
+
+			-- A glyph the selection covers is drawn in the colour that reads on the highlight rather
+			-- than in the colour of the text: what a glyph came from is the byte it kept, so which
+			-- side of the selection it is on is a comparison of bytes.
+			if selecting then
+				local byte = lineBase + glyph.cluster
+
+				if byte >= from and byte < to then
+					gr, gg, gb = SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B
+				end
+			end
 
 			-- A glyph that is a picture of its own -- an emoji -- is drawn as the picture rather
 			-- than through the text's colour: what the colour is of it is how opaque the element is.
 			clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, y + glyph.y,
-				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, r, g, b,
+				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, gr, gg, gb,
 				node.fgA / 255, picture, glyph.u0, glyph.v0, glyph.u1, glyph.v1, nil, nil, nil,
 				glyph.own)
+		end
+
+		if selecting then
+			local break_ = value:find("\n", lineBase + 1, true)
+
+			if break_ ~= nil then
+				lineBase = break_
+			end
 		end
 	end
 end
@@ -439,6 +478,113 @@ local function lineOffset(node, line)
 	return 0
 end
 
+--- The run a field's caret and its selection are placed against: the value, measured in the font
+--- the field is drawn in -- what a line is drawn in is what its parents said unless it named one
+--- itself -- and cut to the box where the field cuts its line, so that a caret lands in the text
+--- that is on screen rather than in the text that was too long for it. See `wonderland.plugin.Layout`,
+--- which is where a line is cut.
+---@param element wonderland.Element
+---@param node wonderland.Node
+---@param value string
+---@param fontManager FontManager
+---@return wonderland.font.Run
+local function fieldRun(element, node, value, fontManager)
+	local font = element.fontId ~= 0 and fontManager:get(element.fontId)
+		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
+	local maxWidth = bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0
+			and (node.width - node.paddingLeft - node.paddingRight)
+		or nil
+
+	return font:getRun(value, maxWidth)
+end
+
+--- The quads a selection is drawn as: on every line it touches, the room between the two bytes of it
+--- on that line, in the pens that line was drawn along. The pens are the caret's own -- a caret and
+--- the highlight beside it agree about where a character is -- and where the selection runs off the
+--- end of a line, the room it comes to is the ink of the line rather than the advance of it: the room
+--- a line takes goes on past its last letter, over the space after it and the bearings either side,
+--- and a highlight drawn to there is a blue box with nothing in it.
+---
+--- What it is drawn in is the blue a selection is drawn in everywhere, and what the text over it is
+--- drawn in is the colour that reads on that blue -- see `generateTextQuads`.
+---@param batch wonderland.QuadBatch
+---@param clip wonderland.plugin.UI.Clip
+---@param caret wonderland.plugin.UI.Caret
+---@param element wonderland.Element
+---@param node wonderland.Node
+---@param x number
+---@param y number
+---@param z number
+---@param fontManager FontManager
+---@param windowWidth number
+---@param windowHeight number
+local function selectionQuads(batch, clip, caret, element, node, x, y, z, fontManager, windowWidth, windowHeight)
+	local value = strings[caret.value]
+	local from, to = caret.from, caret.to
+
+	if value == nil or from == nil or to == nil or from >= to then
+		return
+	end
+
+	local run = fieldRun(element, node, value, fontManager)
+	local lineStep = run.height / run.lineCount
+	local zIndex = convertZ(z)
+	local start = 1
+
+	for line = 0, run.lineCount - 1 do
+		local newline = value:find("\n", start, true)
+		-- The line's own bytes of the value, as the half open range a selection is counted in.
+		local lineFrom, lineTo = start - 1, (newline or #value + 1) - 1
+		local first, last = math.max(from, lineFrom), math.min(to, lineTo)
+		local whole = from <= lineFrom and to > lineTo
+
+		if first < last or whole then
+			local glyphLine = run.lines[line] ---@type wonderland.font.Line
+			local offset = lineOffset(node, glyphLine)
+			-- Both pens are taken into locals first: a call in the last argument of `math.min` is a
+			-- call that hands over *all* of what it returns, and `caretPen` answers with the pen and
+			-- the height of a line -- which is a left edge a line's height away from the right one.
+			local penFirst = caretPen(run, line, first - lineFrom)
+			local penLast = caretPen(run, line, last - lineFrom)
+			local left = math.min(penFirst, penLast)
+			local right = math.max(penFirst, penLast)
+
+			if last == first then
+				right = left + SELECTION_LEAST
+			end
+
+			-- Where the ink of the line is, which is what an end of the selection that leaves the line
+			-- is drawn to: the advance of a line carries on past its last letter, so a selection of the
+			-- whole of it would otherwise be a blue box with a space's worth of nothing in it.
+			local inkedLeft, inkedRight = nil, nil
+			local glyphs = assert(run.glyphs)
+
+			for at = 0, glyphLine.count - 1 do
+				local glyph = glyphs[glyphLine.first + at]
+
+				if glyph.width > 0 then
+					inkedLeft = math.min(inkedLeft or glyph.x, glyph.x)
+					inkedRight = math.max(inkedRight or (glyph.x + glyph.width), glyph.x + glyph.width)
+				end
+			end
+
+			if from <= lineFrom and inkedLeft ~= nil then
+				left = inkedLeft
+			end
+
+			if to >= lineTo and inkedRight ~= nil then
+				right = inkedRight
+			end
+
+			clippedQuad(batch, clip, windowWidth, windowHeight, x + offset + left, y + line * lineStep,
+				x + offset + right, y + line * lineStep + lineStep, zIndex, SELECTION_R, SELECTION_G,
+				SELECTION_B, 1.0, 0, 0, 0, 1, 1)
+		end
+
+		start = lineTo + 2
+	end
+end
+
 --- Where the caret of a field is drawn this frame, and what it is drawn as, kept on the caret the
 --- walk was handed: a frame is built once and the quad of it is drawn last, so what a blink needs
 --- to put back is the whole of what is decided here.
@@ -457,21 +603,7 @@ end
 ---@param fontManager FontManager
 local function placeCaret(caret, element, node, x, y, z, clip, fontManager)
 	local value = strings[caret.value]
-
-	-- The font the line was measured in, which is the element's: what a line is drawn in is what
-	-- its parents said unless it named one itself, and the measurement that says it did is the one
-	-- the text plugin keeps on the element. A field that draws no text of its own is measured in
-	-- whatever the window's default is, which is the font the value would have been drawn in.
-	local font = element.fontId ~= 0 and fontManager:get(element.fontId)
-		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
-
-	-- A line the screen draws cut to its box is measured cut when the caret beside it is placed,
-	-- so that the caret lands in the text that is on screen rather than in the text that was too
-	-- long for it. See `wonderland.plugin.Layout`, which is where a line is cut.
-	local maxWidth = bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0
-			and (node.width - node.paddingLeft - node.paddingRight)
-		or nil
-	local run = font:getRun(value, maxWidth)
+	local run = fieldRun(element, node, value, fontManager)
 	local pen, lineStep = caretPen(run, caret.line, caret.column)
 	local height = lineStep - CARET_INSET * 2
 	local line = run.lines[caret.line] ---@type wonderland.font.Line
@@ -660,8 +792,20 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 	end
 
 	if node.visible ~= 0 and node.run ~= 0 then
+		local value, from, to = nil, nil, nil
+
+		-- A selection is drawn behind the text it covers, at the same depth: the batch is drawn in the
+		-- order it was written, and what is written after is what shows. The node it is drawn on is
+		-- the node the caret is placed from -- the first one inside the field, which is where the
+		-- value is drawn -- so the highlight, the caret and the text are all about the same line.
+		if caret ~= nil and inside and element ~= nil and not caret.covered then
+			caret.covered = true
+			selectionQuads(batch, clip, caret, element, node, x, y, z, fontManager, windowWidth, windowHeight)
+			value, from, to = strings[caret.value], caret.from, caret.to
+		end
+
 		generateTextQuads(batch, clip, assert(screen.runs[node.run]), node, x, y, z, fontManager, windowWidth,
-			windowHeight)
+			windowHeight, value, from, to)
 	end
 
 	-- Borders come after the box they are on, so they land on top of it.
@@ -816,13 +960,31 @@ function UI:event(event, _handler)
 	end
 end
 
---- The caret as this frame has it: which field it is for and where in it, or nothing where no
---- field has the keyboard. What is typed into the field is kept by handle, since measuring it is
---- what the caret's own place is worked out from.
+--- What a frame is remembered by: the field the caret is in, where it is, and what is selected
+--- there. A caret that moved is a frame to build again and one that only blinked is not -- and a
+--- selection that grew without the caret moving, which is what shift and an arrow key does at the
+--- end of a line, is a frame of its own as well.
+---@param ctx wonderland.plugin.Layout.Context
+---@param window wonderland.RenderWindow
+---@param layoutPlugin wonderland.plugin.Layout
+---@return string?
+local function caretKey(ctx, window, layoutPlugin)
+	local element, line, column, from, to = layoutPlugin:getCaret(window)
+
+	if element == nil then
+		return nil
+	end
+
+	return table.concat({ tostring(ctx.focusedName), line, column, from or "", to or "" }, ":")
+end
+
+--- The caret as this frame has it: which field it is for, where in it, and what is selected in it,
+--- or nothing where no field has the keyboard. What is typed into the field is kept by handle, since
+--- measuring it is what the caret's own place and the highlight are worked out from.
 ---@param window wonderland.RenderWindow
 ---@return wonderland.plugin.UI.Caret?
 function UI:caretFor(window)
-	local element, line, column = self.layoutPlugin:getCaret(window)
+	local element, line, column, from, to = self.layoutPlugin:getCaret(window)
 
 	if element == nil then
 		return nil
@@ -833,6 +995,8 @@ function UI:caretFor(window)
 		value = element.inputValue,
 		line = line,
 		column = column,
+		from = from,
+		to = to,
 	}
 end
 
@@ -870,8 +1034,24 @@ function UI:caretClick(window)
 	end
 
 	local line, column = caretAtPoint(run, node, x, y, click.x, click.y)
+	local anchorLine, anchorColumn = nil, nil
+	local started = ctx.selectFrom
 
-	self.layoutPlugin:setCaret(window, line, column)
+	if started ~= nil then
+		-- The other end of the selection is where the press was, which is measured against the same
+		-- frame the caret is: a drag is one selection made from where it started to where the pointer
+		-- is now.
+		anchorLine, anchorColumn = caretAtPoint(run, node, x, y, started.x, started.y)
+
+		-- Kept while the pointer is held, so that a drag that is still going keeps the end it
+		-- started from, and let go of once it is up: a click that is over is a click that is done
+		-- with, as the point is.
+		if ctx.pointer == nil or not ctx.pointer.pressed then
+			ctx.selectFrom = nil
+		end
+	end
+
+	self.layoutPlugin:setCaret(window, line, column, anchorLine, anchorColumn)
 end
 
 --- The caret's clock: a caret is drawn for half a second and not for half a second, which is the
@@ -1205,8 +1385,7 @@ function UI:frame(window)
 
 	-- Where the caret is, which the frame's quads are remembered by as well as the screen: a caret
 	-- that moved is a frame to build again, and one that only blinked is not.
-	local element, line, column = self.layoutPlugin:getCaret(window)
-	local key = element ~= nil and (tostring(ctx.focusedName) .. ":" .. line .. ":" .. column) or nil
+	local key = caretKey(ctx, window, self.layoutPlugin)
 
 	if key ~= ctx.frameKey then
 		-- A caret that moved is drawn from the start of its blink, which is what an editor does
@@ -1263,8 +1442,7 @@ function UI:refreshView(window)
 
 	ctx.owed = false
 
-	local element, line, column = self.layoutPlugin:getCaret(window)
-	local key = element ~= nil and (tostring(ctx.focusedName) .. ":" .. line .. ":" .. column) or nil
+	local key = caretKey(ctx, window, self.layoutPlugin)
 
 	-- A repaint that comes out the same, with a caret that stayed where it was, is a repaint that
 	-- has nothing to upload and no frame to ask for: the gpu already has this one.

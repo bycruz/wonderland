@@ -1538,6 +1538,10 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	key("keyPress", "a", nil, { ctrl = true })
 	test.falsy(ctx.repeatKey, "and none of those is repeated by the library")
 
+	-- Which selected the whole of what the field held, so a key that walks the caret is what puts it
+	-- back to being one: the tests of a selection are further down.
+	key("keyPress", "right")
+
 	-- With the library's repeat turned off, the keyboard's own is what a held key does: it is the
 	-- presses that do the work, and there is nothing to say any of them is a repeat.
 	layout.keyRepeatInterval = 0
@@ -1649,17 +1653,28 @@ end)
 -- A click in a field is at a character rather than at the end of what it holds: which line and which
 -- character of it a point is at comes from the text the field draws -- the run of it, and where the
 -- walk put it -- so a click in the middle of a word puts the caret in the middle of it.
-test.skipIf(not canRender)("puts the caret where in a field it was clicked", function()
+--
+-- What moves the caret is the pointer and the keyboard, and what a selection is, is the caret and the
+-- other end of it -- so the keys that select and what a selection is replaced by are here as well,
+-- rather than on a screen of their own: a screen is a gpu device and a machine hands a process a few
+-- dozen of them.
+test.skipIf(not canRender)("puts the caret where in a field it was clicked, and selects with the keys", function()
 	local value = "abcd\nef"
 
 	local screen = wonderland.headless.new(function()
 		return div():style({ direction = "row", width = { abs = 200 }, height = { abs = 60 } }):children(
 			div():style({ direction = "column", width = { abs = 200 }, height = { abs = 60 },
 				padding = { left = 20 }, bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
-				:input({ name = "field", value = value, multiline = true })
+				:input({ name = "field", value = value, multiline = true, oninput = function(typed)
+					return { type = "typed", value = typed }
+				end })
 				:children(text(value):style({ fg = { r = 0.5, g = 0.5, b = 0.5, a = 1 } }))
 		)
-	end, { width = 200, height = 60, fontPath = assert(fontPath) })
+	end, { width = 200, height = 60, fontPath = assert(fontPath), onMessage = function(message)
+		if message.type == "typed" then
+			value = message.value
+		end
+	end })
 
 	local layout = screen.plugins.layout
 
@@ -1732,6 +1747,301 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked", fun
 	test.truthy(caretX ~= nil, "and the caret is drawn at all")
 	test.truthy(caretX ~= nil and math.abs(caretX - (PAD + pen(0, 2))) <= 1,
 		"at the boundary that was clicked rather than at the end of the value")
+
+	--- A key, with what the keyboard made of it.
+	---@param key string
+	---@param modifiers table?
+	---@param typed string?
+	local function press(key, modifiers, typed)
+		screen:event({ name = "keyPress", window = screen.window, key = key, text = typed,
+			modifiers = modifiers or {} })
+	end
+
+	--- The bytes of the value the field has selected.
+	---@return number? from
+	---@return number? to
+	local function selected()
+		local _, _, _, from, to = layout:getCaret(screen.window)
+
+		return from, to
+	end
+
+	--- Where the field's text starts, and how far into a line a byte of it is: the pointer goes to
+	--- the second, measured from the first.
+	---@return number
+	---@return fun(byte: number): number
+	local function textOrigin()
+		local fontManager = assert(screen.plugins.render.sharedResources).fontManager
+		local measured = assert(fontManager:getDefault()):getRun(value)
+		local line = measured.lines[0]
+
+		return PAD, function(byte)
+			local total = 0
+
+			for at = 0, byte - 1 do
+				total = total + measured.glyphs[line.first + at].advance
+			end
+
+			return total
+		end
+	end
+
+	value = "one two three"
+	screen:draw()
+	press("home")
+
+	test.equal(layout:getCursorPos(screen.window), 0, "a value untied of its breaks is one line")
+	test.equal(selected(), nil, "with nothing selected")
+
+	-- Shift and an arrow key is a selection: the caret moves and the other end of it stays where it
+	-- was, which is what every editor there is does with it.
+	press("right", { shift = true })
+	press("right", { shift = true })
+	press("right", { shift = true })
+
+	local from, to = selected()
+
+	test.equal(from, 0, "shift and three right arrows select the first three bytes")
+	test.equal(to, 3)
+	test.equal(layout:getCursorPos(screen.window), 3, "with the caret at the end of what is selected")
+
+	-- An arrow key on its own is not part of a selection: it puts the caret and lets it go.
+	press("left")
+
+	test.equal(selected(), nil, "an arrow key on its own is no selection")
+	test.equal(layout:getCursorPos(screen.window), 2, "and the caret is where it walked to")
+
+	-- What is typed lands where the caret is and takes the selection with it.
+	press("right", { shift = true })
+	press("t", {}, "t")
+
+	test.equal(value, "ont two three", "a key typed over a selection replaces it")
+	test.equal(selected(), nil, "and there is nothing selected afterwards")
+
+	-- Control and a is the whole of what the field holds.
+	press("a", { ctrl = true })
+
+	test.equal(select(1, selected()), 0, "control and a selects from the start of the value")
+	test.equal(layout:getCursorPos(screen.window), #value, "to the caret at the end of it")
+
+	press("backspace")
+
+	test.equal(value, "", "and a backspace over a selection takes the whole of it")
+
+	-- Control and an arrow key walks by words, and with shift it selects them: a selection of three
+	-- words grows and shrinks a word at a time.
+	value = "one two three"
+	screen:draw()
+	press("home")
+	press("right", { ctrl = true, shift = true })
+
+	test.equal(select(2, selected()), 3, "control and shift and right selects the word the caret is in")
+
+	press("right", { ctrl = true, shift = true })
+
+	test.equal(select(2, selected()), 7, "and the one after it, with the space between them")
+
+	press("left", { ctrl = true, shift = true })
+
+	test.equal(select(2, selected()), 3, "and control and shift and left takes that one back off")
+
+	press("right", { ctrl = true })
+
+	test.equal(selected(), nil, "control and right on its own is no selection")
+	test.equal(layout:getCursorPos(screen.window), 7, "and walks the caret to the end of the word it lands in")
+
+	-- Control and w is the word before the caret, which is what it is in every editor there is.
+	press("w", { ctrl = true })
+
+	test.equal(value, "one three", "control and w takes the word before the caret away")
+	test.equal(layout:getCursorPos(screen.window), 3, "and leaves the caret where it was taken from")
+
+	press("a", { ctrl = true })
+	press("w", { ctrl = true })
+
+	test.equal(value, "", "and a selection is what it takes away where there is one")
+
+	-- What is copied is the selection, and what is pasted replaces one.
+	value = "one two three"
+	screen:draw()
+	press("home")
+	press("right", { ctrl = true, shift = true })
+	press("c", { ctrl = true })
+
+	test.equal(screen.clipboard:getText(), "one", "control and c copies what is selected")
+
+	press("a", { ctrl = true })
+	press("v", { ctrl = true })
+
+	test.equal(value, "one", "and a paste lands over the selection rather than beside it")
+
+	press("a", { ctrl = true })
+	press("x", { ctrl = true })
+
+	test.equal(screen.clipboard:getText(), "one", "control and x copies the selection as well as control and c")
+	test.equal(value, "", "and takes the selection out of the field")
+
+	-- A selection made with the pointer is the same one made with the keyboard: the press is one end
+	-- of it and where the pointer is dragged to is the other, and the highlight is drawn between
+	-- them, behind the text -- in the blue a selection is drawn in, over text the colour that reads
+	-- on that blue.
+	value = "hello world"
+	screen:draw()
+
+	local origin, ahead = textOrigin()
+
+	--- What the room the word is drawn in comes to: how much of it is the blue of a selection, and
+	--- how bright the ink of the text in it is, which is what says the text over a selection is not
+	--- drawn in the colour of the field's own text.
+	---@return number blue
+	---@return number ink
+	local function shades()
+		local pixels = assert(screen:getPixels())
+		local blue, ink, count = 0, 0, 0
+
+		for y = 0, 59 do
+			for x = origin, origin + math.floor(ahead(5)) - 1 do
+				local r, g, b = pixelAt(pixels, 200, x, y)
+
+				r, g, b = r or 0, g or 0, b or 0
+
+				if b > r + 30 and b > 100 then
+					blue = blue + 1
+				elseif r + g + b > 90 then
+					ink, count = ink + r, count + 1
+				end
+			end
+		end
+
+		return blue, count > 0 and ink / count or 0
+	end
+
+	local blueBefore, inkBefore = shades()
+
+	test.equal(blueBefore, 0, "nothing is highlighted before anything is selected")
+	test.less(inkBefore, 170, "and the field draws its text in the grey it was given")
+
+	-- Where the highlight starts is where the selection starts and not where the line does: a
+	-- highlight that began a line's height into the text, or at the line's start whatever the
+	-- selection is, is a blue box over characters nobody selected.
+	press("home")
+	press("right")
+	press("right")
+	press("right")
+	press("right", { shift = true })
+	press("right", { shift = true })
+	press("right", { shift = true })
+	press("right", { shift = true })
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	local starts = nil
+
+	for x = 0, 199 do
+		for y = 0, 59 do
+			local r, g, b = pixelAt(pixels, 200, x, y)
+
+			if (b or 0) > (r or 0) + 30 and (b or 0) > 100 then
+				starts = starts or x
+				break
+			end
+		end
+	end
+
+	--- The pen a byte of a line is drawn at, as the glyphs of that line say: what a highlight and a
+	--- caret are both placed from. Measured now rather than from the run the test opened with, since
+	--- the value is not the one it was.
+	---@param byte number
+	---@return number
+	local function penOf(byte)
+		local measured = assert(fontManager:getDefault()):getRun(value)
+		local line = measured.lines[0]
+
+		for at = 0, line.count - 1 do
+			local glyph = assert(measured.glyphs)[line.first + at]
+
+			if glyph.cluster >= byte then
+				return glyph.pen
+			end
+		end
+
+		return line.width
+	end
+
+	test.equal(select(1, selected()), 3, "a selection from the fourth byte of the line")
+	test.truthy(starts ~= nil and math.abs(starts - (PAD + penOf(3))) <= 2,
+		string.format("is highlighted from the byte it starts at and not from the line's start: %s against %d",
+			tostring(starts), PAD + penOf(3)))
+
+	press("right")
+	screen:draw()
+
+	screen:drag(origin + 1, 10, origin + ahead(5), 10)
+
+	test.equal(select(1, selected()), 0, "a drag from the start of the text selects from the start of it")
+	test.equal(select(2, selected()), 5, "to the byte the pointer was dragged to")
+
+	local blue, ink = shades()
+
+	test.greater(blue, 40, "the selection is drawn in the blue one is drawn in")
+	test.greater(ink, 200, "and the text over it in the colour that reads on that blue")
+
+	-- A selection that runs off the end of a line is drawn to the ink of the line and not to the room
+	-- it takes: what a line takes in advance carries on past its last letter and over the space after
+	-- it, and a highlight drawn to there is a blue box with nothing in it.
+	value = "hello   \nworld"
+	press("right")
+	screen:draw()
+
+	--- The rightmost column of a band of rows that has a colour on it.
+	---@param bottom number
+	---@param pick fun(r: number, g: number, b: number): boolean
+	---@return number
+	local function rightmost(bottom, pick)
+		local pixels = assert(screen:getPixels())
+		local last = -1
+
+		for x = 0, 199 do
+			for y = 0, bottom do
+				local r, g, b = pixelAt(pixels, 200, x, y)
+
+				if pick(r or 0, g or 0, b or 0) then
+					last = x
+					break
+				end
+			end
+		end
+
+		return last
+	end
+
+	---@param r number
+	---@param g number
+	---@param b number
+	---@return boolean
+	local function grey(r, _g, b)
+		return r > 90 and r < 170 and b < r + 30
+	end
+
+	---@param r number
+	---@param g number
+	---@param b number
+	---@return boolean
+	local function blueish(r, _g, b)
+		return b > r + 30 and b > 100
+	end
+
+	local inked = rightmost(10, grey)
+
+	test.greater(inked, 20, "the field draws the first line of the value in its own colour")
+
+	press("a", { ctrl = true })
+	screen:draw()
+
+	local highlighted = rightmost(10, blueish)
+
+	test.greater(highlighted, 20, "and the whole of it is highlighted")
+	test.less(highlighted - inked, 3, "to the end of what it says rather than to the room it takes")
 
 	screen:close()
 end)

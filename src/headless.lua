@@ -19,6 +19,10 @@ local CHARACTERS = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 local DEFAULT_PIXEL_HEIGHT = 18
 
+-- How many moves a drag is handed in: enough that what a selection does between two of them is
+-- exercised, which is nothing -- it is one selection from where it started to where it is now.
+local DRAG_STEPS = 3
+
 --- The screen, as a function of the state it shows: this is what gets rendered. `assets` is
 --- what an image or a gif is loaded with, and it is handed over because the first screen is
 --- built while the screen itself is still being made.
@@ -211,6 +215,36 @@ function Headless:click(x, y)
 
 	self:event({ name = "mousePress", window = window, x = x, y = y, button = 1 })
 	local message = self:event({ name = "mouseRelease", window = window, x = x, y = y, button = 1 })
+
+	self:draw()
+
+	return message
+end
+
+--- Presses the left button at a point, moves it to another and lets it go -- which is what a drag
+--- is, and what a selection with a pointer is made by -- then draws again.
+---@param fromX number
+---@param fromY number
+---@param toX number
+---@param toY number
+---@return any? message
+function Headless:drag(fromX, fromY, toX, toY)
+	local window = self.window
+	---@cast window winit.Window
+
+	self:event({ name = "mousePress", window = window, x = fromX, y = fromY, button = 1 })
+
+	-- A few moves rather than one, which is what a hand does and what a drag is checked against:
+	-- where the pointer went in between is not something the frame that comes out can tell.
+	for step = 1, DRAG_STEPS do
+		local at = step / DRAG_STEPS
+
+		self:event({ name = "mouseMove", window = window,
+			x = math.floor(fromX + (toX - fromX) * at + 0.5),
+			y = math.floor(fromY + (toY - fromY) * at + 0.5) })
+	end
+
+	local message = self:event({ name = "mouseRelease", window = window, x = toX, y = toY, button = 1 })
 
 	self:draw()
 

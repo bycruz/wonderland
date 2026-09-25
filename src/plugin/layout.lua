@@ -172,8 +172,11 @@ end
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
 ---@field pointing boolean? # Whether the pointer cursor is the one for something clickable
 ---@field cursorPos number
+---@field anchorPos number? # The other end of the selection, from nought: nothing where there is none
 ---@field typed string? # What has been typed into the focused field since the frame that built it
 ---@field caretClick wonderland.plugin.Layout.Point? # Where a field was clicked, until the ui has placed the caret from it
+---@field selectFrom wonderland.plugin.Layout.Point? # Where a selection was started, until the ui has placed its other end
+---@field selecting boolean? # Whether the pointer is down in a field, which is what a drag selects with
 ---@field repeatKey string? # The key held down in the focused field, which is what the library repeats
 ---@field repeatMods winit.KeyModifiers? # And the modifiers it went down with
 ---@field repeatAt number? # When the next one of them is due, on the ui's clock: nothing of it means the hold has just begun
@@ -755,6 +758,69 @@ local function lineEnd(value, at)
 	return break_ and break_ - 1 or #value
 end
 
+--- Whether a byte is part of a word: the ASCII letters, digits and underscore, and every byte of a
+--- character that is not ASCII, since a word in another language is a word.
+---@param byte number?
+---@return boolean
+local function isWordByte(byte)
+	return byte ~= nil and (byte >= 0x80 or byte == 0x5F
+		or (byte >= 0x30 and byte <= 0x39)
+		or (byte >= 0x41 and byte <= 0x5A)
+		or (byte >= 0x61 and byte <= 0x7A))
+end
+
+---@param byte number?
+---@return boolean
+local function isSpace(byte)
+	return byte ~= nil and (byte == 0x20 or (byte >= 0x09 and byte <= 0x0D))
+end
+
+--- Where a key that walks or takes away by words goes from a caret: back over the space between two
+--- words and then over the word itself, which is a run of word bytes or a run of punctuation.
+---@param value string
+---@param at number # How many bytes come before the caret, from nought
+---@return number
+local function wordBack(value, at)
+	local back = utf8.back(value, at)
+
+	while back > 0 and isSpace(value:byte(back + 1)) do
+		back = utf8.back(value, back)
+	end
+
+	local word = isWordByte(value:byte(back + 1))
+
+	while back > 0 do
+		local byte = value:byte(back + 1)
+
+		if isSpace(byte) or isWordByte(byte) ~= word then
+			break
+		end
+
+		back = utf8.back(value, back)
+	end
+
+	return back
+end
+
+--- Where a key that walks by words goes forwards from a caret: to the end of the word it is in, and
+--- to the end of the next one where it is not in a word.
+---@param value string
+---@param at number
+---@return number
+local function wordForward(value, at)
+	local ahead, length = at, #value
+
+	while ahead < length and not isWordByte(value:byte(ahead + 1)) do
+		ahead = utf8.forward(value, ahead)
+	end
+
+	while ahead < length and isWordByte(value:byte(ahead + 1)) do
+		ahead = utf8.forward(value, ahead)
+	end
+
+	return ahead
+end
+
 --- What a key types where it types something a field takes -- shift and 1 is the key 1 pressed and
 --- "!" typed -- or nothing, for a key that types nothing of its own.
 ---
@@ -827,12 +893,14 @@ end
 
 
 --- The caret of the field that has the keyboard: which element it is for, the line of it the caret is
---- on and how many bytes of that line come before it. Nothing is returned where no field has the
---- keyboard.
+--- on and how many bytes of that line come before it, and the bytes the selection covers where there
+--- is one. Nothing is returned where no field has the keyboard.
 ---@param window wonderland.RenderWindow
 ---@return wonderland.Element? element
 ---@return number? line # From nought, so a field of one line is always on line nought
 ---@return number? column # How many bytes of that line come before the caret
+---@return number? from # The first byte of the value a selection covers, where there is one
+---@return number? to
 function Layout:getCaret(window)
 	local ctx = self.contexts[window]
 
@@ -849,8 +917,15 @@ function Layout:getCaret(window)
 	local value = wonderlandElement.inputOf(element)
 	local start = lineStart(value, ctx.cursorPos)
 	local line = lineCount(value:sub(1, start - 1)) - 1
+	local limit = #value
+	local anchor = math.min(math.max(ctx.anchorPos or ctx.cursorPos, 0), limit)
+	local at = math.min(math.max(ctx.cursorPos, 0), limit)
 
-	return element, line, ctx.cursorPos - (start - 1)
+	if anchor == at then
+		return element, line, ctx.cursorPos - (start - 1)
+	end
+
+	return element, line, ctx.cursorPos - (start - 1), math.min(anchor, at), math.max(anchor, at)
 end
 
 --- A press on a scroll bar, as the message it comes to: the bar is the box's own, so what it does
@@ -927,8 +1002,8 @@ local function firstLines(text, lines)
 end
 
 --- What control and a key does with the clipboard, in the field that has the keyboard: what is
---- pasted lands where the caret is, and what is copied is the whole of what the field holds -- a
---- field has no selection, so what is copied, cut and pasted over is the value.
+--- copied, cut and pasted over is the selection, and the whole of what the field holds where there
+--- is no selection -- which is all a field with nothing selected has to give.
 ---
 --- A field of one line takes the first line of what was pasted, because a paste of a paragraph
 --- into a name is a name; a paragraph takes the lines it has room for, since a limit on a
@@ -939,9 +1014,11 @@ end
 ---@param key string
 ---@param value string
 ---@param cursor number
+---@param from number # The first byte a selection covers, or the caret where there is none
+---@param to number
 ---@param edit fun(edited: string): any?
 ---@return any? message
-function Layout:clipboardKey(element, ctx, key, value, cursor, edit)
+function Layout:clipboardKey(element, ctx, key, value, cursor, from, to, edit)
 	local clipboard = self.clipboard
 
 	if clipboard == nil then
@@ -953,11 +1030,18 @@ function Layout:clipboardKey(element, ctx, key, value, cursor, edit)
 			return nil
 		end
 
-		clipboard:setText(value)
+		clipboard:setText(from < to and value:sub(from + 1, to) or value)
 
-		-- Cutting is copying and then not having it, which is the same edit as deleting every
-		-- character of the value.
-		return key == "x" and edit("") or nil
+		if key == "c" then
+			return nil
+		end
+
+		-- Cutting is copying and then not having it, and a field with nothing selected has only the
+		-- whole of its value to cut.
+		ctx.anchorPos = nil
+		ctx.cursorPos = from
+
+		return edit(from < to and (value:sub(1, from) .. value:sub(to + 1)) or "")
 	end
 
 	local pasted = clipboard:getText()
@@ -971,7 +1055,8 @@ function Layout:clipboardKey(element, ctx, key, value, cursor, edit)
 	end
 
 	if element.maxLines > 0 then
-		local room = element.maxLines - lineCount(value) + 1
+		local kept = value:sub(1, from) .. value:sub(to + 1)
+		local room = element.maxLines - lineCount(kept) + 1
 
 		if room < 1 then
 			return nil
@@ -984,9 +1069,12 @@ function Layout:clipboardKey(element, ctx, key, value, cursor, edit)
 		return nil
 	end
 
-	ctx.cursorPos = cursor + #pasted
+	-- What is pasted lands where the caret is, over a selection where there is one: replacing a
+	-- selection is what a paste into a field with one is for.
+	ctx.anchorPos = nil
+	ctx.cursorPos = from + #pasted
 
-	return edit(value:sub(1, cursor) .. pasted .. value:sub(cursor + 1))
+	return edit(value:sub(1, from) .. pasted .. value:sub(to + 1))
 end
 
 --- The keyboard put on the next thing that can be focused, which is what tab is for: a screen with
@@ -1034,6 +1122,7 @@ function Layout:focusNext(ctx, backwards)
 
 	ctx.focusedName = wonderlandElement.nameOf(element)
 	ctx.cursorPos = #wonderlandElement.inputOf(element)
+	ctx.anchorPos = nil
 	ctx.typed = nil
 	ctx.caretClick = nil
 	ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
@@ -1041,14 +1130,41 @@ function Layout:focusNext(ctx, backwards)
 	return { type = "_inputRefresh" }
 end
 
+--- Where a line and a column of the value come to, as a byte of it: the line the value is split into
+--- by its breaks, and the column from the start of that line, clamped to what the line holds.
+---@param value string
+---@param line number
+---@param column number
+---@return number? at
+local function byteAt(value, line, column)
+	local start = 1
+
+	for _ = 1, line do
+		local break_ = value:find("\n", start, true)
+
+		if not break_ then
+			return nil
+		end
+
+		start = break_ + 1
+	end
+
+	return math.min(start - 1 + column, lineEnd(value, start - 1))
+end
+
 --- The caret put where a line and a column of the value are, which is what a click in a field comes
 --- to. The ui walks the text the field draws, so it says which line a point is on and which byte of
 --- it the point is at. A column past the end of its line is the end of it, and a line the value does
 --- not have leaves the caret where it was.
+---
+--- The other end of a selection is a line and a column of its own, which is where a drag started:
+--- the two ends are put in one call so that neither is read against a value the other has moved.
 ---@param window wonderland.RenderWindow
 ---@param line number
 ---@param column number # How many bytes of that line come before the caret
-function Layout:setCaret(window, line, column)
+---@param anchorLine number? # And where the other end of a selection is, where one was made
+---@param anchorColumn number?
+function Layout:setCaret(window, line, column, anchorLine, anchorColumn)
 	local ctx = self.contexts[window]
 
 	if not ctx or not ctx.focusedName or ctx.ui == nil then
@@ -1063,19 +1179,17 @@ function Layout:setCaret(window, line, column)
 
 	-- The value as the keys before this frame have left it, as everywhere else a key is handled.
 	local value = ctx.typed or wonderlandElement.inputOf(element)
-	local start = 1
+	local at = byteAt(value, line, column)
 
-	for _ = 1, line do
-		local break_ = value:find("\n", start, true)
-
-		if not break_ then
-			return
-		end
-
-		start = break_ + 1
+	if at == nil then
+		return
 	end
 
-	ctx.cursorPos = math.min(start - 1 + column, lineEnd(value, start - 1))
+	ctx.cursorPos = at
+
+	if anchorLine ~= nil then
+		ctx.anchorPos = byteAt(value, anchorLine, anchorColumn or 0)
+	end
 end
 
 --- What a key does to the field that has the keyboard, as the message the app is told. It is one
@@ -1142,9 +1256,75 @@ function Layout:key(window, key, modifiers, typed)
 		return handler and handler(edited) or { type = "_inputRefresh" }
 	end
 
+	--- The bytes a selection covers, from the earlier end, clamped to what the value holds: the
+	--- caret and the anchor, whichever way round they are. A selection of nothing is one byte twice,
+	--- which is no selection at all.
+	---@return number from
+	---@return number to
+	local function selected()
+		local anchor = ctx.anchorPos
+		local limit = #value
+
+		if anchor == nil then
+			return math.min(cursor, limit), math.min(cursor, limit)
+		end
+
+		anchor = math.min(math.max(anchor, 0), limit)
+
+		local at = math.min(math.max(cursor, 0), limit)
+
+		return math.min(anchor, at), math.max(anchor, at)
+	end
+
+	--- What is typed lands where the caret is, over a selection where there is one: a selection is
+	--- what a person made to replace it.
+	---@param text string
+	---@return any?
+	local function typeIn(text)
+		local from, to = selected()
+
+		ctx.anchorPos = nil
+		ctx.cursorPos = from + #text
+
+		return edit(value:sub(1, from) .. text .. value:sub(to + 1))
+	end
+
+	--- A stretch of the value taken out, with the caret where it was taken from. Every edit that
+	--- takes something away goes through this, so a selection is taken away as one thing and the
+	--- anchor goes with it.
+	---@param from number
+	---@param to number
+	---@return any?
+	local function cutOut(from, to)
+		ctx.anchorPos = nil
+		ctx.cursorPos = from
+
+		return edit(value:sub(1, from) .. value:sub(to + 1))
+	end
+
+	--- The caret moved, which is what every key that walks it does: on its own it puts the caret and
+	--- forgets the selection, and with shift held it keeps the other end of it where it was, which is
+	--- how a selection is made with the keyboard.
+	---@param at number
+	---@return any?
+	local function moveTo(at)
+		if modifiers ~= nil and modifiers.shift == true then
+			if ctx.anchorPos == nil then
+				ctx.anchorPos = cursor
+			end
+		else
+			ctx.anchorPos = nil
+		end
+
+		ctx.cursorPos = at
+
+		return { type = "_inputRefresh" }
+	end
+
 	if key == "escape" then
 		ctx.focusedName = nil
 		ctx.cursorPos = 0
+		ctx.anchorPos = nil
 		return { type = "_inputRefresh" }
 	elseif key == "return" then
 		local submit = callbacks[element.onsubmit]
@@ -1161,65 +1341,86 @@ function Layout:key(window, key, modifiers, typed)
 				return nil
 			end
 
-			value = value:sub(1, cursor) .. "\n" .. value:sub(cursor + 1)
-			ctx.cursorPos = cursor + 1
-			return edit(value)
+			return typeIn("\n")
 		elseif submit then
 			return submit(value)
 		end
 	elseif key == "backspace" then
-		-- A character is taken away rather than a byte: a backspace that took one byte would leave
-		-- half of a letter behind.
-		local from = utf8.back(value, cursor)
+		-- A selection is taken away as one thing, and a character otherwise: a backspace that took
+		-- one byte would leave half of a letter behind.
+		local from, to = selected()
 
-		if from < cursor then
-			value = value:sub(1, from) .. value:sub(cursor + 1)
-			ctx.cursorPos = from
-			return edit(value)
+		if from < to then
+			return cutOut(from, to)
+		end
+
+		local back = utf8.back(value, cursor)
+
+		if back < cursor then
+			return cutOut(back, cursor)
 		end
 	elseif key == "delete" then
-		local to = utf8.forward(value, cursor)
+		local from, to = selected()
 
-		if to > cursor then
-			value = value:sub(1, cursor) .. value:sub(to + 1)
-			return edit(value)
+		if from < to then
+			return cutOut(from, to)
+		end
+
+		local ahead = utf8.forward(value, cursor)
+
+		if ahead > cursor then
+			return cutOut(cursor, ahead)
 		end
 	elseif key == "left" then
-		ctx.cursorPos = utf8.back(value, cursor)
-		return { type = "_inputRefresh" }
+		-- With control it walks a word rather than a character, which is the same key either way.
+		return moveTo(modifiers ~= nil and modifiers.ctrl == true
+				and wordBack(value, cursor)
+			or utf8.back(value, cursor))
 	elseif key == "right" then
-		ctx.cursorPos = utf8.forward(value, cursor)
-		return { type = "_inputRefresh" }
+		return moveTo(modifiers ~= nil and modifiers.ctrl == true
+				and wordForward(value, cursor)
+			or utf8.forward(value, cursor))
 	elseif key == "home" then
-		ctx.cursorPos = lineStart(value, cursor) - 1
-		return { type = "_inputRefresh" }
+		return moveTo(lineStart(value, cursor) - 1)
 	elseif key == "end" then
-		ctx.cursorPos = lineEnd(value, cursor)
-		return { type = "_inputRefresh" }
+		return moveTo(lineEnd(value, cursor))
 	elseif key == "up" then
-		ctx.cursorPos = lineAcross(value, cursor, -1)
-		return { type = "_inputRefresh" }
+		return moveTo(lineAcross(value, cursor, -1))
 	elseif key == "down" then
-		ctx.cursorPos = lineAcross(value, cursor, 1)
-		return { type = "_inputRefresh" }
+		return moveTo(lineAcross(value, cursor, 1))
 	elseif modifiers and modifiers.ctrl then
-		if key == "a" or key:byte(1) == 1 then
-			ctx.cursorPos = #value
+		if key == "w" then
+			-- The word before the caret, or the selection where there is one: what control and w is
+			-- in every editor there is.
+			local from, to = selected()
+
+			if from < to then
+				return cutOut(from, to)
+			end
+
+			local back = wordBack(value, cursor)
+
+			if back < cursor then
+				return cutOut(back, cursor)
+			end
+		elseif key == "a" or key:byte(1) == 1 then
+			-- Select all: the caret at the end of the value and the other end of the selection at
+			-- the start of it.
+			ctx.anchorPos, ctx.cursorPos = 0, #value
+
 			return { type = "_inputRefresh" }
 		elseif key == "v" or key == "c" or key == "x" then
-			return self:clipboardKey(element, ctx, key, value, cursor, edit)
+			local from, to = selected()
+
+			return self:clipboardKey(element, ctx, key, value, cursor, from, to, edit)
 		end
 	elseif key == "space" then
-		value = value:sub(1, cursor) .. " " .. value:sub(cursor + 1)
-		ctx.cursorPos = cursor + 1
-		return edit(value)
+		return typeIn(" ")
 	elseif typed ~= nil and typed:byte(1) >= 32 and (typed ~= key or #key == 1) then
 		-- What is typed is what the key types rather than what it is named: shift and 1 is named 1 and
 		-- types "!". A key that types nothing was handed its own name as what it types, so a name of
 		-- more than one character is a key this does not handle rather than something typed.
-		value = value:sub(1, cursor) .. typed .. value:sub(cursor + 1)
-		ctx.cursorPos = cursor + #typed
-		return edit(value)
+		return typeIn(typed)
 	end
 end
 
@@ -1258,6 +1459,15 @@ function Layout:event(event)
 
 		if ctx.dragging then
 			return report(ctx.dragging, event.x, event.y)
+		end
+
+		-- A pointer held down in a field is a selection being made: where it is now is the caret, and
+		-- where the press was is the other end of it. The point is left for the ui, which is what
+		-- knows where the text of the field is: see `UI:caretClick`.
+		if ctx.selecting then
+			ctx.caretClick = { x = event.x, y = event.y }
+
+			return nil
 		end
 
 		---@type table<wonderland.Element, wonderland.plugin.Layout.Hit>
@@ -1347,12 +1557,20 @@ function Layout:event(event)
 			-- it, the caret is at the end of the value -- which is what a field that draws none
 			-- gets, and what every click in one did before the ui knew about it.
 			ctx.caretClick = { x = event.x, y = event.y }
+			-- Where the press was is the other end of the selection a drag makes: a press that is
+			-- let go of where it landed is a caret, and one that is dragged is a selection.
+			ctx.selectFrom = { x = event.x, y = event.y }
+			ctx.selecting = true
+			ctx.anchorPos = nil
 			ctx.cursorPos = #wonderlandElement.inputOf(info.element)
 			ctx.typed = nil
 		else
 			ctx.focusedName = nil
 			ctx.cursorPos = 0
 			ctx.caretClick = nil
+			ctx.selectFrom = nil
+			ctx.selecting = nil
+			ctx.anchorPos = nil
 		end
 
 		if info then
@@ -1493,6 +1711,16 @@ function Layout:event(event)
 
 		if ctx.barDrag ~= nil then
 			ctx.barDrag = nil
+
+			return nil
+		end
+
+		if ctx.selecting then
+			ctx.selecting = nil
+
+			-- The last place the pointer was is a move of its own: a selection dragged to where the
+			-- pointer was let go of is the one a person made, and the release does not move it.
+			ctx.caretClick = { x = event.x, y = event.y }
 
 			return nil
 		end
