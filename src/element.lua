@@ -32,6 +32,7 @@ ffi.cdef [[
 		uint32_t onscroll, oncontextmenu;  // the wheel and the bar of a box that scrolls, and the
 		                                   // button that is not the left one
 		uint32_t ondrop;                   // the files a window was given, over this box
+		uint32_t oncanvas;                 // and the shapes this box draws itself, where it has any
 		uint32_t userdata;           // whatever the app carries, by handle
 		double scrollOffset;         // how far its content is scrolled up, 0 for not
 		double maxLines;             // the most lines a field that takes a paragraph holds, 0 for no end to it
@@ -98,6 +99,7 @@ element.GROWS = 256
 ---@field onsubmit number
 ---@field onscroll number
 ---@field oncontextmenu number
+---@field oncanvas number # The draw of this element's canvas, by handle, which an app sets with `:canvas`
 ---@field ondrop number
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
@@ -560,6 +562,28 @@ end
 function methods:onDrop(cons)
 	check(self)
 	self.ondrop = pushCallback(cons)
+
+	return self
+end
+
+--- What this box draws itself, which is what a shape that is not a box is drawn with.
+---
+---   div():style(METER):canvas(function(canvas)
+---       canvas:rect(0, canvas.height - level, canvas.width, level, "#3b82f6")
+---   end)
+---
+--- The draw is handed a `wonderland.Canvas` -- a box as wide and as tall as the room this element's
+--- padding and border leave, in whole pixels from its top left corner -- and what it draws goes
+--- into the frame in this element's place: over what is under the element, under its own text and
+--- its children, and cut by the pane the element is in. It is called for every frame the screen is
+--- drawn in, so what it draws is whatever the app's state is at that moment. See
+--- `wonderland.Canvas` for the shapes there are, and `wonderland.plugin.Render:target` for a
+--- picture an app's shader drew, which is what a texture of its own is shown by.
+---@param draw fun(canvas: wonderland.Canvas)
+---@return wonderland.Element
+function methods:canvas(draw)
+	check(self)
+	self.oncanvas = pushCallback(draw)
 
 	return self
 end

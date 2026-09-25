@@ -54,7 +54,9 @@ library: `lde test` from the root of this repository runs its tests.
 You can run the examples in ./examples with:
 
 ```bash
-lde run -C ./examples/app
+lde run -C ./examples/app        # the tour: text, a field, a slider, a gif, a scroller
+lde run -C ./examples/canvas     # a spectrum drawn by hand, every shape a `:canvas` call
+lde run -C ./examples/lupa       # a lupa 3d scene, drawn on an element of the screen
 ```
 
 ```lua
@@ -248,6 +250,13 @@ machine rather than its wall clock, so a difference of two of them is how long p
 them. It is what a frame being paced, a frame of video being due and a position in a file are all
 measured against.
 
+A frame a screen presents is built and drawn whatever it comes out to, which is what makes a screen
+something outside wonderland can drive: the shapes an element draws with `:canvas` and the contents
+of a texture another renderer fills are in the frame and not in the screen, so the solve coming out
+the same is not the frame coming out the same. That is what an app that animates either of them is
+asking for when it calls `self:every(1 / 60, ...)` or `self:present(window)` -- and a frame nothing
+asked for, that comes out the same as the one on screen, is still skipped.
+
 ## Frames from anywhere
 
 A picture is a file, and a frame of a video is not: a stream is what a decoder writes into, and
@@ -409,6 +418,73 @@ four layers its frames cycle through, so a screen that draws more of one animati
 that -- a strip of the whole of it, say -- is not what a stream is for: read the file with the
 image package's `loadFrames` and `assets:upload` the frames it wants.
 
+## What an app draws itself
+
+A box draws shapes of its own with `:canvas`, which is handed a sink of primitives rather than a
+texture to fill: what it draws is in the pixels of the element's content box, cut by whatever pane
+the element is in, drawn over its own background, under its children, and at the depth everything
+else of that element is drawn at.
+
+```lua
+div():style(sty():size(120, 120)):canvas(function(canvas)
+	canvas:rect(0, 0, 40, 10, "#ff0000")          -- a hex string, a name, or a table of channels
+	canvas:rect(0, 20, 40, 20, "#00ff00", 8)      -- the sixth argument rounds its corners
+	canvas:circle(70, 70, 20, "#0000ff")          -- and the fifth says how many sides it is cut into
+	canvas:line(0, 50, 40, 90, 4, "#ffffff")      -- a line, as thick as it is told
+	canvas:polygon({ 60, 0, 100, 0, 80, 30 }, "#ffff00")
+end)
+```
+
+That is what the bars, the meters, the progress and the plots of a screen are: the shapes a box's own
+style has no word for. `canvas.width` and `canvas.height` are the room the element gives it, and a
+canvas keeps nothing -- the callback is called for every frame the screen builds, and what it draws
+is written into the frame being recorded -- so a screen that redraws its meters pays for the shapes
+and for nothing else. A shape that curves back on itself is drawn as the fan of its corners, so a
+spectrum or a waveform is one polygon per convex piece.
+
+Everything past that is a picture, and a picture is where every renderer ends: a texture, made here
+or made by something else, shown like any other -- which is what gives it the box it is put in, the
+corners it is cut with, the pane it scrolls inside and the depth it is drawn at, all of them the
+library's.
+
+```lua
+function App:view()
+	-- Made once, on a frame rather than in `init`: a texture belongs to the renderer a window
+	-- brought, and `draw` is what fills it -- handed the frame's own command encoder, the view to
+	-- draw into and the size of it.
+	if not self.meter then
+		self.meter = self:getPlugin("render"):target(512, 256, { draw = function(encoder, view, width, height)
+			encoder:beginRendering({ colorAttachments = { { texture = view, op = { type = "clear" } } } })
+			-- the app's own pipeline, its own vertex buffers, its own draw calls
+			encoder:endRendering()
+		end })
+	end
+
+	return div():style(sty():size(256, 128):image(self.meter))
+end
+```
+
+A target is recorded into the frame's own command buffer, before the pass the screen is drawn in, so
+nothing is waited for and nothing is submitted twice: what the app drew is on screen in the frame it
+drew it in. `draw` runs for every frame the screen draws, and an app whose scene moves is one that
+asks for those frames itself -- `self:every(1 / 60, ...)`, as the example does -- since a screen that
+nothing asked anything of, and that came out the same as the one on screen, is not drawn again.
+
+A texture of somebody else's is shown by handing it over instead, which is where a renderer built on
+[hood](https://github.com/bycruz/hood) -- or anything else that leaves its output in a texture --
+ends:
+
+```lua
+local surface = render:texture(texture)       -- a hood.Texture, of the size it says it is
+div():style(sty():size(256, 128):image(surface))
+```
+
+Both come back as a surface: the slot in the renderer's pictures, the texture, a view of it as the
+array the shader samples, and the format it is in where that is known. Both are given back with
+`render:release(surface)`, which frees a texture this library made and leaves one of the app's own
+alone. A target is `rgba8unorm` unless another format is named, since that is the format a picture is
+sampled in and the one a pipeline of the app's compiles against.
+
 ## Plugins
 
 The internals of wonderland consist of plugins.
@@ -513,4 +589,4 @@ screen needs is mostly not this library's, and some of it is nobody's yet:
 | Fullscreen, window sizes and icons | the same: winit has the window, and not yet these |
 | Media keys, the system's own controls, tray icons, notifications | a platform layer per platform: MPRIS on linux, SMTC on windows |
 | macOS | winit has an X11 and a Win32 backend and no third: wonderland runs where winit does |
-| Text as a document | selection, copy, IME, right-to-left, wrapping: a field takes typing, and a paragraph of it is lines rather than a text view |
+| Text as a document | an input method, wrapping, and a text view: a field takes typing, selects with the keys and the pointer, cuts and pastes, and draws a line of either direction |

@@ -146,6 +146,10 @@ end
 
 --- Solves the view again and draws it, so the offscreen target holds what a window
 --- would be showing.
+---
+--- A screen drawn by hand is built and drawn whatever it comes out to, which is what a windowed
+--- screen asks for rather than is given: what an app draws into the frame itself -- the shapes of a
+--- canvas, a texture another renderer has just filled -- is in the frame and not in the solve.
 function Headless:draw()
 	self.plugins.ui:refreshView(self.window)
 	self.window.shouldRedraw = false

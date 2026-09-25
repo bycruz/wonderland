@@ -293,6 +293,66 @@ function QuadBatch:quad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0
 	finish(self)
 end
 
+--- Adds one quad of four arbitrary corners, which is what a shape that is not a box is drawn with:
+--- a line, a slice of a circle, a bar of a spectrum that is not square to the screen.
+---
+--- What it samples is one point of the picture it is given -- a shape of a canvas is given the white
+--- one -- so what is drawn is the colour it was given rather than a picture: a caller with a picture
+--- of its own wants `quad`.
+---@param x1 number # The corners, in the order they go round
+---@param y1 number
+---@param x2 number
+---@param y2 number
+---@param x3 number
+---@param y3 number
+---@param x4 number
+---@param y4 number
+---@param z number
+---@param r number
+---@param g number
+---@param b number
+---@param a number
+---@param texture number # Which picture it samples, which a shape of the caller's own has none of
+function QuadBatch:points(x1, y1, x2, y2, x3, y3, x4, y4, z, r, g, b, a, texture)
+	if self.quads >= self.capacity then
+		self:reserve(self.capacity + 1)
+	end
+
+	if texture ~= self.texture then
+		self:startRun(texture)
+	end
+
+	local vertices = self.vertices
+	local index = self.quads * VERTICES_PER_QUAD * FLOATS_PER_VERTEX
+
+	put(vertices, index, x1, y1, 0, 0, z, r, g, b, a, texture, 0)
+	put(vertices, index + FLOATS_PER_VERTEX, x2, y2, 0, 0, z, r, g, b, a, texture, 0)
+	put(vertices, index + FLOATS_PER_VERTEX * 2, x3, y3, 0, 0, z, r, g, b, a, texture, 0)
+	put(vertices, index + FLOATS_PER_VERTEX * 3, x4, y4, 0, 0, z, r, g, b, a, texture, 0)
+
+	finish(self)
+end
+
+--- Adds one triangle, which is a quad whose last two corners are the same: the second of the two
+--- triangles it is drawn as has no area, and a triangle with no area is one nothing is rasterised
+--- for. It costs the four vertices this writes and no more, and it is what a fan of a shape that is
+--- not a box is made of -- see `wonderland.Canvas`.
+---@param x1 number
+---@param y1 number
+---@param x2 number
+---@param y2 number
+---@param x3 number
+---@param y3 number
+---@param z number
+---@param r number
+---@param g number
+---@param b number
+---@param a number
+---@param texture number
+function QuadBatch:triangle(x1, y1, x2, y2, x3, y3, z, r, g, b, a, texture)
+	self:points(x1, y1, x2, y2, x3, y3, x3, y3, z, r, g, b, a, texture)
+end
+
 --- Adds one quad with round corners, which is the same quad as `quad` asks for and a radius to
 --- cut it with.
 ---

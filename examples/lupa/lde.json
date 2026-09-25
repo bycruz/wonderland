@@ -1,0 +1,11 @@
+{
+	"$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+	"name": "wonderland-example-lupa",
+	"description": "A lupa 3d scene drawn on an element of a wonderland screen",
+	"authors": ["David Cruz <david@bycruz.dev>"],
+	"version": "0.1.0",
+	"dependencies": {
+		"wonderland": { "path": "../.." },
+		"lupa": { "path": "../../../lupa" }
+	}
+}

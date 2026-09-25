@@ -1,5 +1,6 @@
 local bit = require("bit")
 local ffi = require("ffi")
+local Canvas = require("wonderland.canvas")
 local QuadBatch = require("wonderland.util.quad_batch")
 local style = require("wonderland.style")
 local wonderlandElement = require("wonderland.element")
@@ -8,6 +9,11 @@ local time = require("wonderland.time")
 -- The element arena, read by the node's index into it: what a caret is for, and what has been
 -- typed into the field it belongs to.
 local pointers, strings = wonderlandElement.pointers, wonderlandElement.strings
+local callbacks = wonderlandElement.callbacks
+
+-- The picture a shape of a canvas is drawn with, which is the one a box with no picture of its own
+-- is drawn with: a white pixel, so what a shape comes to is the colour it was given.
+local WHITE_TEXTURE = 0
 
 -- The clock the screen is on: a window that is waiting for the next event uses no time at all, and
 -- it is that wait the frame after it is measured against. See `wonderland.time`.
@@ -69,6 +75,7 @@ function UI.new(layoutPlugin, renderPlugin)
 		layoutPlugin = layoutPlugin,
 		renderPlugin = renderPlugin,
 		batch = QuadBatch.new(),
+		canvas = Canvas.new(),
 		tickers = {},
 		frameInterval = FRAME_INTERVAL,
 		caretBlink = CARET_BLINK,
@@ -97,7 +104,7 @@ function UI:onTick(fn, window)
 
 	ticker.present = function()
 		if ticker.window ~= nil then
-			ui:requestRedraw(ticker.window, true)
+			ui:present(ticker.window)
 		end
 	end
 
@@ -108,8 +115,19 @@ end
 
 --- A frame asked for now rather than at the display's own rate: what a screen that has just been
 --- given something new to show asks for. See `UI:requestRedraw`, which is the rationed one.
+---
+--- What is asked for this way is drawn whatever the frame comes out to: a screen that says it has
+--- something new to show is one whose new thing is not in the quads -- a texture another renderer
+--- draws into, a picture a decoder wrote -- and a frame that came out the same as the last one is
+--- one that is skipped only where nothing outside the screen changed.
 ---@param window wonderland.RenderWindow
 function UI:present(window)
+	local ctx = self.layoutPlugin.contexts[window]
+
+	if ctx then
+		ctx.mustDraw = true
+	end
+
 	self:requestRedraw(window, true)
 end
 
@@ -742,15 +760,18 @@ end
 ---@param fontManager FontManager
 ---@param caret wonderland.plugin.UI.Caret? # The caret of the field that has the keyboard, if one has it
 ---@param inField boolean? # Whether this node is inside that field, which is where the caret is
+---@param canvas wonderland.Canvas # What an element that draws its own shapes draws them with
 local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, windowWidth, windowHeight, parentZ,
-	fontManager, caret, inField)
+	fontManager, caret, inField, canvas)
 	local node = screen:node(index)
 	local x, y = parentX + node.x, parentY + node.y
 	local z = math.max(node.zIndex, parentZ or 0)
 
-	-- Only looked at when there is a caret to place: a screen with no field focused is walked
-	-- without reaching for the element behind a node at all.
-	local element = caret and pointers[node.element] or nil
+	-- The element behind this node, which is what says whether it has a canvas of its own to draw
+	-- and which field it belongs to. The caret's half of that is only looked at when there is a
+	-- caret to place: a screen with no field focused has nothing to compare against.
+	local here = pointers[node.element]
+	local element = caret and here or nil
 	local inside = inField or (caret ~= nil and element ~= nil and element == caret.element)
 
 	-- The colour of a caret is the field's, wherever in it the caret turns out to be placed from:
@@ -789,6 +810,26 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 
 		clippedQuad(batch, clip, windowWidth, windowHeight, x, y, x + node.width, y + node.height,
 			convertZ(z), r, g, b, a, node.texture, node.u0, node.v0, node.u1, node.v1, node.radius)
+	end
+
+	-- What the element draws itself goes where its own text goes: over what is under it -- the
+	-- background is drawn already -- and under its children, which are drawn after.
+	if node.visible ~= 0 and here ~= nil and here.oncanvas ~= 0 then
+		local draw = callbacks[here.oncanvas]
+
+		if draw ~= nil then
+			-- The room the padding and the border leave, which is the room a child of this element
+			-- would get, and the depth everything of this element is drawn at.
+			local left = x + node.paddingLeft
+			local top = y + node.paddingTop
+			local roomWidth = node.width - node.paddingLeft - node.paddingRight
+				- node.borderLeft - node.borderRight
+			local roomHeight = node.height - node.paddingTop - node.paddingBottom
+				- node.borderTop - node.borderBottom
+
+			draw(canvas:draw(batch, clip, windowWidth, windowHeight, left, top, roomWidth, roomHeight,
+				convertZ(z), WHITE_TEXTURE))
+		end
 	end
 
 	if node.visible ~= 0 and node.run ~= 0 then
@@ -854,7 +895,7 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 
 	for at = 0, node.childCount - 1 do
 		generateNodeQuads(batch, screen, below, screen.childIndices[node.firstChild + at - 1], x, y, windowWidth,
-			windowHeight, z, fontManager, caret, inside)
+			windowHeight, z, fontManager, caret, inside, canvas)
 	end
 
 	if caret ~= nil and element ~= nil and element == caret.element and node.visible ~= 0 and not caret.placed then
@@ -1288,7 +1329,7 @@ function UI:walk(window, ctx, key)
 	batch:setViewport(width, height)
 
 	generateNodeQuads(batch, assert(ctx.screen), { left = 0, top = 0, right = width,
-		bottom = height }, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret)
+		bottom = height }, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret, nil, self.canvas)
 
 	-- What the caret's quad is added to: the frame is the quads of the screen and then it, so a
 	-- blink is this many of them and no more.
@@ -1347,7 +1388,8 @@ end
 --- frames that would show nothing new, and drawing one spends the display's time on it -- which is
 --- time the events behind it spend queued. A frame the *window* asked for is drawn whatever it
 --- comes out to, because what it is for is a window that lost what it was showing: an expose, a
---- surface the gpu is not ready to draw into yet.
+--- surface the gpu is not ready to draw into yet. And so is one a screen *presented*, because what
+--- it is for is a frame whose new thing is not in the quads at all: see `UI:present`.
 ---@param window wonderland.RenderWindow
 function UI:frame(window)
 	local ctx = self.layoutPlugin.contexts[window]
@@ -1364,8 +1406,9 @@ function UI:frame(window)
 	-- An ask is answered by the frame that comes out of it, which is where the window is told the
 	-- frame is ready: see `X11Window:acknowledgeSync`, which is what puts the ask away.
 	local asked = ctx.asked or window.frameAsked
+	local mustDraw = ctx.mustDraw
 
-	ctx.asked = nil
+	ctx.asked, ctx.mustDraw = nil, nil
 
 	-- What the events left for the screen, which is the only reason to look at the view again.
 	local owed = ctx.owed or not ctx.uploaded
@@ -1405,8 +1448,16 @@ function UI:frame(window)
 		-- with a caret that stayed where it was, is not -- and that frame costs the view and no more.
 		if assert(ctx.screen).changed or not ctx.uploaded or key ~= ctx.frameKey then
 			built = true
-			self:walk(window, ctx, key)
 		end
+	end
+
+	-- A frame the screen presented is one whose new thing is not in the solve: the shapes an element
+	-- draws into the frame itself, a texture another renderer has just filled. What an element draws
+	-- reads the app's state, so the frame is built again -- which is what calls those draws -- and
+	-- the solve that came out the same is the same one it is built from.
+	if built or (mustDraw and ctx.uploaded) then
+		built = true
+		self:walk(window, ctx, key)
 	end
 
 	-- The caret coming or going is one quad of the frame the gpu already has -- which is a frame
@@ -1417,7 +1468,7 @@ function UI:frame(window)
 		self:toggle(window, ctx)
 	end
 
-	if built or blinked or not asked or not ctx.presented then
+	if built or blinked or mustDraw or not asked or not ctx.presented then
 		ctx.presented = true
 		ctx.framedAt = now()
 		self.renderPlugin:draw(assert(self.renderPlugin:getContext(window)))
@@ -1427,6 +1478,10 @@ end
 --- A repaint that is not a frame: a window being registered, or a screen drawn by hand. The screen
 --- is built and given to the gpu, and the frame it came out to is asked for, which is what a
 --- window loop draws.
+---
+--- It is built whatever the solve came out to: what an app draws into the frame itself is in the
+--- frame and not in the solve, so a screen with a canvas or a texture of somebody else's on it is
+--- one whose frame is not the one the last solve drew.
 ---@param window wonderland.RenderWindow
 function UI:refreshView(window)
 	-- A click in a field is placed from the frame that was on screen when the pointer went down, so
@@ -1443,15 +1498,18 @@ function UI:refreshView(window)
 	ctx.owed = false
 
 	local key = caretKey(ctx, window, self.layoutPlugin)
+	-- What the frame is asked for by, which is what the gpu does not already have: the screen that
+	-- came out, the first frame of a window, and the caret that moved in a screen that did not.
+	local wanted = assert(ctx.screen).changed or not ctx.uploaded or key ~= ctx.frameKey
 
-	-- A repaint that comes out the same, with a caret that stayed where it was, is a repaint that
-	-- has nothing to upload and no frame to ask for: the gpu already has this one.
-	if not (assert(ctx.screen).changed or not ctx.uploaded or key ~= ctx.frameKey) then
-		return
-	end
-
+	-- Built whatever the solve came out to: what an element draws into a frame of its own -- the
+	-- shapes of a canvas, a texture another renderer has just filled -- reads the app's state, and a
+	-- solve that came out the same is not a frame that has nothing new in it.
 	self:walk(window, ctx, key)
-	self:requestRedraw(window)
+
+	if wanted then
+		self:requestRedraw(window)
+	end
 end
 
 return UI

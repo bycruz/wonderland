@@ -71,6 +71,22 @@ local MAX_LAYERS = 256
 -- free is the one that fails, so a picture is uploaded in bands of this much however large it is.
 local DEFAULT_UPLOAD_PIXELS = 2 * 1024 * 1024
 
+--- A picture this library did not draw itself: a texture somebody else rendered -- another
+--- renderer built on hood, a shader of an app's own -- or one this library made to be drawn into.
+--- What an element is shown with, and what a pass draws into.
+---
+---   local stage = render:target(1024, 1024)   -- draw your shader into stage.view
+---   div():style(sty():fill():image(stage))
+---
+--- A style takes one of these where it takes a picture's place: see `wonderland.StyleBuilder:image`.
+---@class wonderland.Surface
+---@field slot Texture # Which picture it is, as a quad names one
+---@field texture hood.Texture # The texture itself, which is what a pass draws into
+---@field view hood.TextureView # And the view of it a pass is given
+---@field format string? # What its format is called, where this library made it: a texture of somebody else's is whatever they made it
+---@field width number
+---@field height number
+
 ---@class TextureManager
 ---@field device hood.Device
 ---@field sampler hood.Sampler
@@ -155,7 +171,12 @@ function TextureManager:destroy()
 	for _, texture in ipairs(self.textures) do
 		texture.bindGroup:destroy()
 		texture.view:destroy()
-		texture.texture:destroy()
+
+		-- A texture that was wrapped rather than made here is the caller's, and what this gives
+		-- back is the view it was shown through.
+		if texture.owned then
+			texture.texture:destroy()
+		end
 	end
 
 	self.textures = {}
@@ -209,6 +230,7 @@ function TextureManager:createTexture(width, height, layers)
 		view = view,
 		layers = layers,
 		bindGroup = self:createBindGroup(view),
+		owned = true,
 	}
 
 	self.textureCount = id + 1
@@ -379,6 +401,98 @@ end
 ---@return Texture
 function TextureManager:createSlot(width, height, texture, first)
 	return self:addSlot(width, height, texture, first, height, 1)
+end
+
+--- One picture for a texture nobody uploaded: a texture made to be drawn into, or one another
+--- renderer drew, shown like any other picture.
+---
+--- What is kept of it is a view of it as the array the shader samples, which is one layer of a
+--- picture that is one layer: a quad samples it at the layer its slot names and at the row its
+--- texture coordinates say, so a texture of one layer and one band draws as it is.
+---@param texture hood.Texture
+---@param opts { owned: boolean?, format: string? }? # Whether giving it back frees it, which a texture of somebody else's is not, and what its format is called where that is known
+---@return wonderland.Surface
+function TextureManager:wrap(texture, opts)
+	local width, height = texture.width, texture.height
+
+	assert(width ~= nil and height ~= nil, "A texture of somebody else's says how big it is")
+
+	-- The array view the shader samples through, named the way `hood` reads it rather than the way
+	-- its types spell it: a dimension it does not know is left at nought, and what is sampled
+	-- through a view of the wrong kind is nothing at all.
+	local view = texture:createView({ dimension = "2d_array" })
+	local id = self.textureCount
+
+	self.textures[id] = {
+		texture = texture,
+		view = view,
+		layers = 1,
+		bindGroup = self:createBindGroup(view),
+		owned = opts ~= nil and opts.owned == true or nil,
+	}
+
+	self.textureCount = id + 1
+
+	return {
+		slot = self:createSlot(width, height, id, 0),
+		texture = texture,
+		view = view,
+		format = opts ~= nil and opts.format or nil,
+		width = width,
+		height = height,
+	}
+end
+
+--- A texture to draw into and show: what a shader of an app's own, or another renderer built on
+--- hood, needs of this library -- a place for its output that a screen can draw.
+---
+--- It is made to be both drawn into and sampled, and in the format a picture is sampled in unless
+--- the caller names another: a picture of a shader's own that holds more than a screen's worth of
+--- light wants a wider one, and a texture of floats is sampled as the numbers in it are.
+---@param width number
+---@param height number
+---@param opts { format: string? }?
+---@return wonderland.Surface
+function TextureManager:renderTarget(width, height, opts)
+	assert(width > 0 and height > 0 and width <= MAX_SIZE and height <= MAX_SIZE, string.format(
+		"A %dx%d texture is larger than the %d pixels a side this renderer makes.",
+		width, height, MAX_SIZE))
+
+	local name = (opts and opts.format) or "rgba8unorm"
+	local texture = self.device:createTexture({
+		extents = { dim = "2d", width = width, height = height, count = 1 },
+		format = name,
+		-- Drawn into by a pass, sampled by a screen, and written into by a picture an app read out
+		-- of a file or worked out itself: what a target of an app's own is used for is all three.
+		usages = { "TEXTURE_BINDING", "RENDER_ATTACHMENT", "COPY_DST" },
+	})
+
+	return self:wrap(texture, { owned = true, format = name })
+end
+
+--- Gives a surface back, which is what a texture of this library's own is freed with: the picture
+--- it was is gone, and a quad that names it draws the one that says there is nothing there. What
+--- a surface wrapped from somebody else's texture frees is the view it was shown through, and not
+--- the texture: that one is the caller's.
+---@param surface wonderland.Surface
+function TextureManager:release(surface)
+	local slot = surface.slot
+	local metadata = self.slots[slot]
+	local at = metadata ~= nil and metadata.texture or nil
+
+	if at == nil or self.textures[at] == nil then
+		return
+	end
+
+	self.textures[at].bindGroup:destroy()
+	self.textures[at].view:destroy()
+
+	if self.textures[at].owned then
+		self.textures[at].texture:destroy()
+	end
+
+	self.textures[at] = nil
+	self.slots[slot] = nil
 end
 
 --- Writes a picture into the layer a slot names, which is what a frame of a streamed animation is

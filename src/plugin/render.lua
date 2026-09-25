@@ -39,9 +39,16 @@ local shaderExt = backend.shaderExt
 ---@field drawRetries number? # Frames asked for in a row with no texture to draw into
 
 --- An offscreen target a frame can be read back from.
+---
+--- It has a depth buffer of its own rather than the one the frame draws with: a screenshot is a
+--- frame recorded while the frame it is a screenshot of is still in flight, and that pass clears
+--- the depth it tests against -- which would be the depth of a frame the display has not been given
+--- yet. Two targets, two depth buffers, one command buffer each.
 ---@class wonderland.plugin.Render.Capture
 ---@field texture hood.Texture
 ---@field view hood.TextureView
+---@field depth hood.Texture
+---@field depthView hood.TextureView
 ---@field buffer hood.Buffer
 ---@field width number
 ---@field height number
@@ -55,6 +62,7 @@ local shaderExt = backend.shaderExt
 ---@field windowPlugin wonderland.plugin.Window<any>
 ---@field mainCtx wonderland.plugin.Render.Context?
 ---@field contexts table<wonderland.RenderWindow, wonderland.plugin.Render.Context>
+---@field targets { surface: wonderland.Surface, draw: fun(encoder: hood.CommandEncoder, view: hood.TextureView, width: number, height: number), width: number, height: number }[] # The surfaces the app fills, in the order they were made
 ---@field sharedResources wonderland.plugin.Render.SharedResources?
 ---@field device hood.Device? # Made when a window is first registered: see `RenderPlugin:getDevice`
 ---@field presentMode string # How frames reach the display
@@ -72,6 +80,7 @@ RenderPlugin.__index = RenderPlugin
 function RenderPlugin.new(windowPlugin, opts)
 	return setmetatable({
 		contexts = {},
+		targets = {},
 		windowPlugin = windowPlugin,
 
 		-- Frames are waited for by the display unless an app says otherwise: a redraw that
@@ -176,6 +185,75 @@ function RenderPlugin:register(window)
 	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode })
 
 	return self:createContext(window, swapchain)
+end
+
+--- A picture of somebody else's, shown by a screen: a texture another renderer drew -- one built
+--- on hood, the way this is -- or a shader of an app's own.
+---
+---   local slot = render:texture(myTexture)
+---   div():style(sty():fill():image(slot))
+---
+--- What is wrapped is shown where a screen draws a picture, which means it is drawn over by what
+--- is over it, cut by the pane it is in and rounded by the style it is given -- a picture is a
+--- picture. What a pass of the app's own draws into is what it keeps: what this does with it is
+--- make a view of it as the array the shader samples.
+---@param texture hood.Texture
+---@param opts { owned: boolean? }? # Whether giving it back is giving the texture back, which a texture of an app's own is not
+---@return wonderland.Surface
+function RenderPlugin:texture(texture, opts)
+	return assert(self.sharedResources).textureManager:wrap(texture, opts)
+end
+
+--- A texture to draw into and show, made here: what an app that renders with a shader of its own,
+--- or with a renderer built on hood, needs of this library.
+---
+---   local meter = render:target(512, 256, { draw = function(encoder, view, width, height)
+---       encoder:beginRendering({ colorAttachments = { { texture = view, op = { type = "clear" } } } })
+---       -- ... your own pipeline, your own geometry
+---       encoder:endRendering()
+---   end })
+---
+---   div():style(sty():fill():image(meter))
+---
+--- What `draw` is given is the frame's own command encoder, before the pass the screen is drawn in,
+--- so a pass of the app's is the first pass of the frame: what it drew is drawn in the frame that
+--- drew it, with nothing waited for and nothing submitted twice. It is called for every frame the
+--- screen is drawn, including the frames of a caret blinking; an app whose own drawing changes less
+--- often than that is one that says so itself, and records nothing on a frame it has not changed.
+---
+--- A surface with no `draw` is one the app fills itself: what it draws into is `surface.view`, with
+--- `surface.texture` as the colour attachment, and it hands the result to a queue of its own. What
+--- that costs is making sure the frame that samples it comes after the pass that filled it.
+---
+--- The format is `rgba8unorm` unless another is named, which is the format a picture is sampled in.
+--- A shader of an app's own compiles its pipeline against whichever it asked for: see `surface.format`.
+---@param width number
+---@param height number
+---@param opts { format: string?, draw: fun(encoder: hood.CommandEncoder, view: hood.TextureView, width: number, height: number)? }?
+---@return wonderland.Surface
+function RenderPlugin:target(width, height, opts)
+	local surface = assert(self.sharedResources).textureManager:renderTarget(width, height, opts)
+	local draw = opts ~= nil and opts.draw or nil
+
+	if draw ~= nil then
+		self.targets[#self.targets + 1] = { surface = surface, draw = draw, width = width, height = height }
+	end
+
+	return surface
+end
+
+--- What a surface was shown by, given back: a texture of this library's is freed, and one of the
+--- app's own is not. What is drawn with a surface that has been given back is nothing at all, so a
+--- screen that was drawing it is a screen to build again without it.
+---@param surface wonderland.Surface
+function RenderPlugin:release(surface)
+	assert(self.sharedResources).textureManager:release(surface)
+
+	for at = #self.targets, 1, -1 do
+		if self.targets[at].surface == surface then
+			table.remove(self.targets, at)
+		end
+	end
 end
 
 --- The device every frame is drawn with, made when a window first needs one.
@@ -301,7 +379,7 @@ function RenderPlugin:createContext(window, swapchain)
 	end
 
 	local depthBuffer = self:getDevice():createTexture({
-		extents = { dim = "2d", width = depthWidth, height = depthHeight },
+		extents = { dim = "2d", width = depthWidth, height = depthHeight, count = 1 },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
 	})
@@ -367,19 +445,29 @@ function RenderPlugin:ensureCapture(ctx)
 	if capture then
 		capture.view:destroy()
 		capture.texture:destroy()
+		capture.depthView:destroy()
+		capture.depth:destroy()
 		capture.buffer:destroy()
 	end
 
 	local texture = self:getDevice():createTexture({
-		extents = { dim = "2d", width = width, height = height },
+		extents = { dim = "2d", width = width, height = height, count = 1 },
 		format = "rgba8unorm",
 		usages = { "RENDER_ATTACHMENT", "COPY_SRC" }
+	})
+
+	local depth = self:getDevice():createTexture({
+		extents = { dim = "2d", width = width, height = height, count = 1 },
+		format = "depth24plus",
+		usages = { "RENDER_ATTACHMENT" }
 	})
 
 	---@type wonderland.plugin.Render.Capture
 	capture = {
 		texture = texture,
 		view = texture:createView({}),
+		depth = depth,
+		depthView = depth:createView({}),
 		buffer = self:getDevice():createBuffer({ size = width * height * 4, usages = { "MAP_READ" } }),
 		width = width,
 		height = height
@@ -396,7 +484,8 @@ end
 ---@param target hood.TextureView
 ---@param width number
 ---@param height number
-function RenderPlugin:recordFrame(ctx, encoder, target, width, height)
+---@param depthView hood.TextureView? # What it tests against, which is the frame's unless a screenshot brings its own
+function RenderPlugin:recordFrame(ctx, encoder, target, width, height, depthView)
 	-- What an animation has read since the last frame goes into this one, before the pass it is
 	-- drawn in: a copy is not something a render pass can have recorded inside it, and going
 	-- through the queue instead would be this frame waiting for the gpu to be idle.
@@ -410,6 +499,15 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height)
 		shared.textureManager:flush(encoder)
 	end
 
+	-- What the app draws itself goes into the frame's own command buffer, before the screen: a pass
+	-- of the app's is a pass of this frame, so nothing about what the frame samples has to be waited
+	-- for -- the queue draws the passes of one buffer in the order they were recorded.
+	for index = 1, #self.targets do
+		local target_ = self.targets[index]
+
+		target_.draw(encoder, target_.surface.view, target_.width, target_.height)
+	end
+
 	encoder:beginRendering({
 		colorAttachments = {
 			{
@@ -419,7 +517,7 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height)
 		},
 		depthStencilAttachment = {
 			op = { type = "clear", depth = 1 },
-			texture = ctx.depthBufferView
+			texture = depthView or ctx.depthBufferView
 		}
 	})
 	encoder:setPipeline(ctx.quadPipeline)
@@ -542,7 +640,7 @@ function RenderPlugin:resize(ctx)
 
 	local oldBufferView, oldBuffer = ctx.depthBufferView, ctx.depthBuffer
 	ctx.depthBuffer = self:getDevice():createTexture({
-		extents = { dim = "2d", width = ctx.swapchain.width, height = ctx.swapchain.height },
+		extents = { dim = "2d", width = ctx.swapchain.width, height = ctx.swapchain.height, count = 1 },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
 	})
@@ -577,7 +675,10 @@ end
 function RenderPlugin:draw(ctx)
 	local view, width, height
 
-	if ctx.capture then
+	if not ctx.swapchain and ctx.capture then
+		-- A screen with no window behind it draws into the capture it is read back from, which is
+		-- the only thing it has to draw into. A windowed screen has a capture only once something
+		-- asked for a screenshot, and a screenshot is not a frame: what it draws is its swapchain.
 		view, width, height = ctx.capture.view, ctx.capture.width, ctx.capture.height
 	else
 		-- What the frame draws into, taken before the screen was built for it: see `retarget`, which
@@ -626,9 +727,13 @@ end
 function RenderPlugin:getPixels(ctx)
 	if ctx.swapchain then
 		local capture = self:ensureCapture(ctx)
-		local encoder = self:frameEncoder(ctx)
+		-- A command buffer of its own rather than the frame's: what is drawn here is drawn into the
+		-- capture and not into the swapchain, and a frame's buffer is one per swapchain image, which
+		-- is not free again until the frame that used it is presented -- so a screenshot taken twice
+		-- without a frame between them would be the same buffer recorded twice over.
+		local encoder = self:getDevice():createCommandEncoder()
 
-		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height)
+		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height, capture.depthView)
 		self:recordCopy(ctx, encoder)
 		self:getDevice().queue:submit(encoder:finish())
 	end

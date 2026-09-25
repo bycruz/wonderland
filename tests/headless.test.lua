@@ -1,11 +1,12 @@
 -- A screen with no window behind it, which is how the ui is checked: it is rendered
 -- offscreen and the pixels it produced are asserted.
+local ffi = require("ffi")
 local test = require("lde-test")
 local image = require("image")
 local wonderland = require("wonderland")
 local Atlas = require("wonderland.font.atlas")
 
-local div, text = wonderland.div, wonderland.text
+local div, text, sty = wonderland.div, wonderland.text, wonderland.sty
 
 -- The fixtures are found beside this file rather than by the working directory a test is run from.
 local HERE = (debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or ".")
@@ -487,31 +488,37 @@ end)
 -- app that keeps its own offset can go below zero -- a bounce, a wheel turned the other way -- and
 -- the box it is in is the only thing that can put it back.
 test.skipIf(not canRender)("a box scrolled past its start draws as if it were at the start", function()
-	local function at(offset)
-		local screen = wonderland.headless.new(function()
-			local pane = div():style({ direction = "column", width = { abs = 200 }, height = { abs = 100 },
-				bar = { width = 8, least = 20, color = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 } } }):scroll(offset)
+	-- One screen drawn twice rather than one per offset: a screen is a gpu device, and a process is
+	-- handed a few dozen of them, so the suite keeps to one wherever a second draw of another view
+	-- is all a second screen would be.
+	local offset = -500
 
-			pane:children(
-				div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 1.0, g = 0.0, b = 0.0, a = 1.0 } }),
-				div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 0.0, g = 0.0, b = 1.0, a = 1.0 } })
-			)
+	local screen = wonderland.headless.new(function()
+		local pane = div():style({ direction = "column", width = { abs = 200 }, height = { abs = 100 },
+			bar = { width = 8, least = 20, color = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 } } }):scroll(offset)
 
-			return pane
-		end, { width = 200, height = 100, fontPath = assert(fontPath) })
+		pane:children(
+			div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 1.0, g = 0.0, b = 0.0, a = 1.0 } }),
+			div():style({ width = { abs = 200 }, height = { abs = 100 }, bg = { r = 0.0, g = 0.0, b = 1.0, a = 1.0 } })
+		)
 
+		return pane
+	end, { width = 200, height = 100, fontPath = assert(fontPath) })
+
+	---@param at number
+	---@return number bar
+	local function barOf(at)
+		offset = at
 		screen:draw()
-		local pixels = assert(screen:getPixels())
 
-		local bar = pixelAt(pixels, 200, 196, 5)
-		screen:close()
-
-		return bar
+		return pixelAt(assert(screen:getPixels()), 200, 196, 5)
 	end
 
-	local above, atStart = at(-500), at(0)
+	local above, atStart = barOf(-500), barOf(0)
 
 	test.equal(above, atStart, "an offset above the start is the start")
+
+	screen:close()
 end)
 
 -- A box with round corners is drawn as the box it is and cut in the shader, which is why it
@@ -2191,7 +2198,189 @@ local function writePicture(path)
 	assert(picture:save(path))
 end
 
---- A picture of one colour, written where the asset manager can read it back.
+-- What an element draws itself, and what a texture it drew itself is shown as: the two ways a
+-- screen draws something that is not a box -- the shapes of a canvas, and a picture another
+-- renderer or a shader of the app's own made.
+--
+-- Both are on one screen, because a screen is a gpu device and a machine hands a process a few
+-- dozen of them.
+test.skipIf(not canRender)("draws the shapes of a canvas, and a texture an app drew itself", function()
+	local passes = 0
+
+	-- What the app's own pass drew, and a texture of the app's own: both are made once the screen
+	-- they are drawn on exists, and the view of the first frame is built while it is still being
+	-- made, so the field the picture is taken from is empty for that one.
+	local stage, own = nil, nil
+
+	-- What the canvas draws, which is the app's state and not the screen's: a frame the screen
+	-- presents is built again so that a draw of an element's own reads it.
+	local drawn = true
+
+	local screen = wonderland.headless.new(function()
+		local picture = div():style(sty():size(64, 64))
+		local wrapped = div():style(sty():size(64, 64))
+
+		if stage ~= nil then
+			picture = div():style(sty():size(64, 64):image(stage))
+		end
+
+		if own ~= nil then
+			wrapped = div():style(sty():size(64, 64):image(own))
+		end
+
+		-- A column rather than whatever the default is: every sample below is of a place on the
+		-- screen, and the shape of the screen is what puts the picture there.
+		return div():style(sty():size(200, 240):bg("#000000"):column()):children({
+			div():style(sty():size(100, 100)):canvas(function(canvas)
+				if drawn then
+					canvas:rect(4, 36, 8, 8, "#ff00ff")
+				end
+				canvas:rect(0, 0, 40, 10, "#ff0000")
+				canvas:rect(0, 20, 40, 20, "#00ff00", 8)
+				canvas:circle(70, 70, 20, "#0000ff")
+				canvas:line(0, 50, 40, 90, 4, "#ffffff")
+				canvas:polygon({ 60, 0, 100, 0, 80, 30 }, "#ffff00")
+			end):children(
+				-- A canvas of its own, away from the screen's corner and inside another element's:
+				-- a shape of a canvas is drawn where the element is, and one that needs no cutting
+				-- is drawn where it is asked for like any other.
+				div():style(sty():size(20, 20):margin(10, 0, 0, 10)):canvas(function(inner)
+					inner:line(0, 10, 20, 10, 6, "#00ffff")
+				end)
+			),
+			picture,
+			wrapped,
+		})
+	end, { width = 200, height = 240, fontPath = assert(fontPath) })
+
+	local render = screen.plugins.render
+
+	-- What an app's own pass leaves in a target, as the bytes of the picture: what it draws with is
+	-- its own pipeline and its own geometry -- see `wonderland.plugin.Render:target` -- and what
+	-- this writes is the same picture without either, so that what is checked is the picture
+	-- reaching the frame and not the shape an app drew it from.
+	local green = ffi.new("uint8_t[?]", 64 * 64 * 4)
+
+	for at = 0, 64 * 64 - 1 do
+		green[at * 4], green[at * 4 + 1], green[at * 4 + 2], green[at * 4 + 3] = 20, 200, 60, 255
+	end
+
+	stage = render:target(64, 64, { draw = function(encoder)
+		passes = passes + 1
+
+		encoder:writeTexture(stage.texture, { width = 64, height = 64 }, green)
+	end })
+
+	-- A texture the app made and filled itself, which is the other thing a surface is: what a
+	-- renderer built on hood leaves its own output in, drawn by a frame it is not part of.
+	local made = render:getDevice():createTexture({
+		extents = { dim = "2d", width = 64, height = 64, count = 1 },
+		format = "rgba8unorm",
+		usages = { "TEXTURE_BINDING", "COPY_DST" },
+	})
+	local pink = ffi.new("uint8_t[?]", 64 * 64 * 4)
+
+	for at = 0, 64 * 64 - 1 do
+		pink[at * 4], pink[at * 4 + 1], pink[at * 4 + 2], pink[at * 4 + 3] = 220, 40, 120, 255
+	end
+
+	local uploader = render:getDevice():createCommandEncoder()
+
+	uploader:writeTexture(made, { width = 64, height = 64 }, pink)
+	render:getDevice().queue:submit(uploader:finish())
+	render:getDevice().queue:waitIdle()
+
+	own = render:texture(made)
+
+	-- What the last frame that was read back holds, which a frame drawn again is read into again.
+	local pixels
+
+	-- A frame is built before one is read back: what a screen draws is what its last frame was, and
+	-- a screen that has only just been made has not drawn one.
+	screen:draw()
+
+	pixels = assert(screen:getPixels())
+
+	---@param x number
+	---@param y number
+	---@return number r
+	---@return number g
+	---@return number b
+	local function at(x, y)
+		return pixelAt(pixels, 200, x, y)
+	end
+
+	local r, g, b = at(20, 5)
+
+	test.equal(r > 200 and g < 60 and b < 60, true, "a rectangle is the colour it was given")
+	test.equal(at(2, 2), at(38, 8), "and is the same colour across it")
+
+	local rr, rg, rb = at(20, 30)
+
+	test.equal(rr < 60 and rg > 200 and rb < 60, true, "a rectangle with round corners is drawn")
+
+	local dr, dg, db = at(70, 70)
+
+	test.equal(db > 200 and dr < 60 and dg < 60, true, "a circle is drawn where its middle is")
+
+	local lr, lg, lb = at(20, 70)
+
+	test.equal(lr > 200 and lg > 200 and lb > 200, true, "a line is drawn along the way it goes")
+
+	local yr, yg, yb = at(80, 10)
+
+	test.equal(yr > 200 and yg > 200 and yb < 60, true, "and a shape of an app's own corners is filled")
+
+	-- A canvas inside an element that is not at the screen's corner, drawing a line that nothing
+	-- cuts: it is where its element is, which is not where the frame's corner is.
+	local cr, cg, cb = at(20, 20)
+
+	test.equal(cr < 60 and cg > 200 and cb > 200, true,
+		string.format("a shape of a canvas is drawn where its element is: %d %d %d", cr, cg, cb))
+
+	local br, bg, bb = at(10, 10)
+
+	test.equal(br < 60 and bg < 60 and bb < 60, true,
+		string.format("and not at the corner of the frame: %d %d %d", br, bg, bb))
+
+	-- The picture under the shapes is the texture the app's pass filled, which is what a shader of
+	-- an app's own, or another renderer built on hood, is shown by.
+	local sr, sg, sb = at(20, 110)
+
+	test.greater(passes, 0, "the pass the app records for a target of its own was recorded")
+	test.equal(sg > 150 and sr < 60, true,
+		string.format("and the frame shows what it drew: %d %d %d", sr, sg, sb))
+
+	-- And under that, a texture of the app's own, wrapped rather than made here.
+	local wr, wg, wb = at(20, 174)
+
+	test.equal(wr > 150 and wg < 90 and wb > 60, true,
+		string.format("a texture of the app's own is shown as it is: %d %d %d", wr, wg, wb))
+
+	-- A frame the screen presents is built again, so what an element draws reads the app's state:
+	-- the screen did not change -- the same elements, the same solve -- and the frame did.
+	local mr, mg, mb = at(8, 40)
+
+	test.equal(mr > 200 and mg < 60 and mb > 200, true,
+		string.format("what a canvas drew is in the frame: %d %d %d", mr, mg, mb))
+
+	drawn = false
+	screen:draw()
+	pixels = assert(screen:getPixels())
+
+	local nr, ng, nb = at(8, 40)
+
+	test.equal(nr < 60 and ng < 60 and nb < 60, true,
+		string.format("and a frame drawn again draws it again: %d %d %d", nr, ng, nb))
+
+	-- Given back before the screen is: what a surface holds of the view it was shown through is the
+	-- library's, and the texture behind it is the app's, which is what `release` leaves alone.
+	render:release(own)
+	made:destroy()
+
+	screen:close()
+end)
+
 ---@param path string
 ---@param width number
 ---@param height number

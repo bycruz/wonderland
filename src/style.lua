@@ -681,10 +681,18 @@ end
 --- An uploaded texture across the box, and the part of it to use: what an asset from
 --- `wonderland.Assets` hands over, which is the whole of a picture and the part of a layer a
 --- frame of a gif is.
----@param texture Texture
+---
+--- A surface goes here too -- what a shader of the app's own drew, or another renderer built on
+--- hood: see `wonderland.plugin.Render:target` and `wonderland.plugin.Render:texture`.
+---@param texture Texture|wonderland.Surface
 ---@param uv wonderland.UV?
 ---@return wonderland.StyleBuilder
 function methods:image(texture, uv)
+	if type(texture) == "table" then
+		texture = assert(texture.slot, ":image takes a picture by id or a surface: a texture of "
+			.. "somebody else's is wrapped before it is shown, with `render:texture`")
+	end
+
 	self.values.bgImage = texture
 	self.values.bgImageUV = uv
 	self.version = self.version + 1
