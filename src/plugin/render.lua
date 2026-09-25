@@ -605,20 +605,22 @@ function RenderPlugin:retarget(window)
 	local texture = ctx.swapchain:getCurrentTexture()
 
 	if not texture then
-		self:resize(ctx)
+		-- A window that is minimized, or one being dragged, has no size for a swapchain to be
+		-- made for, and the surface answers that with nothing rather than with an error: what
+		-- it is left holding is the swapchain it already had, and this frame is dropped --
+		-- nothing is asked of a swapchain that cannot hand an image over, and a window that
+		-- has a size again is a window whose next frame makes one: see `resize`.
+		if not self:resize(ctx) then
+			self:drop(ctx)
+
+			return false
+		end
 
 		texture = ctx.swapchain:getCurrentTexture()
 	end
 
 	if not texture then
-		-- The surface is still moving under it. A frame is asked for again -- but only a few times
-		-- in a row, so that a window that is gone, or one being dragged, is not a loop that draws
-		-- as fast as it can: see `drawRetries`.
-		ctx.drawRetries = (ctx.drawRetries or 0) + 1
-
-		if ctx.drawRetries <= DRAW_RETRIES then
-			ctx.window.shouldRedraw = true
-		end
+		self:drop(ctx)
 
 		return false
 	end
@@ -631,12 +633,37 @@ function RenderPlugin:retarget(window)
 	return true
 end
 
+--- A frame with nothing to draw into: it is asked for again -- but only a few times in a row, so
+--- that a window that is gone, or one being dragged, is not a loop that draws as fast as it can.
+--- See `drawRetries`. What happens after those is nothing until something else asks for a frame,
+--- which is what a window that has been restored does: a resize, an expose, or the app's own work.
+---@param ctx wonderland.plugin.Render.Context
+function RenderPlugin:drop(ctx)
+	ctx.drawRetries = (ctx.drawRetries or 0) + 1
+
+	if ctx.drawRetries <= DRAW_RETRIES then
+		ctx.window.shouldRedraw = true
+	end
+end
+
 --- Reconfigures a swapchain whose surface changed under it, which is what a resize
 --- looks like from here.
+---
+--- A window with no size -- one that is minimized, or one being dragged -- has no swapchain to
+--- make, and what comes back is nothing: the swapchain the context already has is left where it
+--- is, since throwing it away would leave the window with a surface and nothing at all to draw
+--- into it once it is restored, and this answers that it made none.
 ---@param ctx wonderland.plugin.Render.Context
+---@return boolean resized # Whether there is a swapchain this frame can be drawn into
 function RenderPlugin:resize(ctx)
 	local windowCtx = assert(self.windowPlugin:getContext(ctx.window))
-	ctx.swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }, ctx.swapchain)
+	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }, ctx.swapchain)
+
+	if not swapchain then
+		return false
+	end
+
+	ctx.swapchain = swapchain
 
 	local oldBufferView, oldBuffer = ctx.depthBufferView, ctx.depthBuffer
 	ctx.depthBuffer = self:getDevice():createTexture({
@@ -648,6 +675,8 @@ function RenderPlugin:resize(ctx)
 
 	oldBufferView:destroy()
 	oldBuffer:destroy()
+
+	return true
 end
 
 --- The command buffer a frame is recorded into. A frame that goes into a swapchain is recorded
