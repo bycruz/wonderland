@@ -2,12 +2,12 @@
 	"name": "wonderland",
 	"description": "A cross platform UI library for LuaJIT",
 	"authors": ["David Cruz <david@bycruz.dev>"],
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"dependencies": {
 		"hood": { "version": "0.2", "features": ["vk", "gl"] },
 		"winit": { "version": "0.1" },
 		"image": { "version": "0.1" },
-		"texter": { "path": "../texter/packages/texter" }
+		"texter": { "version": "0.1" }
 	},
 	"devDependencies": {}
 }
