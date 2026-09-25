@@ -32,6 +32,10 @@ layout(location = 2) flat in int texIndex;
 layout(location = 3) in vec2 corner;
 layout(location = 4) in vec2 inner;
 layout(location = 5) in vec2 edge;
+// Whether this quad's picture is a picture of its own colours rather than a shape the colour is
+// drawn through: a glyph a font draws as a picture -- an emoji -- is the colours it comes in, and
+// what the vertex colour is of it is how opaque the element holding it is.
+layout(location = 6) flat in float own;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -49,7 +53,11 @@ void main() {
     vec4 texColor = texture(uTexture, vec3(texCoord.x, fract(down), min(band.x + floor(down), band.z)));
     #endif
 
-    fragColor = texColor * vertexColor;
+    if (own > 0.5) {
+        fragColor = vec4(texColor.rgb, texColor.a * vertexColor.a);
+    } else {
+        fragColor = texColor * vertexColor;
+    }
 
     // A box that is cut is drawn as the box it is and cut here instead, so that it costs one quad
     // and no more geometry than a square one. How far this pixel is from the box is the distance

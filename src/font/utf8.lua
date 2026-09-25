@@ -1,9 +1,5 @@
--- Reading UTF-8, one character at a time.
---
--- A string in Lua is bytes, and a character in one is one to four of them: everything here that
--- counts characters, places glyphs or fits a line into a box asks this where a character starts
--- and what it is. It is a module of its own because the atlas packs a glyph by codepoint and the
--- font measures a line by them, and neither should own the other's reading of a string.
+-- Reading UTF-8, one character at a time: a string in Lua is bytes and a character in one is one to
+-- four of them.
 local utf8 = {}
 
 --- One character of a string, and where the one after it starts.
@@ -59,6 +55,39 @@ end
 ---@return number after
 function utf8.one(char)
 	return utf8.decode(char, 1)
+end
+
+--- How many bytes come before a caret one character back of this one. A key that walks a caret or
+--- takes a character away counts characters, and one byte back is the middle of a character for most
+--- of what is typed. A byte that starts nothing is a character of one byte, so a string that is not
+--- text still moves.
+---@param text string
+---@param at number # How many bytes come before the caret, from nought
+---@return number # How many come before the caret one character back of it, which is `at` at the start
+function utf8.back(text, at)
+	local before, position = 0, 1
+
+	while position <= at do
+		local _, after = utf8.decode(text, position)
+
+		-- The character the caret is inside of, or at the end of, is the one before it.
+		if after > at then
+			return position - 1
+		end
+
+		before, position = position, after
+	end
+
+	return before
+end
+
+---@param text string
+---@param at number # How many bytes come before the caret, from nought
+---@return number # How many come before the caret one character on from it, which is `at` at the end
+function utf8.forward(text, at)
+	local _, after = utf8.decode(text, at + 1)
+
+	return math.min(after - 1, #text)
 end
 
 return utf8

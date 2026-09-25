@@ -12,8 +12,8 @@
 -- The fonts themselves are kept and handed out by number, because a number is what a style can
 -- hold: a style is interned as bytes and compared as bytes, so a family name in it is a handle
 -- into a table of names rather than a string -- see `wonderland.style`.
-local Face = require("wonderland.font.face")
 local Font = require("wonderland.font.font")
+local reader = require("wonderland.font.reader")
 local Atlas = require("wonderland.font.atlas")
 local Registry = require("wonderland.font.registry")
 
@@ -32,6 +32,7 @@ local Registry = require("wonderland.font.registry")
 
 local DEFAULT_PIXEL_HEIGHT = 16
 local DEFAULT_WEIGHT = 400
+
 
 -- What fonts a machine has is a question about the machine, not about an app: what one scan finds
 -- is kept here and shared by every manager in the process, so that two windows -- or a test that
@@ -79,6 +80,24 @@ end
 local FontManager = {}
 FontManager.__index = FontManager
 
+--- Makes something else the reader of font files, for every font a screen draws from then on.
+---
+---   FontManager.setProvider(myReader)
+---
+--- What a provider has to be is in `wonderland.font.Provider`: what this is asked is whether a face
+--- is what a package calls a face. What it is by default is the machine's own text, through
+--- `texter` -- see `wonderland.font.reader`, which is where what reads fonts actually lives.
+---@param replacement wonderland.font.Provider
+function FontManager.setProvider(replacement)
+	reader.set(replacement)
+end
+
+--- What reads font files now, which is what a test puts back the way it found it.
+---@return wonderland.font.Provider
+function FontManager.getProvider()
+	return reader.get()
+end
+
 ---@param textureManager TextureManager
 ---@param registry Registry?
 ---@return FontManager
@@ -112,7 +131,7 @@ function FontManager:face(path, index)
 		return known or nil
 	end
 
-	local face = Face.open(path, index)
+	local face = reader.open(path, index)
 
 	self.faces[key] = face or false
 

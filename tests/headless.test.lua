@@ -22,6 +22,7 @@ local FONT_PATHS = {
 	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 	"/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
 	"/Library/Fonts/Arial.ttf",
+	"/System/Library/Fonts/Supplemental/Arial.ttf",
 	"C:/Windows/Fonts/arial.ttf",
 }
 
@@ -54,6 +55,29 @@ if fontPath then
 end
 
 local canRender = fontPath ~= nil and gpuErr == nil
+
+-- Whether this machine draws arabic at all, asked of the chain an app's text is drawn through: a
+-- machine with no arabic on it skips the tests below rather than failing them.
+local drawsArabic = false
+
+if canRender then
+	local Registry = require("wonderland.font.registry")
+	local reader = require("wonderland.font.reader")
+
+	local ok, found = pcall(function()
+		for _, path in ipairs(Registry.new():fallbacks("sans-serif")) do
+			local face = reader.open(path, 0)
+
+			if face ~= nil and face:hasGlyph(0x645) then
+				return true
+			end
+		end
+
+		return false
+	end)
+
+	drawsArabic = ok and found == true
+end
 
 local WHITE = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 }
 local BLACK = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 }
@@ -1708,6 +1732,132 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked", fun
 	test.truthy(caretX ~= nil, "and the caret is drawn at all")
 	test.truthy(caretX ~= nil and math.abs(caretX - (PAD + pen(0, 2))) <= 1,
 		"at the boundary that was clicked rather than at the end of the value")
+
+	screen:close()
+end)
+
+-- A line of arabic is drawn in the order it reads rather than the order it is typed, so what a line
+-- is is the glyphs a shaper made of it. What is checked is that it is drawn at all -- the font an app
+-- named has nothing of it -- and that a caret, a key and a backspace in it count characters rather
+-- than bytes.
+test.skipIf(not canRender or not drawsArabic)("draws a line of arabic, and counts a caret in it by character", function()
+	local value = "\u{645}\u{631}\u{62D}\u{628}\u{627}"
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ direction = "row", width = { abs = 200 }, height = { abs = 60 } }):children(
+			div():style({ width = { abs = 200 }, height = { abs = 60 },
+				bg = { r = 0, g = 0, b = 0, a = 1 }, fg = WHITE })
+				:input({ name = "field", value = value, oninput = function(typed)
+					return { type = "typed", value = typed }
+				end })
+				:children(text(value):style({ fg = { r = 0.5, g = 0.5, b = 0.5, a = 1 } }))
+		)
+	end, { width = 200, height = 60, fontPath = assert(fontPath), onMessage = function(message)
+		if message.type == "typed" then
+			value = message.value
+		end
+	end })
+
+	local ui = screen.plugins.ui
+	local layout = screen.plugins.layout
+
+	ui.caretBlink = 0
+	screen:draw()
+
+	--- The columns of a row that have ink on them, which is where the value is drawn.
+	---@param row number
+	---@return number first
+	---@return number last
+	local function ink(row)
+		local pixels = assert(screen:getPixels())
+		local first, last = nil, nil
+
+		for x = 0, 199 do
+			local r, g, b = pixelAt(pixels, 200, x, row)
+
+			if (r or 0) + (g or 0) + (b or 0) > 30 then
+				first = first or x
+				last = x
+			end
+		end
+
+		return first or 0, last or 0
+	end
+
+	-- The only white thing in a field whose text is grey.
+	---@param row number
+	---@return number
+	local function caret(row)
+		ui:frame(screen.window)
+
+		local pixels = assert(screen:getPixels())
+
+		for x = 0, 199 do
+			local r, g, b = pixelAt(pixels, 200, x, row)
+
+			if r > 200 and g > 200 and b > 200 then
+				return x
+			end
+		end
+
+		return -1
+	end
+
+	local first, last = ink(10)
+	local fontManager = assert(screen.plugins.render.sharedResources).fontManager
+	local run = assert(fontManager:getDefault()):getRun(value)
+
+	test.greater(last - first, 8, "the value is drawn rather than left blank")
+	test.less(last - first, run.width + 2,
+		string.format("and drawn inside the room the layout measured for it: %d in %d",
+			last - first, math.floor(run.width)))
+	test.equal(run.lines[0].rtl, 1, "a line of arabic is measured as reading right to left")
+
+	--- A click, and the byte of the value the caret came to be at.
+	---@param x number
+	---@return number
+	local function clickAt(x)
+		screen:click(x, 10)
+
+		return layout:getCursorPos(screen.window)
+	end
+
+	-- The bytes of a line that reads right to left run from its right: the start of the value is at
+	-- the right end of it.
+	test.equal(clickAt(last - 1), 0, "a click at the right end of it is the start of the value")
+	test.greater(caret(10), last - 6, "and the caret of the first character is drawn at the right of it")
+
+	test.equal(clickAt(first + 1), #value, "a click at its left end is the end of the value")
+	test.less(caret(10), first + 6, "and the caret of the last one is drawn at the left of it")
+
+	--- A key, with what the keyboard made of it: a key of an arabic keyboard is named after the latin
+	--- letter it sits on and types an arabic one.
+	---@param key string
+	---@param typed string?
+	local function press(key, typed)
+		screen:event({ name = "keyPress", window = screen.window, key = key, text = typed, modifiers = {} })
+	end
+
+	clickAt(last - 1)
+
+	press("b", "\u{628}")
+
+	test.equal(value, "\u{628}" .. "\u{645}\u{631}\u{62D}\u{628}\u{627}",
+		"what is typed is the whole character, both its bytes")
+	test.equal(layout:getCursorPos(screen.window), 2, "and the caret is past all of it")
+
+	press("backspace")
+
+	test.equal(value, "\u{645}\u{631}\u{62D}\u{628}\u{627}",
+		"and a backspace takes a character away rather than a byte of one")
+	test.equal(layout:getCursorPos(screen.window), 0, "with the caret where the character was")
+
+	press("right")
+	test.equal(layout:getCursorPos(screen.window), 2, "a caret walks a character at a time")
+	press("right")
+	test.equal(layout:getCursorPos(screen.window), 4)
+	press("left")
+	test.equal(layout:getCursorPos(screen.window), 2)
 
 	screen:close()
 end)

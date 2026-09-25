@@ -61,7 +61,7 @@ local App = wonderland.app("Todos")
 
 function App:init()
 	self.todos = {
-		{ id = 1, text = "click a row to tick it off", done = false },
+		{ id = 1, text = "AAAHH تباً لكتباً لكتباً لك ✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅", done = false },
 		{ id = 2, text = "click the x to remove one", done = false },
 		{ id = 3, text = "type below and press return", done = true },
 	}

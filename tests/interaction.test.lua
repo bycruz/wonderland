@@ -21,6 +21,7 @@ local FONT_PATHS = {
 	"/usr/share/fonts/TTF/DejaVuSans.ttf",
 	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 	"/Library/Fonts/Arial.ttf",
+	"/System/Library/Fonts/Supplemental/Arial.ttf",
 	"C:/Windows/Fonts/arial.ttf",
 }
 
@@ -31,6 +32,27 @@ for _, path in ipairs(FONT_PATHS) do
 	if file then
 		file:close()
 		fontPath = path
+		break
+	end
+end
+
+-- A font that draws emoji, which is what a machine draws a check mark with, and which nothing in
+-- the test names: a screen has it in the chain it falls back through, which is how a check mark
+-- gets drawn at all.
+local EMOJI_PATHS = {
+	"/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf",
+	"/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+	"/System/Library/Fonts/Apple Color Emoji.ttc",
+	"C:/Windows/Fonts/seguiemj.ttf",
+}
+
+local emojiPath = nil
+for _, path in ipairs(EMOJI_PATHS) do
+	local file = io.open(path, "rb")
+
+	if file then
+		file:close()
+		emojiPath = path
 		break
 	end
 end
@@ -465,4 +487,120 @@ test.skipIf(not canRender)("lays a cut line out as wide as it was cut to", funct
 
 	test.truthy(line.width < 60, string.format("the line is as wide as it was cut to, at %f", line.width))
 	test.greater(line.width, 0, "and something of it is left")
+end)
+
+test.skipIf(not canRender)("pastes into the field that has the keyboard, and copies and cuts what it holds", function()
+	local seen = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill():column()):children(aField("notes"))
+	end, function(message)
+		seen[#seen + 1] = message
+	end)
+
+	screen:click(10, 10)
+
+	test.truthy(screen.clipboard ~= nil, "a screen has a clipboard of its own to paste from")
+
+	screen.clipboard:setText("pasted text")
+	send(screen, { name = "keyPress", key = "v", modifiers = { ctrl = true } })
+
+	test.equal(#seen, 1, "the field is told what it holds after a paste")
+	test.equal(seen[1].value, "pasted text")
+
+	-- What was pasted is behind the caret, so a second paste lands after it.
+	send(screen, { name = "keyPress", key = "v", modifiers = { ctrl = true } })
+
+	test.equal(seen[2].value, "pasted textpasted text")
+
+	-- A field of one line takes the first line of what was pasted: a paste of a paragraph into a
+	-- name is a name.
+	screen.clipboard:setText("first line\nsecond line")
+	send(screen, { name = "keyPress", key = "v", modifiers = { ctrl = true } })
+
+	test.equal(seen[3].value, "pasted textpasted textfirst line")
+
+	-- Copying takes the whole value, which is all a field without a selection has to give.
+	send(screen, { name = "keyPress", key = "c", modifiers = { ctrl = true } })
+
+	test.equal(screen.clipboard:getText(), seen[3].value, "what the field holds is what the clipboard holds")
+	test.equal(#seen, 3, "and copying changes nothing about the field")
+
+	send(screen, { name = "keyPress", key = "x", modifiers = { ctrl = true } })
+
+	test.equal(screen.clipboard:getText(), "pasted textpasted textfirst line", "cutting copies it")
+	test.equal(seen[4].value, "", "and takes it out of the field")
+
+	screen:close()
+end)
+
+test.skipIf(not canRender)("gives files dropped on a window to the box they landed on", function()
+	local dropped = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill():column()):children({
+			div():style(sty():w(200):h(60):bg("#202020")):onDrop(function(paths, x, y)
+				local message = { type = "dropped", paths = paths, x = x, y = y }
+
+				dropped[#dropped + 1] = message
+
+				return message
+			end),
+			div():style(sty():w(200):h(60):bg("#101010")),
+		})
+	end)
+
+	local message = send(screen, {
+		name = "fileDrop",
+		paths = { "/music/one.flac", "/music/two.flac" },
+		x = 40,
+		y = 20,
+	})
+
+	test.equal(assert(message).type, "dropped", "the box the files landed on hears about them")
+	test.equal(assert(message).paths[1], "/music/one.flac", "and is told which files they were")
+	test.equal(assert(message).x, 40, "and where in it they landed")
+	test.equal(#dropped, 1)
+
+	-- A box that asked for nothing is not what a drop is for, and the event is left for the app,
+	-- which is what a screen that takes a file anywhere does.
+	test.falsy(send(screen, { name = "fileDrop", paths = { "/music/three.flac" }, x = 40, y = 100 }))
+	test.equal(#dropped, 1)
+
+	screen:close()
+end)
+
+test.skipIf(not canRender or emojiPath == nil)("draws an emoji in its own colours", function()
+	local screen = aScreen(function()
+		return div():style(sty():fill():bg("#000000")):children(
+			text("✅"):style(sty():fg("#ffffff"):text(32))
+		)
+	end)
+
+	local pixels = assert(screen:getPixels())
+
+	screen:close()
+
+	-- What is drawn where the check mark is is the emoji's own colours -- a green square with a
+	-- white check on it -- rather than the colour the text is in, which here is white: a white
+	-- square would be a screen with no green on it at all.
+	local green, white = 0, 0
+
+	for y = 0, HEIGHT - 1 do
+		for x = 0, WIDTH - 1 do
+			local at = (y * WIDTH + x) * 4 + 1
+			local r, g, b = pixels:byte(at, at + 2)
+
+			r, g, b = r or 0, g or 0, b or 0
+
+			if g > r + 30 and g > b + 30 then
+				green = green + 1
+			elseif r > 200 and g > 200 and b > 200 then
+				white = white + 1
+			end
+		end
+	end
+
+	test.greater(green, 40, string.format("the square of it is its own green: %d pixels", green))
+	test.greater(white, 4, "and the check on it is drawn as it is")
 end)

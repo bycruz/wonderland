@@ -1,6 +1,7 @@
 local bit = require("bit")
 local UILayout = require("wonderland.layout")
 local style = require("wonderland.style")
+local utf8 = require("wonderland.font.utf8")
 local wonderlandElement = require("wonderland.element")
 local time = require("wonderland.time")
 
@@ -238,6 +239,7 @@ local function repeats(key, modifiers, typed)
 end
 
 ---@class wonderland.plugin.Layout<Message>: wonderland.Plugin
+---@field clipboard winit.Clipboard? # Where a paste comes from and a copy goes, where the app has one
 ---@field textPlugin wonderland.plugin.Text
 ---@field view fun(window: wonderland.RenderWindow): wonderland.Element<Message>
 ---@field contexts table<wonderland.RenderWindow, wonderland.plugin.Layout.Context>
@@ -456,6 +458,10 @@ local function hasMouseUp(e) ---@param e wonderland.Element
 	return e.onmouseup ~= 0
 end
 
+local function hasDrop(e) ---@param e wonderland.Element
+	return e.ondrop ~= 0
+end
+
 local function hasContextMenu(e) ---@param e wonderland.Element
 	return e.oncontextmenu ~= 0
 end
@@ -520,6 +526,24 @@ local function contextMessage(handler, x, y, width, height, modifiers)
 
 	if type(handler) == "function" then
 		return handler(x, y, width, height, modifiers)
+	end
+
+	return handler
+end
+
+--- What a box is asked when files are dropped on it: the paths, and where in the box they landed.
+---@param handler any
+---@param paths string[]
+---@param x number
+---@param y number
+---@return any? message
+local function dropMessage(handler, paths, x, y)
+	if handler == nil then
+		return nil
+	end
+
+	if type(handler) == "function" then
+		return handler(paths, x, y)
 	end
 
 	return handler
@@ -731,21 +755,29 @@ local function lineEnd(value, at)
 	return break_ and break_ - 1 or #value
 end
 
---- What a key types, where it types something a field takes: the text the keyboard made of the key,
---- which is not the key -- shift and 1 is the key 1 pressed and "!" typed -- or nothing, which is
---- every key that types nothing of its own and every key whose name is what it does. A character
---- that is not printable is not typed either: what a key makes of control belongs to whoever reads
---- the chord, and the chord is read here.
+--- What a key types where it types something a field takes -- shift and 1 is the key 1 pressed and
+--- "!" typed -- or nothing, for a key that types nothing of its own.
+---
+--- A character is one to four bytes, so what is refused is a key that types nothing printable rather
+--- than a key that types more than one byte.
 ---@param event winit.Event
 ---@return string?
 local function typedBy(event)
 	local text = event.text
 
-	if text ~= nil and #text == 1 and text:byte(1) >= 32 then
-		return text
+	if text == nil or #text == 0 then
+		return nil
 	end
 
-	return nil
+	for at = 1, #text do
+		local byte = text:byte(at)
+
+		if byte < 32 or byte == 127 then
+			return nil
+		end
+	end
+
+	return text
 end
 
 --- How many lines a value is: one, and one more for every break in it. What a field is held to is
@@ -794,14 +826,13 @@ local function lineAcross(value, at, by)
 end
 
 
---- The caret of the field that has the keyboard: which element it is for, the line of it the
---- caret is on and how far along that line -- the two numbers a caret is drawn by, since the byte
---- it is at only says something to whoever has the value. Nothing is returned where no field has
---- the keyboard, which is a caret there is none of.
+--- The caret of the field that has the keyboard: which element it is for, the line of it the caret is
+--- on and how many bytes of that line come before it. Nothing is returned where no field has the
+--- keyboard.
 ---@param window wonderland.RenderWindow
 ---@return wonderland.Element? element
 ---@return number? line # From nought, so a field of one line is always on line nought
----@return number? column # How many characters of that line come before the caret
+---@return number? column # How many bytes of that line come before the caret
 function Layout:getCaret(window)
 	local ctx = self.contexts[window]
 
@@ -872,6 +903,92 @@ function Layout:barPress(ctx, x, y)
 	return nil
 end
 
+--- The first few lines of a string, which is what a paste into a field with lines to spare is.
+---@param text string
+---@param lines number
+---@return string
+local function firstLines(text, lines)
+	local at, seen = 1, 1
+
+	while seen < lines do
+		local newline = text:find("\n", at, true)
+
+		if newline == nil then
+			return text
+		end
+
+		seen = seen + 1
+		at = newline + 1
+	end
+
+	local last = text:find("\n", at, true)
+
+	return last ~= nil and text:sub(1, last - 1) or text
+end
+
+--- What control and a key does with the clipboard, in the field that has the keyboard: what is
+--- pasted lands where the caret is, and what is copied is the whole of what the field holds -- a
+--- field has no selection, so what is copied, cut and pasted over is the value.
+---
+--- A field of one line takes the first line of what was pasted, because a paste of a paragraph
+--- into a name is a name; a paragraph takes the lines it has room for, since a limit on a
+--- paragraph is a limit on what it holds. Nothing is written to the clipboard by a field with
+--- nothing in it, and a paste of nothing is no edit at all.
+---@param element wonderland.Element
+---@param ctx wonderland.plugin.Layout.Context
+---@param key string
+---@param value string
+---@param cursor number
+---@param edit fun(edited: string): any?
+---@return any? message
+function Layout:clipboardKey(element, ctx, key, value, cursor, edit)
+	local clipboard = self.clipboard
+
+	if clipboard == nil then
+		return nil
+	end
+
+	if key == "c" or key == "x" then
+		if value == "" then
+			return nil
+		end
+
+		clipboard:setText(value)
+
+		-- Cutting is copying and then not having it, which is the same edit as deleting every
+		-- character of the value.
+		return key == "x" and edit("") or nil
+	end
+
+	local pasted = clipboard:getText()
+
+	if pasted == nil or pasted == "" then
+		return nil
+	end
+
+	if bit.band(element.flags, MULTILINE) == 0 then
+		pasted = pasted:match("^[^\n]*")
+	end
+
+	if element.maxLines > 0 then
+		local room = element.maxLines - lineCount(value) + 1
+
+		if room < 1 then
+			return nil
+		end
+
+		pasted = firstLines(pasted, room)
+	end
+
+	if pasted == nil or pasted == "" then
+		return nil
+	end
+
+	ctx.cursorPos = cursor + #pasted
+
+	return edit(value:sub(1, cursor) .. pasted .. value:sub(cursor + 1))
+end
+
 --- The keyboard put on the next thing that can be focused, which is what tab is for: a screen with
 --- no pointer in it is a screen a person still has to be able to fill in. It wraps at the end,
 --- because a screen is a cycle of the things on it rather than a line, and what comes after the
@@ -925,13 +1042,12 @@ function Layout:focusNext(ctx, backwards)
 end
 
 --- The caret put where a line and a column of the value are, which is what a click in a field comes
---- to: the ui is what walks the text a field draws, so it is the ui that says which line and which
---- character of it a point is at, and the byte the caret is at is what that comes to. A column past
---- the end of its line is the end of that line, and a line the value does not have is nowhere: the
---- caret stays where it was rather than being put at a byte that is not there.
+--- to. The ui walks the text the field draws, so it says which line a point is on and which byte of
+--- it the point is at. A column past the end of its line is the end of it, and a line the value does
+--- not have leaves the caret where it was.
 ---@param window wonderland.RenderWindow
 ---@param line number
----@param column number
+---@param column number # How many bytes of that line come before the caret
 function Layout:setCaret(window, line, column)
 	local ctx = self.contexts[window]
 
@@ -1052,21 +1168,27 @@ function Layout:key(window, key, modifiers, typed)
 			return submit(value)
 		end
 	elseif key == "backspace" then
-		if cursor > 0 then
-			value = value:sub(1, cursor - 1) .. value:sub(cursor + 1)
-			ctx.cursorPos = cursor - 1
+		-- A character is taken away rather than a byte: a backspace that took one byte would leave
+		-- half of a letter behind.
+		local from = utf8.back(value, cursor)
+
+		if from < cursor then
+			value = value:sub(1, from) .. value:sub(cursor + 1)
+			ctx.cursorPos = from
 			return edit(value)
 		end
 	elseif key == "delete" then
-		if cursor < #value then
-			value = value:sub(1, cursor) .. value:sub(cursor + 2)
+		local to = utf8.forward(value, cursor)
+
+		if to > cursor then
+			value = value:sub(1, cursor) .. value:sub(to + 1)
 			return edit(value)
 		end
 	elseif key == "left" then
-		ctx.cursorPos = math.max(0, cursor - 1)
+		ctx.cursorPos = utf8.back(value, cursor)
 		return { type = "_inputRefresh" }
 	elseif key == "right" then
-		ctx.cursorPos = math.min(#value, cursor + 1)
+		ctx.cursorPos = utf8.forward(value, cursor)
 		return { type = "_inputRefresh" }
 	elseif key == "home" then
 		ctx.cursorPos = lineStart(value, cursor) - 1
@@ -1084,16 +1206,17 @@ function Layout:key(window, key, modifiers, typed)
 		if key == "a" or key:byte(1) == 1 then
 			ctx.cursorPos = #value
 			return { type = "_inputRefresh" }
+		elseif key == "v" or key == "c" or key == "x" then
+			return self:clipboardKey(element, ctx, key, value, cursor, edit)
 		end
 	elseif key == "space" then
 		value = value:sub(1, cursor) .. " " .. value:sub(cursor + 1)
 		ctx.cursorPos = cursor + 1
 		return edit(value)
-	elseif #typed == 1 and typed:byte(1) >= 32 then
-		-- A single character is typed, and what it is is what the key types rather than what the key
-		-- is: shift and 1 is named 1 and types "!". A key that types nothing of its own is handed its
-		-- own name as that, which is a key of one character or a key of none -- and a key of none is
-		-- one with something else to do, which the branches above have already done.
+	elseif typed ~= nil and typed:byte(1) >= 32 and (typed ~= key or #key == 1) then
+		-- What is typed is what the key types rather than what it is named: shift and 1 is named 1 and
+		-- types "!". A key that types nothing was handed its own name as what it types, so a name of
+		-- more than one character is a key this does not handle rather than something typed.
 		value = value:sub(1, cursor) .. typed .. value:sub(cursor + 1)
 		ctx.cursorPos = cursor + #typed
 		return edit(value)
@@ -1287,6 +1410,21 @@ function Layout:event(event)
 				-- list and a page of a document are not the same distance, and what the platform
 				-- reports is the wheel turning rather than the distance.
 				return scrollMessage(callbacks[hit.element.onscroll], event.dy ~= 0 and event.dy or event.dx, nil)
+			end
+		end
+	elseif event.name == "fileDrop" then
+		local ctx = self.contexts[event.window]
+
+		-- Files dropped on a window go to the innermost box under where they landed that asked for
+		-- them, and a window with no box for them hands the event to the app -- which is what a
+		-- screen that takes a file anywhere on it does.
+		if ctx then
+			local hit = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0,
+				hasDrop)
+
+			if hit then
+				return dropMessage(callbacks[hit.element.ondrop], event.paths or {}, event.x - hit.absX,
+					event.y - hit.absY)
 			end
 		end
 	elseif event.name == "keyPress" then

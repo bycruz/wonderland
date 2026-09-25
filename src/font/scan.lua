@@ -4,14 +4,11 @@
 --   local dirs = scan.dirs({})                 -- this machine's own font directories
 --   local faces = scan.faces(dirs)             -- one record a font, by the name it is found by
 --
--- A desktop has a few hundred font files and an app that names a family wants the one that is it.
--- What a file is called is in its header, and a font is megabytes of outlines behind a two-kilobyte
--- header, so the header is what is read: a walk of a machine's font directories is a few hundred
--- seeks of a few kilobytes rather than a few hundred megabytes of reading.
+-- A font is megabytes of outlines behind a two-kilobyte header, so the header is what is read: a walk
+-- of a machine's font directories is a few hundred seeks rather than a few hundred megabytes.
 --
 -- Reading a directory is the one thing the C library does not spell the same way on two platforms,
--- which is the whole of the ffi below: everything above it is the walk, and everything after it is
--- the header parser in `wonderland.font.sfnt`.
+-- which is what the ffi below is for; the header parsing is in `wonderland.font.sfnt`.
 local ffi = require("ffi")
 local sfnt = require("wonderland.font.sfnt")
 
@@ -31,14 +28,18 @@ local isWindows = ffi.os == "Windows"
 local is64Bit = ffi.arch:find("64") ~= nil
 local SEP = isWindows and "\\" or "/"
 
--- Reading a directory is the one thing the C library does not spell the same way twice: the name of
--- an entry sits at a different offset in every `struct dirent`, so the layout is written out per
--- platform. A layout that is guessed wrong reads a name that is not a file, which is a font skipped
--- -- the same thing that happens to a file which cannot be parsed.
+-- The name of an entry sits at a different offset in every `struct dirent`, so the layout is written
+-- out per platform. A layout that is guessed wrong reads a name that is not a file, and the font is
+-- skipped -- what happens to a file which cannot be parsed.
+--
+-- macOS is the trap: the headers describe the inode-64 entry the system mostly uses, with the name at
+-- byte twenty-one, but plain `readdir` hands over the 4.4BSD entry that older binaries were built
+-- against -- a thirty-two bit inode, a length, a type and a name length before the name at byte
+-- eight. Reading one as the other finds nothing in a directory that is full of fonts.
 local entry = "uint32_t ino; int32_t off; uint16_t reclen; uint8_t type; char name[256];"
 
 if ffi.os == "OSX" then
-	entry = "uint64_t ino; uint64_t seek; uint16_t reclen; uint16_t namlen; uint8_t type; char name[1024];"
+	entry = "uint32_t ino; uint16_t reclen; uint8_t type; uint8_t namlen; char name[1024];"
 elseif is64Bit then
 	entry = "uint64_t ino; int64_t off; uint16_t reclen; uint8_t type; char name[256];"
 end

@@ -1,7 +1,7 @@
 # lde Style Guide
 
 This document defines the style rules for the wonderland codebase. All Lua code in
-`packages/` must follow these rules. LLM tools and human contributors must
+the library must follow these rules. LLM tools and human contributors must
 follow them. The rules use Simplified Technical English. They are short and
 direct. Do not add rules to this document without a review.
 

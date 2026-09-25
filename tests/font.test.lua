@@ -9,8 +9,9 @@
 local ffi = require("ffi")
 local test = require("lde-test")
 local Atlas = require("wonderland.font.atlas")
-local Face = require("wonderland.font.face")
 local Font = require("wonderland.font.font")
+local Registry = require("wonderland.font.registry")
+local reader = require("wonderland.font.reader")
 local utf8 = require("wonderland.font.utf8")
 
 -- Any font will do for the tests that need one; they skip where the machine has none.
@@ -21,6 +22,8 @@ local FONT_PATHS = {
 	"/usr/share/fonts/TTF/DejaVuSans.ttf",
 	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 	"/Library/Fonts/Arial.ttf",
+	"/System/Library/Fonts/Supplemental/Arial.ttf",
+	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 	"C:/Windows/Fonts/arial.ttf",
 }
 
@@ -31,6 +34,26 @@ for _, path in ipairs(FONT_PATHS) do
 	if file then
 		file:close()
 		fontPath = path
+		break
+	end
+end
+
+-- A font that draws emoji, which is what a machine draws a check mark with: one that states a glyph
+-- as a *graph* of shapes and colours rather than as an outline, which is most of them now.
+local EMOJI_PATHS = {
+	"/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf",
+	"/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+	"/System/Library/Fonts/Apple Color Emoji.ttc",
+	"C:/Windows/Fonts/seguiemj.ttf",
+}
+
+local emojiPath = nil
+for _, path in ipairs(EMOJI_PATHS) do
+	local file = io.open(path, "rb")
+
+	if file then
+		file:close()
+		emojiPath = path
 		break
 	end
 end
@@ -78,6 +101,121 @@ local function aFaceOf(codepoints, advance)
 
 	return aFace(set, advance)
 end
+
+--- A shaper that draws a line in the order it is read rather than the order it is typed, one glyph a
+--- character, with the character itself as the glyph number: what a line of arabic is and a line of
+--- latin is not, with no dependence on this machine's fonts.
+---@param face wonderland.font.Face
+---@param text string
+---@param pixelHeight number
+---@return wonderland.font.Shaped
+local function mirrored(face, text, pixelHeight)
+	local characters, count, at = {}, 0, 1
+
+	while at <= #text do
+		local codepoint, after = utf8.decode(text, at)
+
+		count = count + 1
+		characters[count] = { codepoint = codepoint, cluster = at - 1 }
+		at = after
+	end
+
+	local glyphs, pen = {}, 0.0
+
+	for index = count, 1, -1 do
+		local character = characters[index]
+		local advance = face:advance(character.codepoint, pixelHeight)
+
+		glyphs[#glyphs + 1] = {
+			glyph = character.codepoint,
+			cluster = character.cluster,
+			x = pen,
+			y = 0,
+			advance = advance,
+		}
+
+		pen = pen + advance
+	end
+
+	return { glyphs = glyphs, width = pen, rtl = true, text = text }
+end
+
+-- A test that changes the reader puts it back: see the `afterEach` below.
+local realProvider = reader.get()
+
+--- A reader of a test's own: the face is a table and a line comes to what `shape` says.
+---@param face wonderland.font.Face
+---@param shape fun(face: wonderland.font.Face, text: string, pixelHeight: number): wonderland.font.Shaped
+local function aShapedReader(face, shape)
+	reader.set({
+		open = function()
+			return face
+		end,
+		shape = shape,
+		ink = function(_, glyph, pixelHeight)
+			return face:ink(glyph, pixelHeight)
+		end,
+	})
+end
+
+test.afterEach(function()
+	reader.set(realProvider)
+end)
+
+--- The font this machine draws with, built the way the font manager builds one: the machine's own
+--- sans and the faces the registry asks for after it.
+---@param pixelHeight number
+---@return wonderland.font.Font?
+local function machineFont(pixelHeight)
+	local paths = Registry.new():fallbacks("sans-serif")
+
+	if #paths == 0 then
+		return nil
+	end
+
+	local primary = Atlas.fromPath({ pixelHeight = pixelHeight }, paths[1])
+
+	if primary == nil then
+		return nil
+	end
+
+	local fallbacks = {}
+
+	for index = 2, #paths do
+		fallbacks[#fallbacks + 1] = { paths[index], 0 }
+	end
+
+	return Font.new(primary, {
+		spec = { pixelHeight = pixelHeight },
+		fallbacks = fallbacks,
+		load = function(path, index)
+			return reader.open(path, index)
+		end,
+	})
+end
+
+-- Whether this machine draws arabic at all: a machine with nothing of the sort skips the tests below,
+-- the way a machine with no font skips the ones that read one.
+local arabicFont = machineFont(24)
+
+---@param font wonderland.font.Font
+---@param char string
+---@return boolean
+local function draws(font, char)
+	font:getRun(char)
+
+	local codepoint = utf8.decode(char, 1)
+
+	for _, atlas in ipairs(font.atlases) do
+		if atlas:hasGlyph(codepoint) then
+			return true
+		end
+	end
+
+	return false
+end
+
+local drawsArabic = arabicFont ~= nil and draws(arabicFont, "\u{645}")
 
 test.it("reads one character of a string, and where the next one starts", function()
 	local codepoint, after = utf8.decode("a", 1)
@@ -266,6 +404,96 @@ test.it("measures a paragraph as lines of one run", function()
 	test.equal(font:getRun("").lineCount, 1, "and a line of nothing is still a line")
 end)
 
+test.it("draws a line in the order it is shaped in, and keeps the byte of every glyph", function()
+	local face = aFaceOf({ 0x61, 0x62, 0x63, 0x64 }, 8)
+
+	aShapedReader(face, mirrored)
+
+	local atlas = Atlas.new(assert(reader.open("a face of this test's own")), 16)
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local run = font:getRun("abcd")
+	local line = run.lines[0]
+
+	test.equal(run.count, 4, "one glyph a character")
+	test.equal(line.rtl, 1, "a line that reads right to left says so")
+	test.equal(assert(run.glyphs)[line.first].cluster, 3,
+		"and the first glyph of it is drawn from the last byte of the string")
+
+	for at = 0, line.count - 1 do
+		local glyph = assert(run.glyphs)[line.first + at]
+
+		test.equal(glyph.cluster, 3 - at, "every glyph keeps the byte it came from")
+		test.equal(glyph.pen, at * 8, "and says where the pen was when it was placed")
+	end
+end)
+
+test.it("shapes each piece of a line with the face that draws it", function()
+	local latin = aFaceOf({ 0x61, 0x62 }, 8)
+	local arabic = aFaceOf({ 0x620, 0x621 }, 5)
+
+	reader.set({
+		open = function(path)
+			return path == "latin" and latin or arabic
+		end,
+		shape = mirrored,
+		ink = function(face, glyph, pixelHeight)
+			return face:ink(glyph, pixelHeight)
+		end,
+	})
+
+	local atlas = Atlas.new(assert(reader.open("latin")), 16)
+	local loaded = 0
+	local font = Font.new(atlas, {
+		spec = { pixelHeight = 16 },
+		fallbacks = { { "arabic", 0 } },
+		load = function(path, index)
+			loaded = loaded + 1
+
+			return assert(reader.open(path, index))
+		end,
+	})
+
+	local run = font:getRun("ab\u{620}\u{621}")
+
+	test.equal(loaded, 1, "the face that draws the rest of the line is read once")
+	test.equal(#font.atlases, 2)
+	test.equal(run.count, 4, "a glyph a character, whichever face drew it")
+
+	-- Each piece is one shaper's line, so the second is placed after the first rather than shaped
+	-- together with it.
+	local glyphs = assert(run.glyphs)
+
+	test.equal(glyphs[0].cluster, 1, "the first piece is drawn the way it reads, in its own face")
+	test.equal(glyphs[1].cluster, 0)
+	test.equal(glyphs[2].cluster, 4, "and the second piece comes after it, with the bytes it has")
+	test.equal(glyphs[3].cluster, 2)
+	test.equal(glyphs[2].pen, 16, "placed where the first piece left the pen")
+	test.equal(glyphs[2].advance, 5, "and moved by the advance of the face that draws it")
+	test.equal(run.lines[0].rtl, 1, "a line most of which reads right to left reads right to left")
+end)
+
+test.it("cuts a line that reads right to left at its end, which is its left", function()
+	local face = aFaceOf({ 0x61, 0x62, 0x63, 0x64, 0x2026 }, 8)
+
+	aShapedReader(face, mirrored)
+
+	local atlas = Atlas.new(assert(reader.open("a face of this test's own")), 16)
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local run = font:getRun("abcd", 24)
+	local line = run.lines[0]
+	local glyphs = assert(run.glyphs)
+
+	test.equal(run.count, 3, "the last two characters and an ellipsis")
+	test.equal(run.width, 24, "which is the width it was cut to and no more")
+	test.equal(glyphs[line.first].advance, 8, "the ellipsis is the first glyph of the line")
+	test.equal(glyphs[line.first].cluster, 0, "and stands for the start of the string, which was dropped")
+	test.equal(glyphs[line.first].pen, 0, "which is the left end of the line, where its reading ends")
+	test.equal(glyphs[line.first + 1].cluster, 1, "what was kept is the start of what was written")
+	test.equal(glyphs[line.first + 1].pen, 8, "sitting against the right of the ellipsis")
+	test.equal(glyphs[line.first + line.count - 1].pen + glyphs[line.first + line.count - 1].advance, 24,
+		"and running to the right end of the room")
+end)
+
 test.it("keeps a screen's worth of lines and drops the oldest", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41 }, 8), 16)
 	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
@@ -286,12 +514,18 @@ test.it("keeps a screen's worth of lines and drops the oldest", function()
 end)
 
 test.skipIf(fontPath == nil)("reads a font file, and says what it draws", function()
-	local face = assert(Face.open(assert(fontPath), 0))
+	local face = assert(reader.open(assert(fontPath), 0))
 
 	test.truthy(face:hasGlyph(0x41), "a font has the letters it has")
-	test.falsy(face:hasGlyph(0x65E5), "and not every character there is")
-	test.greater(face:scale(18), 0, "and scales by something at a pixel height")
-	test.greater(select(1, face:metrics(18)), 0, "as tall as it says it is")
+	test.falsy(face:hasGlyph(0xE000), "and not every character there is")
+	test.greater(select(1, face:metrics(18)), 0, "and says how tall a line of it is")
+	test.greater(face:advance(0x41, 18), 0, "and how far the pen moves for a letter")
+
+	local ink = face:ink(0x41, 18)
+
+	test.greater(ink.width, 0, "and what the ink of one is")
+	test.greater(ink.height, 0)
+	face:freeInk(ink)
 end)
 
 test.skipIf(fontPath == nil)("packs a glyph of a real font, and draws it", function()
@@ -313,82 +547,83 @@ test.skipIf(fontPath == nil)("packs a character the atlas was never told about",
 	test.truthy(box.u1 > box.u0, "and has a place in the picture")
 end)
 
--- What a font is refused for is read out of its tables rather than found by trying, because trying
--- is an abort in the rasteriser rather than an error here: the two below are the whole of what a
--- font file has to be to say so.
+test.it("recognises a font file by its signature", function()
+	test.truthy(reader.isValid("\0\1\0\0" .. string.rep("\0", 8)))
+	test.truthy(reader.isValid("OTTO" .. string.rep("\0", 8)))
+	test.falsy(reader.isValid("not a font at all"))
+end)
 
----@param value number
----@return string
-local function be16(value)
-	return string.char((value >> 8) & 0xFF, value & 0xFF)
-end
+test.skipIf(emojiPath == nil)("packs an emoji a font draws as a picture of its own", function()
+	local atlas = assert(Atlas.fromPath({ pixelHeight = 24 }, assert(emojiPath)))
+	local glyph = atlas:glyph(0x2705)
 
----@param value number
----@return string
-local function be32(value)
-	return string.char((value >> 24) & 0xFF, (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
-end
+	test.greater(glyph.width, 0, "a check mark has ink")
+	test.greater(glyph.height, 0)
+	test.greater(glyph.advance, 0, "and moves the pen along")
 
---- A font file of the tables it is given: an offset table, a record a table, and the tables
---- themselves after the records, which is where a record points.
----@param tables { tag: string, content: string }[]
----@return string
-local function aFontFile(tables)
-	local records, contents = {}, {}
-	local at = 12 + #tables * 16
+	-- What is packed of a picture is how bright it is where it is drawn -- a sheet holds one
+	-- channel and it is multiplied by the text's colour -- so what a picture comes to is a range of
+	-- brightness rather than one value: a square with a check on it is not a square.
+	local sheet = atlas.sheets[1]
+	local most, least = 0, 255
 
-	for _, table in ipairs(tables) do
-		records[#records + 1] = table.tag .. string.rep("\0", 4) .. be32(at) .. be32(#table.content)
-		contents[#contents + 1] = table.content
-		at = at + #table.content + #table.content % 4
+	for row = 0, glyph.height - 1 do
+		for column = 0, glyph.width - 1 do
+			local at = ((glyph.y + row) * sheet.width + glyph.x + column) * 4 + 3
+			local light = sheet.pixels[at]
+
+			if light > most then
+				most = light
+			end
+
+			if light < least then
+				least = light
+			end
+		end
 	end
 
-	return be32(0x00010000) .. be16(#tables) .. string.rep("\0", 6) .. table.concat(records)
-		.. table.concat(contents)
-end
-
---- A character map of one subtable, which is the format a font is refused for being of.
----@param format number
----@return string
-local function aCharacterMap(format)
-	-- The header, one record pointing past it, and the subtable itself, which is what the format
-	-- of is read: nothing else of a character map is looked at here.
-	return be16(0) .. be16(1) .. be16(3) .. be16(1) .. be32(12) .. be16(format) .. string.rep("\0", 6)
-end
-
-test.it("refuses a font whose outlines it cannot draw", function()
-	local face, err = Face.fromData(aFontFile({ { tag = "CFF ", content = string.rep("\0", 8) } }), "a font")
-
-	test.equal(face, nil)
-	test.truthy(tostring(err):find("CFF", 1, true) ~= nil, "and says why: " .. tostring(err))
+	test.greater(most - least, 40,
+		string.format("and it is a picture rather than a block: %d to %d", least, most))
 end)
 
-test.it("refuses a font whose character map it would abort on", function()
-	local font = aFontFile({
-		{ tag = "glyf", content = string.rep("\0", 4) },
-		{ tag = "cmap", content = aCharacterMap(2) },
-	})
-	local face, err = Face.fromData(font, "a font")
+test.skipIf(not drawsArabic)("draws a line of arabic as the letters it is written with", function()
+	local font = assert(arabicFont)
+	local run = font:getRun("\u{645}\u{631}\u{62D}\u{628}\u{627}")
+	local line = run.lines[0]
+	local glyphs = assert(run.glyphs)
 
-	test.equal(face, nil, "a character map of a format the rasteriser asserts on is not read")
-	test.truthy(tostring(err):find("character map", 1, true) ~= nil, "and says which: " .. tostring(err))
-end)
+	test.equal(line.rtl, 1, "a line of arabic reads right to left")
+	test.equal(glyphs[line.first].cluster, 8, "and is drawn from its last letter, which is the leftmost")
+	test.equal(glyphs[line.first + line.count - 1].cluster, 0, "ending at its first, which is the rightmost")
+	test.equal(glyphs[line.first].pen, 0, "placed from the left end of the line")
 
-test.it("does not refuse a font for a character map it does read", function()
-	local font = aFontFile({
-		{ tag = "glyf", content = string.rep("\0", 4) },
-		{ tag = "cmap", content = aCharacterMap(4) },
-	})
-	local face, err = Face.fromData(font, "a font")
+	-- A mark sits on a letter and moves nothing of its own, so the pen never goes backwards rather
+	-- than always moving. Where a glyph's *ink* lands is not something a run promises: a letter leans
+	-- over the one beside it and the last glyph of a word is drawn a little past the line's room.
+	local widest = 0
 
-	-- What is left of the font is not a font -- there is no head, no hmtx and no glyphs -- so what
-	-- this is about is that the character map was not what refused it.
-	test.equal(face, nil)
-	test.falsy(tostring(err):find("character map", 1, true) ~= nil, tostring(err))
-end)
+	for at = 0, line.count - 1 do
+		local glyph = glyphs[line.first + at]
 
-test.it("recognises a font file by its signature", function()
-	test.truthy(Face.isValid("\0\1\0\0" .. string.rep("\0", 8)))
-	test.truthy(Face.isValid("OTTO" .. string.rep("\0", 8)))
-	test.falsy(Face.isValid("not a font at all"))
+		test.equal(glyph.pen >= (at > 0 and glyphs[line.first + at - 1].pen or 0), true,
+			"every glyph of it starts where the pen the one before left it is")
+
+		if glyph.pen + glyph.advance > widest then
+			widest = glyph.pen + glyph.advance
+		end
+	end
+
+	-- Within a fraction of a pixel: a run keeps advances as floats and the width is the shaper's own
+	-- answer.
+	test.less(math.abs(widest - run.width), 0.05, "as wide as its glyphs move the pen between them")
+
+	-- Whether the letters are the shapes they take in the word is checked where the shaper is, by the
+	-- glyphs a font named: a run keeps ink and not glyph numbers, and two forms of one letter can come
+	-- to the same ink and the same advance. What a run has to get right is the order and the bytes.
+	local pair = font:getRun("\u{645}\u{645}")
+	local pairLine = pair.lines[0]
+
+	test.equal(pair.count, 2, "two letters of a word are two glyphs")
+	test.equal(assert(pair.glyphs)[pairLine.first].cluster, 2, "drawn from the second of them first")
+	test.equal(assert(pair.glyphs)[pairLine.first + 1].cluster, 0, "and the first of them last")
 end)

@@ -17,6 +17,9 @@ layout(location = 4) in vec4 aCorner;
 // The radius of that cut, and how sharp it is: over how many pixels the edge changes, with nought
 // for a quad that is not cut at all.
 layout(location = 5) in vec2 aEdge;
+// Whether the picture this quad samples is a picture of its own colours -- an emoji, which a font
+// draws as one -- rather than a shape the vertex colour is drawn through.
+layout(location = 6) in float aOwn;
 
 layout(location = 0) out vec4 vertexColor;
 layout(location = 1) out vec2 texCoord;
@@ -24,6 +27,7 @@ layout(location = 2) flat out int texIndex;
 layout(location = 3) out vec2 corner;
 layout(location = 4) out vec2 inner;
 layout(location = 5) out vec2 edge;
+layout(location = 6) flat out float own;
 
 void main() {
     gl_Position = vec4(aPos, 1.0);
@@ -33,4 +37,5 @@ void main() {
     corner = aCorner.xy;
     inner = aCorner.zw;
     edge = aEdge;
+    own = aOwn;
 }

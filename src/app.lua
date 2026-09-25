@@ -70,6 +70,7 @@ local WINDOW_CREATED = { type = "windowCreated" }
 ---@field pixelHeight number # How tall the default font is drawn, in pixels
 ---@field characters string # What the default font is baked for, before anything else is packed
 ---@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
+---@field clipboard winit.Clipboard? # What the system's clipboard holds, where the platform has one
 ---@field plugins wonderland.Plugin[] # In the order they were added
 ---@field private pendingTicks { fn: wonderland.Tick, window: wonderland.RenderWindow?, cancelled: boolean? }[] # Registered before a screen was
 ---@field onTick fun(self: wonderland.App, fn: wonderland.Tick, window: wonderland.RenderWindow?): wonderland.plugin.UI.Ticker
@@ -383,6 +384,15 @@ end
 function app.run(self)
 	local eventLoop = winit.EventLoop.new()
 	winit.Window.fromEventLoop(eventLoop)
+
+	-- What the program copies to and pastes from, and what a paste in a field comes out of: the
+	-- system's clipboard is the program's rather than a window's -- a paste lands wherever the
+	-- program puts it -- so there is one of these however many windows an app has.
+	self.clipboard = winit.Clipboard.new(eventLoop)
+
+	if self.layoutPlugin then
+		self.layoutPlugin.clipboard = self.clipboard
+	end
 
 	-- Whether events are coming in faster than the loop can take them one at a time, which is what
 	-- decides whether the loop waits for the next event or takes what is already queued. Only an

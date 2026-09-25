@@ -1,36 +1,33 @@
--- A font at a size, as the screen uses it: the characters it draws, where each of them goes, and
--- which of the faces of it draws them.
+-- A font at a size: the glyphs a line is drawn from, where each of them goes, and which face of a
+-- chain draws it.
 --
--- A font is a chain rather than a face. The first face of it is the one an app named, and the ones
--- after it are read only when a character the faces already read do not draw comes up -- which is
--- what makes a track's title in a language the app's own font has no glyphs for still a title. The
--- chain is walked per character and the answer is kept, so a line costs one lookup a character the
--- first time it is measured and nothing after that.
---
--- Measuring a line is what everything else here is for: a run is where each glyph of a line goes,
--- as one array of structs the quad pass reads, and it is kept because a screen of labels asks for
--- the same strings over and over.
+-- A font is a chain rather than a face. The first face is the one an app named and the ones after it
+-- are read only when a character none of the faces read so far draws comes up. A run -- where every
+-- glyph of a line goes -- is kept, because a screen of labels asks for the same strings over and over.
 local ffi = require("ffi")
 local Atlas = require("wonderland.font.atlas")
+local reader = require("wonderland.font.reader")
 local utf8 = require("wonderland.font.utf8")
 
--- A glyph of a run, as the array of them is: eight numbers, whole ones as whole ones, and the
--- picture the ink is in. A run is measured once and drawn every frame, so it is read far more
--- often than it is written, and a struct is a tenth of what a table per glyph costs.
+-- A glyph of a run. A run is measured once and drawn every frame, so this is an array of structs
+-- rather than a table a glyph.
 ffi.cdef [[
 	typedef struct {
 		int32_t x, y, width, height;  // where the ink is drawn, in whole pixels
 		float u0, v0, u1, v1;         // and where it is in its picture
-		int32_t advance;              // how far the pen moves for it, which is where the next one
-		                              // starts -- and where a caret before it sits
-		uint32_t texture;             // the picture it is drawn from, which a chain of faces makes
-		                              // more than one of
+		float pen;                    // where the pen was when it was placed, from the start of its
+		                              // line: where a caret before it sits
+		float advance;                // how far it moved the pen
+		uint32_t texture;             // the picture it is drawn from
+		uint32_t cluster;             // the byte of the line it came from, from nought
+		int32_t own;                  // whether that picture is of its own colours -- an emoji
 	} wl_glyph;
 
-	// One line of a run: the range of the run's glyphs that are its own, and how wide it came
-	// out, which is what a line that is not left-aligned is placed by.
+	// One line of a run: the range of the run's glyphs that are its own, how wide it came out, and
+	// which way it reads.
 	typedef struct {
 		int32_t first, count;
+		int32_t rtl;
 		double width;
 	} wl_line;
 ]]
@@ -41,7 +38,7 @@ ffi.cdef [[
 ---@field height number
 ---@field lines ffi.cdata*? # `wl_line`, one per line, from the top
 ---@field lineCount number # How many, since the array is not a Lua one
----@field glyphs ffi.cdata*? # `wl_glyph`, one per character from nought, nothing for an empty line
+---@field glyphs ffi.cdata*? # `wl_glyph`, one per glyph in the order they are drawn, nothing for an empty line
 ---@field count number # How many, since the array is not a Lua one
 ---@field id number # Stable for the life of the run: what a frame compares to tell whether a line changed
 
@@ -56,29 +53,31 @@ ffi.cdef [[
 ---@field v0 number
 ---@field u1 number
 ---@field v1 number
----@field advance number
+---@field pen number # Where the pen was when it was placed, from the start of its line
+---@field advance number # And how far it moved it
 ---@field texture number
+---@field cluster number # The byte of the line it came from, from nought
+---@field own number
 
 --- One line of a run.
 ---@class wonderland.font.Line: ffi.cdata*
 ---@field first number
 ---@field count number
+---@field rtl number # Whether the line reads right to left, which is what a caret counts by
 ---@field width number
 
 -- Runs are pure functions of the font, the string and the width it was cut to, so they are kept.
--- The cache is bounded because an app can invent strings forever, as a clock does.
+-- Bounded, because an app can invent strings forever, as a clock does.
 local RUN_CACHE_LIMIT = 2048
 
--- How many of the oldest lines are dropped when the cache is full: dropping one at a time would
--- leave it evicting on every line measured after that.
+-- Dropped a batch at a time: dropping one at a time leaves it evicting on every line after that.
 local RUN_EVICT = RUN_CACHE_LIMIT / 2
 
--- Handed out one per measured line and never reused, so two lines are the same line only if they
--- are the same run.
+-- One per measured line, never reused: two lines are the same line only if they are the same run.
 local nextRunId = 0
 
--- The character a line cut short ends with. It is the one character that is not in the string it
--- is drawn for, so a line that was cut can be told from a line that ends that way.
+-- The character a line cut short ends with: one that is not in the string it is drawn for, so a
+-- line that was cut can be told from a line that ends that way.
 local ELLIPSIS = 0x2026
 
 --- Whether a measurement is of a string drawn as it is or of one cut to a width.
@@ -93,11 +92,12 @@ local function keyOf(text, maxWidth)
 	return string.format("%s\1%.2f", text, maxWidth)
 end
 
---- One face, at one pixel height, with whatever follows it for the characters it does not draw.
+--- One face at one pixel height, with whatever follows it for the characters it does not draw.
 ---@class wonderland.font.Font
 ---@field id number? # What an app and an element hold it by, given when a manager resolves it
 ---@field spec wonderland.FontSpec # What it was resolved from, for a style to change one part of
 ---@field atlases wonderland.font.Atlas[] # The faces that have been read, the named one first
+---@field pixelHeight number # What every face of the chain is read at, which is what a piece is shaped at
 ---@field glyphs table<number, { atlas: wonderland.font.Atlas, glyph: wonderland.font.Glyph }>
 ---@field ascent number
 ---@field descent number
@@ -108,10 +108,19 @@ end
 ---@field private pending { string, number? }[] # The fallbacks not read yet, in order
 ---@field private recent table<number, string> # The last lines measured, oldest first
 ---@field private recentAt number
----@field private codepoints number[] # Where a line is decoded, kept: a measure allocates nothing
----@field private advances number[]
+---@field private pieces wonderland.font.Piece[] # Where a line is cut into what one face draws of it
+---@field private piecesAt number # How many of them the line being measured came to
 local Font = {}
 Font.__index = Font
+
+--- One stretch of a line that one face draws, and what it was shaped into -- nothing where the reader
+--- cannot shape, which is a stretch measured a character at a time.
+---@class wonderland.font.Piece
+---@field atlas wonderland.font.Atlas
+---@field line number # Which line of the string it is on, from nought
+---@field from number # The byte of the string it starts at, from one, as Lua counts strings
+---@field to number
+---@field shaped wonderland.font.Shaped?
 
 ---@param primary wonderland.font.Atlas
 ---@param opts { spec: wonderland.FontSpec?, load: fun(path: string, index: number?): wonderland.font.Face?, fallbacks: { string, number? }[]? }
@@ -121,6 +130,7 @@ function Font.new(primary, opts)
 	local font = setmetatable({
 		spec = opts.spec,
 		atlases = { primary },
+		pixelHeight = primary.pixelHeight,
 		glyphs = {},
 		ascent = primary.ascent,
 		descent = primary.descent,
@@ -129,8 +139,8 @@ function Font.new(primary, opts)
 		runCount = 0,
 		load = opts.load,
 		pending = {},
-		codepoints = {},
-		advances = {},
+		pieces = {},
+		piecesAt = 0,
 	}, Font)
 
 	-- Copied rather than held: the list belongs to the registry that made it, and a chain that
@@ -143,8 +153,7 @@ function Font.new(primary, opts)
 end
 
 --- The face that draws a character: the ones already read, then the ones after them one at a time,
---- and the font's own face for a character none of them draws -- which is drawn as whatever it
---- draws for a character it does not have, and takes the room it takes.
+--- and the font's own face for a character none of them draws -- drawn as its missing glyph.
 ---@param codepoint number
 ---@return wonderland.font.Atlas
 function Font:atlasFor(codepoint)
@@ -174,8 +183,8 @@ function Font:atlasFor(codepoint)
 	return self.atlases[1]
 end
 
---- Where a character is drawn from, and where it was packed: the answer is kept, so a line is one
---- lookup a character the first time it is measured and nothing after that.
+--- Where a character is drawn from and where it was packed. Kept: one lookup a character the first
+--- time a line is measured and nothing after that.
 ---@param codepoint number
 ---@return { atlas: wonderland.font.Atlas, glyph: wonderland.font.Glyph }
 function Font:glyphFor(codepoint)
@@ -191,26 +200,6 @@ function Font:glyphFor(codepoint)
 	self.glyphs[codepoint] = entry
 
 	return entry
-end
-
---- Decodes one line of a string into the reusable array of codepoints, and answers how many.
----@param self wonderland.font.Font
----@param text string
----@param from number
----@param to number
----@return number count
-local function codepointsIn(self, text, from, to)
-	local codepoints = self.codepoints
-	local count, at = 0, from
-
-	while at <= to do
-		local codepoint
-		codepoint, at = utf8.decode(text, at)
-		count = count + 1
-		codepoints[count] = codepoint
-	end
-
-	return count
 end
 
 --- How many characters a line of a string holds, without placing any of them.
@@ -230,6 +219,57 @@ local function countOf(text, from, to)
 	return count
 end
 
+--- Cuts one line into the pieces one face draws of it and shapes each piece with that face: joining
+--- and kerning are decisions a font makes about the letters beside each other, so a piece has to be
+--- the whole of what one face draws. A piece whose face cannot be shaped is measured a character at
+--- a time. The pieces go into an array the font keeps, so nothing here is allocated.
+---@param self wonderland.font.Font
+---@param text string
+---@param from number
+---@param to number
+---@param line number
+---@return number glyphs # How many the pieces of the line came to between them
+local function shapeLine(self, text, from, to, line)
+	local pieces, at, count, glyphs = self.pieces, from, self.piecesAt, 0
+
+	while at <= to do
+		local codepoint, after = utf8.decode(text, at)
+		local atlas = self:glyphFor(codepoint).atlas
+		local piece = count > 0 and pieces[count] or nil
+
+		if piece == nil or piece.atlas ~= atlas or piece.line ~= line then
+			count = count + 1
+			piece = pieces[count]
+
+			if piece == nil then
+				piece = {}
+				pieces[count] = piece
+			end
+
+			piece.atlas, piece.line, piece.from, piece.shaped = atlas, line, at, nil
+		end
+
+		piece.to = after - 1
+		at = after
+	end
+
+	self.piecesAt = count
+
+	for index = 1, count do
+		local piece = pieces[index]
+		local shaped = piece.shaped
+
+		if shaped == nil and reader.shapes(piece.atlas.face) then
+			shaped = reader.shape(piece.atlas.face, text:sub(piece.from, piece.to), self.pixelHeight)
+			piece.shaped = shaped
+		end
+
+		glyphs = glyphs + (shaped ~= nil and #shaped.glyphs or countOf(text, piece.from, piece.to))
+	end
+
+	return glyphs
+end
+
 --- Where every glyph of a line goes, measured once and kept. A width cuts each line to it, with
 --- the last character a line can hold replaced by an ellipsis: what a long title in a short box is.
 ---@param text string
@@ -237,8 +277,7 @@ end
 ---@return wonderland.font.Run
 function Font:getRun(text, maxWidth)
 	-- A line that fits the width it is cut to is the line with no width at all: measuring it again
-	-- for the width would be a second entry in the cache for every width a window was ever drawn
-	-- at, and nothing about the line would be different.
+	-- would be a second cache entry for every width a window was ever drawn at.
 	if maxWidth ~= nil then
 		local whole = self:getRun(text)
 
@@ -273,95 +312,195 @@ function Font:getRun(text, maxWidth)
 		self.recentAt = at
 	end
 
-	-- How many lines the string is, and how many glyphs they hold between them: a newline is a
-	-- break with nothing drawn at it, so it is not a glyph. Counted before anything is placed,
-	-- because both arrays are made once and filled in place.
+	-- How many lines the string is and how many glyphs they come to, counted from the shaped pieces
+	-- rather than the characters: a ligature is one glyph of two characters. Both arrays are made
+	-- once, before anything is placed.
+	self.piecesAt = 0
+
 	local lineCount, glyphCount, scan = 1, 0, 1
 
 	while true do
 		local newline = text:find("\n", scan, true)
+		local last = (newline or #text + 1) - 1
+
+		glyphCount = glyphCount + shapeLine(self, text, scan, last, lineCount - 1)
 
 		if newline == nil then
-			glyphCount = glyphCount + countOf(text, scan, #text)
 			break
 		end
 
-		glyphCount = glyphCount + countOf(text, scan, newline - 1)
 		lineCount = lineCount + 1
 		scan = newline + 1
 	end
 
-	-- One glyph of room a line over, for the ellipsis a cut line ends with.
 	---@type ffi.cdata*?
-	local array = glyphCount > 0 and ffi.new("wl_glyph[?]", glyphCount + lineCount) or nil
+	local array = glyphCount > 0 and ffi.new("wl_glyph[?]", glyphCount) or nil
 	local lines = ffi.new("wl_line[?]", lineCount)
 	local lineStep = math.floor(self.lineHeight + 0.5)
-	local widest, placed, start = 0, 0, 1
+	local pieces, piecesAt = self.pieces, self.piecesAt
+	local pieceAt = 1
+	local widest, written, drawn, start = 0, 0, 0, 1
 
 	for line = 0, lineCount - 1 do
 		local newline = text:find("\n", start, true)
 		local last = (newline or #text + 1) - 1
 		local baseline = math.floor(self.ascent + 0.5) + line * lineStep
-		local pen, first = 0, placed
-		local count = codepointsIn(self, text, start, last)
-		local codepoints, advances = self.codepoints, self.advances
-		local width = 0
+		local first = written
+		-- Bytes are counted from the start of the line, not of the string: that is how a caret is
+		-- counted -- a line and a byte of it, and nothing about the lines around it.
+		local base = start - 1
+		local pen, rtl, ltrBytes = 0.0, 0, 0
 
-		for index = 1, count do
-			local advance = self:glyphFor(codepoints[index]).glyph.advance
+		-- The pieces of this line, in the order they are read: where a glyph goes and how far it
+		-- moves the pen are the shaper's answers rather than a sum of advances, so what is kerned
+		-- together lands where the font put it.
+		while pieceAt <= piecesAt and pieces[pieceAt].line == line do
+			local piece = pieces[pieceAt]
+			local atlas, shaped = piece.atlas, piece.shaped
 
-			advances[index] = advance
-			width = width + advance
-		end
+			if shaped ~= nil then
+				local glyphs = shaped.glyphs
+				local piecePen = 0.0
 
-		local fewer, cut = count, false
+				for index = 1, #glyphs do
+					local glyph = glyphs[index]
+					local ink = atlas:byGlyph(glyph.glyph, math.floor(glyph.advance + 0.5))
+					local into = assert(array)[written]
+					---@cast into wonderland.font.PlacedGlyph
 
-		if maxWidth ~= nil and width > maxWidth then
-			local dots = self:glyphFor(ELLIPSIS).glyph.advance
-			local used, fits = 0, 0
+					into.x = math.floor(pen + glyph.x + ink.left + 0.5)
+					into.y = math.floor(baseline + ink.top + 0.5)
+					into.width, into.height = ink.width, ink.height
+					into.u0, into.v0, into.u1, into.v1 = ink.u0, ink.v0, ink.u1, ink.v1
+					into.pen, into.advance = pen + piecePen, glyph.advance
+					into.texture = ink.texture
+					into.cluster = piece.from - 1 - base + glyph.cluster
+					into.own = ink.colour and 1 or 0
 
-			for index = 1, count do
-				if used + advances[index] + dots > maxWidth then
-					break
+					-- The pen position is the advances before it, not where the glyph was drawn: a
+					-- mark is drawn where it sits on a letter and moves nothing, and a caret is a pen.
+					piecePen = piecePen + glyph.advance
+					written = written + 1
 				end
 
-				used = used + advances[index]
-				fits = index
+				pen = pen + shaped.width
+
+				-- A line is set the way most of it is set, counted in bytes. Cutting a line by face
+				-- cannot arrange a line of two directions the way a bidi pass over the whole of it
+				-- would; what matters here is the line a caret is counted along.
+				if shaped.rtl then
+					rtl = rtl + (piece.to - piece.from + 1)
+				else
+					ltrBytes = ltrBytes + (piece.to - piece.from + 1)
+				end
+			else
+				local at = piece.from
+
+				while at <= piece.to do
+					local codepoint, after = utf8.decode(text, at)
+					local glyph = atlas:glyph(codepoint)
+					local into = assert(array)[written]
+					---@cast into wonderland.font.PlacedGlyph
+
+					into.x = math.floor(pen + glyph.left + 0.5)
+					into.y = math.floor(baseline + glyph.top + 0.5)
+					into.width, into.height = glyph.width, glyph.height
+					into.u0, into.v0, into.u1, into.v1 = glyph.u0, glyph.v0, glyph.u1, glyph.v1
+					into.pen, into.advance = pen, glyph.advance
+					into.texture = glyph.texture
+					into.cluster = at - 1 - base
+					into.own = glyph.colour and 1 or 0
+
+					pen = pen + glyph.advance
+					written = written + 1
+					at = after
+				end
 			end
 
-			pen, fewer, cut, width = 0, fits, true, used
+			pieceAt = pieceAt + 1
 		end
 
-		for index = 1, fewer do
-			local glyph = self:glyphFor(codepoints[index]).glyph
-			local into = assert(array)[placed]
+		local total, width, from, count = written - first, pen, first, written - first
+
+		rtl = rtl > ltrBytes and 1 or 0
+
+		-- A line too wide for its room is cut to it, with an ellipsis where it was cut: what is kept
+		-- is what fits beside the ellipsis, so the cut is where the pen stops fitting.
+		if maxWidth ~= nil and width > maxWidth then
+			local dots = self:glyphFor(ELLIPSIS).glyph
+			local budget = maxWidth - dots.advance
+			local kept, used = 0, 0.0
+
+			if rtl ~= 0 then
+				-- A line that reads right to left ends at its left, so it is cut from the left: what
+				-- is kept is the end that still fits and the ellipsis goes at the left of it.
+				for at = total - 1, 0, -1 do
+					local advance = assert(array)[first + at].advance
+
+					if used + advance > budget then break end
+
+					used, kept = used + advance, kept + 1
+				end
+			else
+				local at = 0
+
+				while at < total and used + assert(array)[first + at].advance <= budget do
+					used, kept, at = used + assert(array)[first + at].advance, kept + 1, at + 1
+				end
+			end
+
+			-- What is kept is moved rather than measured again, so it is moved by where its own far
+			-- edge has to be.
+			local keepFrom = rtl ~= 0 and first + (total - kept) or first
+			local keepTo = rtl ~= 0 and first + total - 1 or first + kept - 1
+			local left, right, seen = 0.0, 0.0, false
+
+			for at = keepFrom, keepTo do
+				local glyph = assert(array)[at]
+				local edge = glyph.pen + glyph.advance
+
+				if not seen or glyph.pen < left then left = glyph.pen end
+				if not seen or edge > right then right = edge end
+				seen = true
+			end
+
+			local shift, dotsPen = 0.0, right
+
+			if rtl ~= 0 then
+				shift, dotsPen = dots.advance - left, 0.0
+			end
+
+			if shift ~= 0 then
+				for at = keepFrom, keepTo do
+					local into = assert(array)[at]
+
+					into.x = math.floor(into.x + shift + 0.5)
+					into.pen = into.pen + shift
+				end
+			end
+
+			-- The ellipsis takes the place of a dropped glyph: the first of them where the line reads
+			-- left to right, the last where it reads the other way.
+			local into = assert(array)[rtl ~= 0 and keepFrom - 1 or first + kept]
 			---@cast into wonderland.font.PlacedGlyph
 
-			into.x = math.floor(pen + glyph.left + 0.5)
-			into.y = math.floor(baseline + glyph.top + 0.5)
-			into.width, into.height = glyph.width, glyph.height
-			into.u0, into.v0, into.u1, into.v1 = glyph.u0, glyph.v0, glyph.u1, glyph.v1
-			into.advance, into.texture = glyph.advance, glyph.texture
+			into.x = math.floor(dotsPen + dots.left + 0.5)
+			into.y = math.floor(baseline + dots.top + 0.5)
+			into.width, into.height = dots.width, dots.height
+			into.u0, into.v0, into.u1, into.v1 = dots.u0, dots.v0, dots.u1, dots.v1
+			into.pen, into.advance = dotsPen, dots.advance
+			into.texture = dots.texture
+			into.cluster = rtl ~= 0 and 0 or (kept < total and assert(array)[first + kept].cluster or 0)
+			into.own = dots.colour and 1 or 0
 
-			pen = pen + glyph.advance
-			placed = placed + 1
+			width = dots.advance + right - (rtl ~= 0 and left or 0)
+			from, count = rtl ~= 0 and keepFrom - 1 or first, kept + 1
 		end
 
-		if cut then
-			local glyph = self:glyphFor(ELLIPSIS).glyph
-			local into = assert(array)[placed]
-			---@cast into wonderland.font.PlacedGlyph
-
-			into.x = math.floor(pen + glyph.left + 0.5)
-			into.y = math.floor(baseline + glyph.top + 0.5)
-			into.width, into.height = glyph.width, glyph.height
-			into.u0, into.v0, into.u1, into.v1 = glyph.u0, glyph.v0, glyph.u1, glyph.v1
-			into.advance, into.texture = glyph.advance, glyph.texture
-			width = pen + glyph.advance
-			placed = placed + 1
-		end
-
-		lines[line].first, lines[line].count, lines[line].width = first, placed - first, width
+		lines[line].first, lines[line].count = from, count
+		lines[line].rtl = rtl
+		lines[line].width = width
+		drawn = drawn + count
 
 		if width > widest then
 			widest = width
@@ -379,7 +518,7 @@ function Font:getRun(text, maxWidth)
 		lines = lines,
 		lineCount = lineCount,
 		glyphs = array,
-		count = placed,
+		count = drawn,
 		id = nextRunId,
 	}
 
@@ -399,9 +538,8 @@ function Font:getRun(text, maxWidth)
 	return run
 end
 
---- The picture the first face of the font is in, which is what a glyph with no picture of its
---- own is drawn from: a glyph measured with a gpu under it names its own, so this is what a screen
---- wired without one falls back to.
+--- The picture the first face of the font is in, which is what a glyph with no picture of its own
+--- is drawn from.
 ---@return number
 function Font:picture()
 	local sheet = self.atlases[1].sheets[1]

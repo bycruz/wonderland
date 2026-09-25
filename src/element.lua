@@ -31,6 +31,7 @@ ffi.cdef [[
 		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit, onchange;
 		uint32_t onscroll, oncontextmenu;  // the wheel and the bar of a box that scrolls, and the
 		                                   // button that is not the left one
+		uint32_t ondrop;                   // the files a window was given, over this box
 		uint32_t userdata;           // whatever the app carries, by handle
 		double scrollOffset;         // how far its content is scrolled up, 0 for not
 		double maxLines;             // the most lines a field that takes a paragraph holds, 0 for no end to it
@@ -97,6 +98,7 @@ element.GROWS = 256
 ---@field onsubmit number
 ---@field onscroll number
 ---@field oncontextmenu number
+---@field ondrop number
 ---@field userdata number # Whatever the app carries, by handle
 ---@field fontId number
 ---@field scrollOffset number # How far its content is scrolled up, and what clips it to its box
@@ -122,6 +124,7 @@ element.GROWS = 256
 ---@field onDoubleClick fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onScroll fun(self: wonderland.Element, cons: wonderland.ScrollHandler): wonderland.Element
 ---@field onContextMenu fun(self: wonderland.Element, cons: wonderland.ContextMenuHandler): wonderland.Element
+---@field onDrop fun(self: wonderland.Element, cons: wonderland.DropHandler): wonderland.Element
 local Element = {}
 element.Element = Element
 
@@ -135,6 +138,10 @@ element.Element = Element
 --- answers with: the message the app is told. The modifiers are the ones held when it was pressed,
 --- which is the last the keyboard said.
 ---@alias wonderland.ContextMenuHandler fun(x: number, y: number, width: number, height: number, modifiers: winit.KeyModifiers?): any?
+
+--- What a box is asked when files are dropped on it: the paths, and where in the box they landed.
+--- It answers with the message the app is told.
+---@alias wonderland.DropHandler fun(paths: string[], x: number, y: number): any?
 
 -- The calls live in their own table rather than on the element: a table is what an ffi
 -- metatype is given for `__index`, and a field of a struct is read before it is asked
@@ -533,6 +540,26 @@ end
 function methods:onContextMenu(cons)
 	check(self)
 	self.oncontextmenu = pushCallback(cons)
+
+	return self
+end
+
+--- Files dropped on the window, where they landed in this box: what a window that takes a track
+--- from a file manager is. The paths are the whole of what a platform hands over -- a window is
+--- given a list of files, not the bytes of them -- and what it does with them is the app's.
+---
+---   div():style(PANE):onDrop(function(paths)
+---       return { type = "add", paths = paths }
+---   end)
+---
+--- A drop goes to the innermost box under the pointer that asked for one, and a window with no box
+--- for it is one the app hears about itself: see `App:event`, which is handed the event with its
+--- paths when no element claimed it.
+---@param cons wonderland.DropHandler
+---@return wonderland.Element
+function methods:onDrop(cons)
+	check(self)
+	self.ondrop = pushCallback(cons)
 
 	return self
 end

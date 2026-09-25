@@ -26,7 +26,9 @@
 		"enableLuaJITExtensions": true,
 		"path": [
 			"./target/?.lua",
-			"./target/?/init.lua"
+			"./target/?/init.lua",
+			"./examples/*/target/?.lua",
+			"./examples/*/target/?/init.lua"
 		],
 		"special": {
 			"lazyRequire": "require"

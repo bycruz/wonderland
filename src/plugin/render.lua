@@ -220,6 +220,7 @@ function RenderPlugin:createContext(window, swapchain)
 		:withAttribute({ type = "f32", size = 1, offset = 36 }) -- the picture it samples
 		:withAttribute({ type = "f32", size = 4, offset = 40 }) -- corner (vec4)
 		:withAttribute({ type = "f32", size = 2, offset = 56 }) -- edge (radius, band)
+		:withAttribute({ type = "f32", size = 1, offset = 64 }) -- whether the picture is its own colours
 
 	-- The ui writes vertices itself, so the two have to describe the same vertex.
 	assert(QuadBatch.FLOATS_PER_VERTEX * ffi.sizeof("float") == vertexDescriptor:getStride(),

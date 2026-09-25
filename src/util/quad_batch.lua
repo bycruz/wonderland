@@ -33,12 +33,14 @@ local batch = {}
 
 local VERTICES_PER_QUAD = 4
 local INDICES_PER_QUAD = 6
-local FLOATS_PER_VERTEX = 16
+local FLOATS_PER_VERTEX = 17
 
 --- Where a vertex holds what, as floats from the start of it: the corner numbers, then the
---- radius and the band beside it.
+--- radius and the band beside it, and then whether the picture it samples is a picture of its own
+--- colours -- which an emoji is -- rather than a shape the vertex's colour is drawn through.
 local ROUND = 10
 local EDGE = 14
+local OWN = 16
 
 -- What a run is, as the numbers it is: which picture it draws with, and the quad it starts at.
 -- Two numbers a run, in one array, because a run is looked at once per draw call and a struct
@@ -183,7 +185,7 @@ end
 ---@param b number
 ---@param a number
 ---@param texture number
-local function put(vertices, index, x, y, u, v, z, r, g, b, a, texture)
+local function put(vertices, index, x, y, u, v, z, r, g, b, a, texture, own)
 	vertices[index] = x
 	vertices[index + 1] = y
 	vertices[index + 2] = z
@@ -199,6 +201,10 @@ local function put(vertices, index, x, y, u, v, z, r, g, b, a, texture)
 	-- before it are still there, and the gpu would cut this one with them.
 	vertices[index + EDGE] = 0
 	vertices[index + EDGE + 1] = 0
+
+	-- And whether this one's picture is drawn as it is or through the colour, which every quad
+	-- but a glyph says no to.
+	vertices[index + OWN] = own or 0
 end
 
 --- A vertex of a quad whose corners are round: where it is from the middle of the box, where the
@@ -221,8 +227,8 @@ end
 ---@param radius number
 ---@param band number
 local function putRound(vertices, index, x, y, u, v, z, r, g, b, a, texture, cornerX, cornerY, innerX,
-	innerY, radius, band)
-	put(vertices, index, x, y, u, v, z, r, g, b, a, texture)
+	innerY, radius, band, own)
+	put(vertices, index, x, y, u, v, z, r, g, b, a, texture, own)
 
 	vertices[index + ROUND] = cornerX
 	vertices[index + ROUND + 1] = cornerY
@@ -264,7 +270,8 @@ end
 ---@param v0 number?
 ---@param u1 number?
 ---@param v1 number?
-function QuadBatch:quad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0, u1, v1)
+---@param own number? # Whether the picture is drawn as it is rather than through the colour
+function QuadBatch:quad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0, u1, v1, own)
 	if self.quads >= self.capacity then
 		self:reserve(self.capacity + 1)
 	end
@@ -278,10 +285,10 @@ function QuadBatch:quad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0
 
 	u0, v0, u1, v1 = u0 or 0, v0 or 0, u1 or 1, v1 or 1
 
-	put(vertices, index, left, top, u0, v0, z, r, g, b, a, texture)
-	put(vertices, index + FLOATS_PER_VERTEX, right, top, u1, v0, z, r, g, b, a, texture)
-	put(vertices, index + FLOATS_PER_VERTEX * 2, right, bottom, u1, v1, z, r, g, b, a, texture)
-	put(vertices, index + FLOATS_PER_VERTEX * 3, left, bottom, u0, v1, z, r, g, b, a, texture)
+	put(vertices, index, left, top, u0, v0, z, r, g, b, a, texture, own)
+	put(vertices, index + FLOATS_PER_VERTEX, right, top, u1, v0, z, r, g, b, a, texture, own)
+	put(vertices, index + FLOATS_PER_VERTEX * 2, right, bottom, u1, v1, z, r, g, b, a, texture, own)
+	put(vertices, index + FLOATS_PER_VERTEX * 3, left, bottom, u0, v1, z, r, g, b, a, texture, own)
 
 	finish(self)
 end
@@ -318,8 +325,9 @@ end
 ---@param boxRight number?
 ---@param boxBottom number?
 ---@param band number? # How sharp the edge is, over one pixel either side by default
+---@param own number? # Whether the picture is drawn as it is rather than through the colour
 function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0, u1, v1, radius, boxLeft,
-	boxTop, boxRight, boxBottom, band)
+	boxTop, boxRight, boxBottom, band, own)
 	if self.quads >= self.capacity then
 		self:reserve(self.capacity + 1)
 	end
@@ -361,13 +369,13 @@ function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u
 	local centreX, centreY = (boxLeft + boxRight) * 0.5, (boxTop + boxBottom) * 0.5
 
 	putRound(vertices, index, left, top, u0, v0, z, r, g, b, a, texture,
-		(left - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius, band)
+		(left - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius, band, own)
 	putRound(vertices, index + FLOATS_PER_VERTEX, right, top, u1, v0, z, r, g, b, a, texture,
-		(right - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius, band)
+		(right - centreX) * scaleX, (top - centreY) * scaleY, innerX, innerY, radius, band, own)
 	putRound(vertices, index + FLOATS_PER_VERTEX * 2, right, bottom, u1, v1, z, r, g, b, a, texture,
-		(right - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius, band)
+		(right - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius, band, own)
 	putRound(vertices, index + FLOATS_PER_VERTEX * 3, left, bottom, u0, v1, z, r, g, b, a, texture,
-		(left - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius, band)
+		(left - centreX) * scaleX, (bottom - centreY) * scaleY, innerX, innerY, radius, band, own)
 
 	finish(self)
 end

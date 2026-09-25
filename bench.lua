@@ -23,6 +23,7 @@ local FONT_PATHS = {
 	"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 	"/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
 	"/Library/Fonts/Arial.ttf",
+	"/System/Library/Fonts/Supplemental/Arial.ttf",
 	"C:/Windows/Fonts/arial.ttf",
 }
 

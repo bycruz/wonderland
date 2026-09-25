@@ -25,6 +25,30 @@ Use this package with the [lde](https://lde.sh/) package manager.
 lde add wonderland
 ```
 
+This repository is the library, and it is one package. Reading a font and shaping a line of text are
+not things it does itself: it hands both to `texter`, which is the machine's own text -- FreeType,
+HarfBuzz and fribidi on linux and android, Uniscribe and GDI on windows, CoreText on macOS -- so
+there is nothing compiled, fetched or shipped for text at all.
+
+```lua
+local wonderland = require("wonderland")
+
+wonderland.app("読める"):run()
+```
+
+Nothing to add and nothing to remember: `texter` is a dependency of this package, and what reads a
+font is the platform's reader whichever platform the app is running on. What that means for an app
+is that a font of any kind -- outlines in CFF, a collection, a variable font, an emoji font -- is
+read by the same library the desktop draws its own windows with, and a machine that has no such
+library at all says so through `texter.why()` rather than drawing nothing.
+
+`texter` is a checkout beside this one while it is unpublished, which is what this package's
+`lde.json` says (`../texter/packages/texter`); when it has a version, that line is a version like any
+other dependency's.
+
+`examples/` holds an app and a todo list drawn with the core alone, and `src/` and `tests/` are the
+library: `lde test` from the root of this repository runs its tests.
+
 ## Examples
 
 You can run the examples in ./examples with:
@@ -139,11 +163,30 @@ a style says about a font is the one thing about the text inside it: a family, a
 a slant is inherited by everything drawn in the element, so naming a family once at the top of a
 screen is every line on it, and a heading is the one element that says otherwise.
 
-A family name is looked up in the fonts this machine has, and the fonts it does not have are what
-the rest of the chain is for: a character the font an app named has no glyph for -- a title in
-Japanese, a name in Cyrillic, an emoji -- is drawn from the next font that has it. A glyph is
-packed into the atlas the first time a line holding it is drawn, so what an app draws is not
+A family name is looked up in the fonts this machine has. A character the font an app named has no
+glyph for -- a title in Japanese, a name in Cyrillic, a word of Arabic, an emoji -- is drawn from the
+next font in the chain that has it: fontconfig's answer to which of a machine's fonts covers a
+language, then a list of families a machine is likely to have, then the machine's own default. A
+glyph is packed into the atlas the first time a line holding it is drawn, so what an app draws is not
 limited to the characters anyone named in advance: a file name, a title, anything a person typed.
+
+A line is shaped rather than spelled out: which glyph a character is drawn from, what a word joins
+to, what is kerned against what and which way the line reads are decisions the font makes, and
+`texter` asks it -- HarfBuzz on linux and android, Uniscribe on windows, CoreText on macOS. Arabic is
+drawn joined and right to left, a ligature is one glyph of two characters, and an emoji of four bytes
+is one glyph rather than four boxes. What a glyph came from is a *byte* of the string rather than a
+character of it, which is what a caret, a click and a cut count in.
+
+A line of two scripts is a line of two faces, so it is cut where the face changes and each piece is
+shaped whole -- joining is a decision a font makes about the letters beside each other. A line that
+mixes two directions is set the way most of what is in it is set; a bidi pass over the whole line is
+not what this does.
+
+An emoji is drawn as the picture its font states rather than as a letter: four bytes a pixel, in a
+sheet of its own -- white sheets are what a shape is drawn through a text colour with.
+
+Text is edited by character rather than by byte: a backspace takes the letter that was typed away, a
+caret walks a character at a time, and a key that types a character of two bytes types all of it.
 
 ```lua
 -- A line too wide for the box it is in is cut, with an ellipsis where it was cut. What it is cut
@@ -152,11 +195,22 @@ limited to the characters anyone named in advance: a file name, a title, anythin
 div():style(sty():w(40)):children(text("a track's title"):style(sty():ellipsis()))
 ```
 
-What is not drawn is an OpenType font whose outlines are CFF -- which is how most CJK fonts are
-shipped, Noto Sans CJK and Source Han among them. The rasteriser is stb_truetype, which draws
-TrueType outlines and nothing else, so a font like that is skipped for the one after it in the
-chain. A machine with only a CFF font for a script draws that script as the framework's own
-"not a glyph" box.
+The letters are drawn by the machine's own text stack, through `texter`, reached through one seam:
+`wonderland.font.reader`, which a caller may point somewhere else with `FontManager.setProvider`. A
+reader is a table of a few functions -- open a file, answer with a face, shape a line, give back the
+ink of a glyph -- so a test can be a reader of tables with no font file anywhere, and a reader that
+shapes nothing is measured a character at a time rather than refused.
+
+```lua
+local FontManager = require("wonderland.util.font_manager")
+
+FontManager.setProvider(myReader)   -- myReader.open(path, index) -> face
+```
+
+What that replaced is stb_truetype: a header compiled into a shared library and shipped beside the
+package, which read TrueType outlines and no others, so a font of Japanese whose outlines are CFF --
+Noto Sans CJK, Source Han -- was skipped or drawn as a box. In its place is no reader at all: 日本語
+comes out of the font the machine already has, and so do 中文, 한국어 and a font collection.
 
 ## Time and animation
 
@@ -264,6 +318,33 @@ return or space when the keyboard is on it, so a screen is usable without a poin
 ```lua
 div():style(BUTTON):named("play"):focus(sty():bright(1.2)):onClick({ type = "play" })
 ```
+
+## The clipboard, and files dropped on a window
+
+The clipboard is the system's, one per program, and a paste into a field is the library's: control
+with C, V or X in the field that has the keyboard copies, pastes and cuts. A field has no selection,
+so what it has to give is the whole of its value; what is pasted lands where the caret is, a field of
+one line takes the first line of it, and a paragraph takes the lines it has room for.
+
+```lua
+-- What the program copies to and pastes from. It is handed to an app by `run`, so an app that
+-- wants more than a field's worth of it -- a playlist, a path, a track's name -- has it here.
+self.clipboard:setText(playlist)
+local pasted = self.clipboard:getText()
+```
+
+Files dropped on a window go to the box they landed on, which is what a window that takes a track
+from a file manager is:
+
+```lua
+div():style(PANE):onDrop(function(paths)
+	return { type = "add", paths = paths }
+end)
+```
+
+A window with no box for them hands the event to the app -- `App:event` is given `fileDrop` with its
+paths -- which is what a screen that takes a file anywhere on it does. A headless screen has a
+clipboard in memory, so a paste, a copy and a drop are all testable with no window and no desktop.
 
 ## Pictures
 
@@ -423,6 +504,8 @@ screen needs is mostly not this library's, and some of it is nobody's yet:
 | | |
 | - | - |
 | Sound | `treble`, a cross platform audio library for LuaJIT (`lde add treble`): a player mixes and plays with it, and `wonderland.time` is what its position is read against |
+| Shaping and bidi | Arabic, Hebrew, Devanagari and Thai: `texter` shapes those lines with the machine's own shaper, and what is left is wonderland's layout drawing a shaped line -- its glyphs, its clusters and the face each run of it belongs to -- rather than a character at a time |
+| Colour emoji, on windows and macOS | On linux and android an emoji is drawn in the colours of its font: `texter` paints the graph a COLR v1 font states and hands a CBDT, sbix or COLR v0 one over as its picture, and a sheet of the atlas holds it as it is. On windows and macOS what a reader hands over is coverage -- GDI's outline call has no colour in it, and CoreText is drawn into a grey context here -- so an emoji is its shape in the colour of the text, and what would fix it is DirectWrite and a colour bitmap context respectively |
 | Video and audio decoding | nothing in the lde registry: a decoder is a binding to be written, and what it hands over is a frame for `assets:stream` |
 | Tags and a library | `id3`, Vorbis comments, mp4 atoms and cover art: a parser to be written, or a decoder that already has them |
 | Threads | lde has none, and reading a file on the thread that draws is a screen that stutters: a decoder that is a C library brings its own, otherwise it is `lua-llthreads2` |

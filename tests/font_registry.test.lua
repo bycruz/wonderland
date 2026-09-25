@@ -443,6 +443,46 @@ test.it("puts the family asked for first in the fallbacks and the default last",
 	removeDir(dir)
 end)
 
+test.it("asks for a script a latin font has nothing of, after the font of pictures", function()
+	local dir = fontsDir({
+		{ name = "Inter.ttf", data = buildFont({ family = "Inter" }) },
+		{ name = "Emoji.ttf", data = buildFont({ family = "Noto Color Emoji" }) },
+		{ name = "Arabic.ttf", data = buildFont({ family = "Noto Naskh Arabic" }) },
+		{ name = "Hebrew.ttf", data = buildFont({ family = "Noto Sans Hebrew" }) },
+	})
+
+	local registry = Registry.new({ dirs = { dir } })
+	local paths = registry:fallbacks("Inter")
+
+	test.equal(#paths, 4, "the two scripts this machine has are asked for after the font of pictures")
+	test.includes(paths[1], "Inter.ttf")
+	test.includes(paths[2], "Emoji.ttf", "the font of pictures is asked before the scripts")
+	test.includes(paths[3], "Arabic.ttf", "then the script a line of arabic is drawn with")
+	test.includes(paths[4], "Hebrew.ttf", "and the next one")
+
+	test.deepEqual(registry:fallbacks("No Such Family"),
+		{ registry:default(), assert(paths[2]), assert(paths[3]), assert(paths[4]) },
+		"and a family the machine does not have is still drawn in them")
+
+	removeDir(dir)
+end)
+
+test.it("finds a script by the name of the family it is in, where no known family is here", function()
+	local dir = fontsDir({
+		{ name = "Inter.ttf", data = buildFont({ family = "Inter" }) },
+		{ name = "Naskh.ttf", data = buildFont({ family = "Some Arabic Naskh" }) },
+	})
+
+	local registry = Registry.new({ dirs = { dir } })
+	local paths = registry:fallbacks("Inter")
+
+	test.equal(#paths, 2, "the family asked for and the script")
+	test.includes(paths[2], "Naskh.ttf",
+		"a family whose own name says which script it is for is what a machine nobody listed is asked about")
+
+	removeDir(dir)
+end)
+
 test.it("keeps a path out of the fallbacks twice asked for", function()
 	local dir = fontsDir({ { name = "DejaVuSans.ttf", data = buildFont({ family = "DejaVu Sans" }) } })
 	local registry = Registry.new({ dirs = { dir } })
@@ -474,7 +514,9 @@ test.it("looks under a filesystem root for the platform's font directories", fun
 	local nested = root .. "/usr/share/fonts/dejavu"
 
 	os.remove(root)
-	sh('mkdir -p "' .. nested .. '"')
+
+	-- cmd takes no -p, and one directory of a tree is the tree.
+	sh((isWindows and "mkdir " or "mkdir -p ") .. '"' .. nested .. '"')
 	writeFile(nested, "Rooted.ttf", buildFont({ family = "Rooted Sans" }))
 
 	local faces = Registry.new({ roots = { root } }):faces()

@@ -28,6 +28,26 @@ local DEFAULT_PIXEL_HEIGHT = 18
 ---@field new fun(view: wonderland.Headless.View, opts: wonderland.Headless.Options): wonderland.Headless
 local headless = {}
 
+--- A clipboard for a screen with no window: what a copy is put in and a paste comes out of, which
+--- is all a test of either needs. A screen with no window has no system to ask.
+---@return winit.Clipboard
+local function memoryClipboard()
+	local held = nil
+
+	---@type any
+	return {
+		setText = function(_, text)
+			held = text
+		end,
+		getText = function()
+			return held
+		end,
+		clear = function()
+			held = nil
+		end,
+	}
+end
+
 ---@class wonderland.Headless.Options
 ---@field width number
 ---@field height number
@@ -40,6 +60,7 @@ local headless = {}
 ---@field shouldRedraw boolean?
 ---@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
 ---@field window wonderland.RenderWindow # The stand-in the plugins lay out against
+---@field clipboard winit.Clipboard # What a copy is put in and a paste comes out of, in memory
 ---@field plugins { window: wonderland.plugin.Window<any>, render: wonderland.plugin.Render, text: wonderland.plugin.Text, layout: wonderland.plugin.Layout<any>, ui: wonderland.plugin.UI }
 ---@field order wonderland.Plugin[] # The plugins, in the order an event goes down them
 ---@field handler winit.EventManager # What an event is handed with, which a screen with no loop does nothing with
@@ -108,6 +129,11 @@ function headless.new(view, opts)
 		pixelHeight = DEFAULT_PIXEL_HEIGHT,
 		characters = CHARACTERS,
 	})
+
+	-- What a paste in a field comes out of and what a copy goes into, which a screen with no
+	-- window keeps in memory: see `wonderland.headless`'s `clipboard`.
+	self.clipboard = memoryClipboard()
+	self.plugins.layout.clipboard = self.clipboard
 
 	self.plugins.layout:register(self.window)
 

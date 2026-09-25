@@ -140,7 +140,7 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@field element wonderland.Element
 ---@field value number # The string handle of what has been typed into the field
 ---@field line number # Which line of it the caret is on, from nought
----@field column number # And how many glyphs of that line come before it
+---@field column number # And how many bytes of that line come before it
 ---@field placed boolean? # Whether the field was walked, which is what says the quad is there
 ---@field left number?
 ---@field top number?
@@ -152,6 +152,11 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@field g number?
 ---@field b number?
 ---@field a number?
+
+-- A byte past the end of a line, which is what a click at the left of a right-to-left line comes to:
+-- the bytes of such a line run from its right, so its left end is past every byte of it. The layout
+-- clamps a column past the end of a line to the end of it -- see `Layout:setCaret`.
+local PAST_THE_LINE = 1 << 24
 
 ---@class wonderland.plugin.UI.Clip
 ---@field left number
@@ -181,7 +186,7 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 ---@param band number? # How sharp the edge of it is, one pixel either side by default
 ---@param grow number? # How far past the box the quad is drawn: a shadow is its own blur
 local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, right, bottom, z, r, g, b, a,
-	texture, u0, v0, u1, v1, radius, band, grow)
+	texture, u0, v0, u1, v1, radius, band, grow, own)
 	-- A quad that is drawn past its box is one whose edge is spread out, so what is drawn is the
 	-- box and the space the spreading needs; the box itself is what the corner arithmetic is about.
 	local drawnLeft, drawnTop = left - (grow or 0), top - (grow or 0)
@@ -207,7 +212,8 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 				-toNDC(top, windowHeight),
 				toNDC(right, windowWidth),
 				-toNDC(bottom, windowHeight),
-				band
+				band,
+				own
 			)
 		else
 			batch:quad(
@@ -218,7 +224,8 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 				z,
 				r, g, b, a,
 				texture,
-				u0, v0, u1, v1
+				u0, v0, u1, v1,
+				own
 			)
 		end
 
@@ -256,7 +263,8 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 			-toNDC(top, windowHeight),
 			toNDC(right, windowWidth),
 			-toNDC(bottom, windowHeight),
-			band
+			band,
+			own
 		)
 
 		return
@@ -271,7 +279,8 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		r, g, b, a,
 		texture,
 		u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop),
-		u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop)
+		u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop),
+		own
 	)
 end
 
@@ -340,42 +349,74 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 			local glyph = assert(run.glyphs)[line.first + at]
 			local picture = glyph.texture ~= 0 and glyph.texture or font:picture()
 
+			-- A glyph that is a picture of its own -- an emoji -- is drawn as the picture rather
+			-- than through the text's colour: what the colour is of it is how opaque the element is.
 			clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, y + glyph.y,
 				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, r, g, b,
-				node.fgA / 255, picture, glyph.u0, glyph.v0, glyph.u1, glyph.v1)
+				node.fgA / 255, picture, glyph.u0, glyph.v0, glyph.u1, glyph.v1, nil, nil, nil,
+				glyph.own)
 		end
 	end
 end
 
---- Where the caret is, as the pen it sits at: a line of a run starts at the line's first glyph,
---- and what comes before the caret on it is the advances of the glyphs before it -- the same whole
---- pixel advances the pen that placed them was moved by, so the caret lands on the pixel the
---- character after it starts at rather than inside it.
+--- Where the caret is, as the pen it sits at, given the byte of the line it is at.
+---
+--- A glyph is not a character, so the byte is looked up among the glyphs and what is answered is the
+--- pen that glyph was placed at. A line that reads right to left runs the other way: the caret for a
+--- byte is at the far edge of the glyphs that byte came from.
 ---@param run wonderland.font.Run
 ---@param line number
----@param column number
+---@param byte number # How many bytes of that line come before the caret
 ---@return number pen # From the left edge of the run
 ---@return number lineStep # How tall a line of it is, which the caret is drawn no taller than
-local function caretPen(run, line, column)
+local function caretPen(run, line, byte)
 	local lineStep = run.height / run.lineCount
 	local glyphs = run.glyphs
 	local glyphLine = run.lines[line] ---@type wonderland.font.Line
 
-	if glyphs == nil or glyphLine == nil then
+	if glyphs == nil or glyphLine == nil or glyphLine.count <= 0 then
 		return 0, lineStep
 	end
 
-	-- A column past the end of the line is the end of the line: what is typed after it is not on
-	-- it yet, and a value of more bytes than the atlas has glyphs -- one with a character outside
-	-- it -- puts the caret at the end rather than nowhere.
-	local last = math.min(column, glyphLine.count)
-	local pen = 0
+	local first, count = glyphLine.first, glyphLine.count
 
-	for at = 0, last - 1 do
-		pen = pen + glyphs[glyphLine.first + at].advance
+	-- A glyph is not always the whole of a character: a mark sits on a letter, in the same bytes, and
+	-- is placed where it is placed. So a byte is worth the edge of the group its glyphs make -- the
+	-- right edge of it where the line reads right to left, the left where it does not.
+	if glyphLine.rtl ~= 0 then
+		local pen = nil
+
+		for at = 0, count - 1 do
+			local glyph = glyphs[first + at]
+
+			if glyph.cluster >= byte then
+				local edge = glyph.pen + glyph.advance
+
+				if pen == nil or edge > pen then
+					pen = edge
+				end
+			end
+		end
+
+		return pen or 0, lineStep
 	end
 
-	return pen, lineStep
+	local pen = nil
+
+	for at = 0, count - 1 do
+		local glyph = glyphs[first + at]
+
+		if glyph.cluster >= byte and (pen == nil or glyph.pen < pen) then
+			pen = glyph.pen
+		end
+	end
+
+	if pen ~= nil then
+		return pen, lineStep
+	end
+
+	-- A byte past every glyph puts the caret where the line stops rather than nowhere.
+	return glyphLine.width, lineStep
 end
 
 --- Where a line of a run is drawn inside the box it is in: a line may be given more room than it
@@ -480,12 +521,10 @@ local function findFieldText(screen, index, parentX, parentY, element, inField)
 	return nil
 end
 
---- Where a point in a line of text is, as the caret between two of its characters: which line is
---- which one the point is down from the top of the text, and the column is the gap between two
---- glyphs nearest across from it. A point past the end of a line is the end of that line, and one
---- above the first line or below the last is the first or the last: a point in the box that is not
---- in the text is still a point in the field, and the nearest line of it is as good an answer as
---- there is.
+--- Where a point in a line of text is, as a line and a byte of it. A point past the end of a line is
+--- the end of that line; one above the first line or below the last is the first or the last.
+
+--- What a glyph came from is the byte it kept, so a click lands at a character boundary.
 ---@param run wonderland.font.Run
 ---@param node wonderland.Node # What the line is drawn as, which is what says how it is aligned
 ---@param x number # Absolute, where the line starts
@@ -493,7 +532,7 @@ end
 ---@param pointX number
 ---@param pointY number
 ---@return number line
----@return number column
+---@return number byte # How many bytes of that line come before the caret
 local function caretAtPoint(run, node, x, y, pointX, pointY)
 	local step = run.height / run.lineCount
 	local line = math.floor((pointY - y) / step)
@@ -507,24 +546,38 @@ local function caretAtPoint(run, node, x, y, pointX, pointY)
 	local glyphLine = run.lines[line] ---@type wonderland.font.Line
 	local glyphs = run.glyphs
 
-	if glyphLine == nil or glyphs == nil then
+	if glyphLine == nil or glyphs == nil or glyphLine.count <= 0 then
 		return line, 0
 	end
 
-	-- Measured the way the caret is placed: from the same left edge the line is drawn from, and
-	-- across the same whole-pixel advances -- so a click between two glyphs puts the caret where
-	-- those two glyphs are, rather than somewhere the drawing and the arithmetic disagree about.
+	-- Measured from the same left edge and across the same pens the line was drawn along, so a click
+	-- between two glyphs puts the caret where those two glyphs are.
+	local first, count = glyphLine.first, glyphLine.count
 	local target = pointX - x - lineOffset(node, glyphLine)
-	local best, bestDistance = 0, math.abs(target)
-	local pen = 0
 
-	for at = 0, glyphLine.count - 1 do
-		pen = pen + glyphs[glyphLine.first + at].advance
+	-- A line that reads right to left is drawn from the right, so a gap between two of its glyphs is
+	-- the byte the glyph on the right of the gap came from, and the gap at its far left is the end of
+	-- the line.
+	if glyphLine.rtl ~= 0 then
+		for at = 0, count - 1 do
+			local glyph = glyphs[first + at]
 
-		local distance = math.abs(pen - target)
+			if target < glyph.pen + glyph.advance / 2 then
+				return line, at > 0 and glyphs[first + at - 1].cluster or PAST_THE_LINE
+			end
+		end
+
+		return line, glyphs[first + count - 1].cluster
+	end
+
+	local best, bestDistance = PAST_THE_LINE, math.abs(glyphLine.width - target)
+
+	for at = 0, count - 1 do
+		local glyph = glyphs[first + at]
+		local distance = math.abs(glyph.pen - target)
 
 		if distance < bestDistance then
-			best, bestDistance = at + 1, distance
+			best, bestDistance = glyph.cluster, distance
 		end
 	end
 

@@ -121,6 +121,27 @@ local PREFERRED = {
 		"Symbola" },
 }
 
+-- The scripts a latin font has nothing for, and the families a machine is likely to have of each.
+--
+-- A latin font has the letter "A", and what it draws for "م" is the box it draws for anything it does
+-- not have: a line of a language the app's own font was not made for is drawn by a font of the
+-- machine's own, which is what this is about -- the font a script is read and written in, named the
+-- way a family is named rather than the way a language is. What the names are is a preference and
+-- not a requirement, and where none of them is on the machine the first family whose own name says
+-- the script is taken instead -- see `Registry:firstNamed`.
+local SCRIPTS = {
+	{ lang = "ar", marker = "arabic", families = { "Noto Naskh Arabic", "Noto Sans Arabic", "Amiri",
+		"Scheherazade New", "Geeza Pro", "Al Nile", "Baghdad", "Segoe UI", "Tahoma", "Arial",
+		"Times New Roman", "DejaVu Sans", "FreeSerif" } },
+	{ lang = "he", marker = "hebrew", families = { "Noto Sans Hebrew", "Noto Serif Hebrew",
+		"Arial Hebrew", "Lucida Grande", "Raanana", "Segoe UI", "Tahoma", "DejaVu Sans", "FreeSans" } },
+	{ lang = "hi", marker = "devanagari", families = { "Noto Sans Devanagari",
+		"Noto Serif Devanagari", "Nirmala UI", "Mangal", "Kohinoor Devanagari", "Devanagari Sangam MN",
+		"Lohit Devanagari", "FreeSerif" } },
+	{ lang = "th", marker = "thai", families = { "Noto Sans Thai", "Noto Serif Thai", "Leelawadee UI",
+		"Thonburi", "Tahoma", "Garuda", "Norasi", "Loma", "FreeSerif" } },
+}
+
 -- The names a stylesheet writes where a family would go. They name a kind of font rather than a
 -- font, and which file they come to is the machine's answer.
 local GENERIC = {
@@ -138,6 +159,7 @@ local GENERIC = {
 ---@field private byFamily table<string, wonderland.font.Face[]> # By family, case folded
 ---@field private byName table<string, wonderland.font.Face[]> # And by it with the spaces out
 ---@field private memo table<string, wonderland.font.Lookup> # What a lookup came to, by its tuple
+---@field private scriptMemo table<string, wonderland.font.Lookup> # And what a script came to, by its language
 ---@field private defaultLookup wonderland.font.Lookup? # And what the default came to
 local Registry = {}
 Registry.__index = Registry
@@ -150,7 +172,7 @@ function Registry.new(opts)
 	local dirs, isPlatform = scan.dirs(opts)
 
 	return setmetatable({ dirs = dirs, isPlatform = isPlatform, familyList = {}, byFamily = {},
-		byName = {}, memo = {} }, Registry)
+		byName = {}, memo = {}, scriptMemo = {} }, Registry)
 end
 
 --- Every face on this machine, in order: by family, then by weight, then upright before italic. This
@@ -207,6 +229,7 @@ function Registry:clear()
 	self.byFamily = {}
 	self.byName = {}
 	self.memo = {}
+	self.scriptMemo = {}
 end
 
 --- The face of a family: the family itself, then the same name with its spaces taken out.
@@ -348,14 +371,36 @@ function Registry:path(family, opts)
 	return path, index
 end
 
---- The files to try, in order, when drawing text: the family that was asked for, then a sans with
---- the ranges a latin font has nothing for, then an emoji font, then the machine's default. A face
---- that is not on this machine is simply not in the list.
+--- The file a script is drawn in: the machine's own answer where fontconfig has one -- it knows which
+--- of the fonts a machine has covers a language -- and a family of that script where it has none.
+---@param script { lang: string, marker: string, families: string[] }
+---@return string? path
+---@return number? index
+function Registry:script(script)
+	local known = self.scriptMemo[script.lang]
+
+	if known ~= nil then return known.path, known.index end
+
+	local path, index = self:platformMatch(":lang=" .. script.lang)
+
+	if path == nil then
+		local face = self:firstNamed(script.families, script.marker, 400, false)
+
+		if face ~= nil then path, index = face.path, face.index end
+	end
+
+	self.scriptMemo[script.lang] = { path = path, index = index }
+
+	return path, index
+end
+
+--- The files to try, in order, when drawing text: the family asked for, a sans with the ranges a latin
+--- font has nothing for, an emoji font, the scripts, then the machine's default. A face that is not on
+--- this machine is simply not in the list, and whether one draws a character is asked as a piece of a
+--- line is drawn rather than here.
 ---
---- Nothing here is asked whether it has a character. That is a question about one code point and one
---- face, asked as a run is drawn: the face that has the character draws it, and the list moves on
---- where none does. This is the order worth asking in, and a caller that asks each face in turn
---- needs no map of what any of them holds.
+--- The scripts come after the emoji font -- a font of pictures holds many symbols and no letters -- and
+--- before the default, which fontconfig answers a script with even where it has nothing of it.
 ---@param family string
 ---@return string[]
 function Registry:fallbacks(family)
@@ -372,6 +417,13 @@ function Registry:fallbacks(family)
 	keep(self:path(family))
 	keep(self:firstNamed(PREFERRED.cjk, "cjk", 400, false)?.path)
 	keep(self:firstNamed(PREFERRED.emoji, "emoji", 400, false)?.path)
+
+	for _, script in ipairs(SCRIPTS) do
+		local path = self:script(script)
+
+		keep(path)
+	end
+
 	keep(self:default())
 
 	return paths
