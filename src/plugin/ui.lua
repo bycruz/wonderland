@@ -991,12 +991,14 @@ function UI:event(event, _handler)
 		return self:frame(event.window)
 	end
 
-	if name == "resize" or name == "mouseMove" or name == "mousePress"
-		or name == "mouseRelease" or name == "focusOut" then
-		-- A resize is the window rather than what the screen says, and how often it happens is
-		-- the window manager's -- a size a frame is shown at, at worst -- so it is not rationed
-		-- by the frame's time: a resize held back for coming too soon is a window left at the
-		-- size it had, which is a window that looks frozen for as long as nothing else happens.
+	if name == "resize" or name == "mouseMove" or name == "mousePress" or name == "mouseRelease" or name == "focusOut" then
+		if name == "resize" then -- Resize should actually invalidate layouts
+			local ctx = self.layoutPlugin.contexts[event.window]
+			if ctx then
+				ctx.mustDraw = true
+			end
+		end
+
 		self:requestRedraw(event.window, name == "resize")
 	end
 end
