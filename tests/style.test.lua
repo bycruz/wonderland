@@ -269,10 +269,69 @@ test.it("a weight is taken by name or by number", function()
 	test.equal(style.at(slot).fontItalic, 0, "and a style that says nothing about a slant is upright")
 end)
 
+-- Making a line heavier is usually said without saying which family it is in, which is why the
+-- weight is a call of its own rather than only an option of `:font`.
+test.it("a weight is said without naming a family", function()
+	test.equal(style.at(style.intern(sty():weight())).fontWeight, 700, "naming none is bold")
+	test.equal(style.at(style.intern(sty():weight("light"))).fontWeight, 300)
+	test.equal(style.intern(sty():weight("semibold")), style.intern(sty():weight(600)),
+		"and a name is the number it counts")
+	test.equal(style.intern(sty():font("Inter"):weight("bold")),
+		style.intern(sty():font("Inter", { weight = "bold" })), "the two calls say the same thing")
+
+	local slot = style.at(style.intern(sty():weight()))
+	test.equal(slot.fontFamily, 0, "and a weight is not a family")
+	test.equal(slot.fontSize, 0, "nor a size")
+end)
+
+test.it("a weight that is not a weight is refused by either call", function()
+	local ok, err = pcall(function()
+		return sty():weight("heavyish")
+	end)
+
+	test.falsy(ok, "a name nobody knows is refused")
+	test.truthy(tostring(err):match("Not a font weight"), "and says so")
+end)
+
+test.it("a slant is asked for, and taken back off", function()
+	test.equal(style.at(style.intern(sty():italic())).fontItalic, 1, "a call that names nothing slants it")
+	test.equal(style.intern(sty():italic()), style.intern(sty():italic(true)), "and so does saying so")
+	test.equal(style.intern(sty():font("Inter"):italic()), style.intern(sty():font("Inter", { italic = true })),
+		"which is the slant `:font` takes as an option")
+
+	local upright = style.at(style.intern(sty():italic(false)))
+	test.equal(upright.fontItalic, 0, "one under a slanted element is set upright again")
+	test.equal(upright.fontFamily, 0, "and a slant is not a family")
+end)
+
 test.it("says whether a line too wide for its box is cut", function()
 	local cut = sty():ellipsis()
 
 	test.equal(style.at(style.intern(cut)).ellipsis, 1, "a box that asked for it is cut")
 	test.falsy(style.at(style.intern(sty())) and style.at(style.intern(sty())).ellipsis ~= 0,
 		"and one that said nothing is not")
+end)
+
+-- A blur is asked for off the scale a stylesheet uses, and what it comes to is pixels: a style
+-- knows the number, and what the number means is the frame's business.
+test.it("a blur is named off the scale, and counts in pixels", function()
+	test.equal(style.at(style.intern(sty():blur())).blur, 8, "naming none is the plain blur")
+	test.equal(style.at(style.intern(sty():blur("xl"))).blur, 24)
+	test.equal(style.at(style.intern(sty():blur("none"))).blur, 0, "and none at all is nought")
+	test.equal(style.intern(sty():blur("sm")), style.intern(sty():blur(8)), "a name is the pixels it is")
+
+	local ok, err = pcall(function()
+		return sty():blur("hazy")
+	end)
+
+	test.falsy(ok, "a name that is not a blur is refused")
+	test.truthy(tostring(err):match("Not a blur"), "and says so")
+end)
+
+test.it("a style that says nothing about a blur says nothing rather than none", function()
+	local quiet = style.at(style.intern(sty():bg("red")))
+	test.equal(style.PRESENT.blur, 1 << 27, "the blur has a bit of its own")
+	test.falsy(quiet.flags & style.PRESENT.blur ~= 0, "which a style that named none does not set")
+	test.truthy(style.at(style.intern(sty():blur("none"))).flags & style.PRESENT.blur ~= 0,
+		"and one that named none at all does")
 end)

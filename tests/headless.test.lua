@@ -271,10 +271,10 @@ test.skipIf(not canRender)("writes a repaint into the buffer it already has", fu
 	local batch = screen.plugins.ui.batch
 
 	screen:draw()
-	local vertices, capacity, quads = batch.vertices, batch.capacity, batch.quads
+	local instances, capacity, quads = batch.instances, batch.capacity, batch.quads
 
 	screen:draw()
-	test.truthy(batch.vertices == vertices, "the same memory is written into again")
+	test.truthy(batch.instances == instances, "the same memory is written into again")
 	test.equal(batch.capacity, capacity, "and a frame the same size does not grow it")
 	test.equal(batch.quads, quads, "and the same screen makes the same quads")
 
@@ -2529,6 +2529,195 @@ test.skipIf(not canRender)("draws a picture where the box it was given is, the r
 	test.equal(eb, 0)
 
 	os.remove(path)
+end)
+
+-- A picture is drawn through the colour of the box it is on, so a colour the box names tints it and
+-- a brightness tints it further. A box that named no colour of its own is white, which is what makes
+-- a brightness reach the picture at all: a multiplier over a colour nobody named would leave the
+-- picture exactly as it came.
+test.skipIf(not canRender)("draws a picture in the colour of the box it is on", function()
+	local path = os.tmpname() .. ".png"
+
+	writePicture(path)
+
+	-- The colour is written as a float and read back as a byte, so allow the one the conversion
+	-- can differ by.
+	---@param value number?
+	local function half(value)
+		return value ~= nil and math.abs(value - 128) <= 1
+	end
+
+	---@param bright number?
+	---@param color table?
+	---@param at number
+	---@return number r, number g, number b
+	local function drawn(bright, color, at)
+		local screen = wonderland.headless.new(function(_, assets)
+			local logo = assets:image(path)
+
+			return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 } }):children({
+				div():style({ width = logo.width, height = logo.height, bgImage = logo.texture,
+					bgImageUV = logo.uv, bright = bright, bg = color }),
+			})
+		end, { width = 2, height = 2, fontPath = assert(fontPath) })
+
+		screen:draw()
+		local pixels = assert(screen:getPixels())
+		screen:close()
+
+		return pixelAt(pixels, 2, at, at)
+	end
+
+	local r, g, b = drawn(0.5, nil, 0)
+	test.truthy(half(r), "a picture with no colour named is drawn as it is, made darker by the brightness")
+	test.equal(g, 0, "and only the brightness is over it")
+	test.equal(b, 0)
+
+	local wr, wg = drawn(0.5, nil, 1)
+	test.truthy(half(wr), "and a pixel of it that was white comes out half as bright")
+	test.truthy(half(wg))
+
+	local tr, tg, tb = drawn(nil, BLACK, 0)
+	test.equal(tr, 0, "while a colour the box did name is what the picture is drawn through")
+	test.equal(tg, 0)
+	test.equal(tb, 0)
+
+	os.remove(path)
+end)
+
+-- A blur is drawn past the box it was asked for: the edge of it is faded over the blur, and what is
+-- drawn in the room that makes is what a blurred box is rather than a box with a soft line on it.
+test.skipIf(not canRender)("spreads a blurred box past its own edge", function()
+	-- Sixteen pixels of white in the middle of forty, which puts its left edge at twelve.
+	local function drawn(blur)
+		local inside = { width = { abs = 16 }, height = { abs = 16 }, bg = WHITE }
+		inside.blur = blur
+
+		local screen = wonderland.headless.new(function()
+			return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, direction = "row",
+				justify = "center", align = "center" }):children({
+				div():style(inside),
+			})
+		end, { width = 40, height = 16, fontPath = assert(fontPath) })
+
+		screen:draw()
+		local pixels = assert(screen:getPixels())
+		screen:close()
+
+		return pixels
+	end
+
+	---@param pixels string
+	---@param x number
+	---@return number r
+	local function across(pixels, x)
+		return select(1, pixelAt(pixels, 40, x, 8))
+	end
+
+	local sharp = drawn(nil)
+	test.equal(across(sharp, 20), 255, "a box with no blur is drawn sharp, in the middle of it")
+	test.equal(across(sharp, 11), 0, "and where it is not, there is nothing")
+
+	local spread = drawn(4)
+	test.truthy((across(spread, 11) or 0) > 0, "a blurred box is drawn a pixel outside its edge")
+	test.truthy((across(spread, 6) or 0) > 0, "and further out than that, which is the blur it asked for")
+	test.truthy((across(spread, 12) or 0) < 255, "its own edge is no longer the whole of it")
+	test.equal(across(spread, 2), 0, "and past the blur there is still nothing")
+	test.equal(across(spread, 20), 255, "while the middle of it is drawn as it was")
+end)
+
+test.skipIf(not canRender)("spreads a blurred picture past its box", function()
+	local path = os.tmpname() .. ".png"
+
+	writePicture(path)
+
+	-- The picture is a small file drawn over four times its size, in the middle of the window.
+	---@param blur number?
+	---@return string pixels
+	local function drawn(blur)
+		local screen = wonderland.headless.new(function(_, assets)
+			local logo = assets:image(path)
+
+			return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, direction = "row",
+				justify = "center", align = "center" }):children({
+				div():style({ width = logo.width * 4, height = logo.height * 4, bgImage = logo.texture,
+					bgImageUV = logo.uv, blur = blur }),
+			})
+		end, { width = 40, height = 16, fontPath = assert(fontPath) })
+
+		screen:draw()
+		local pixels = assert(screen:getPixels())
+		screen:close()
+
+		return pixels
+	end
+
+	---@param pixels string
+	---@param x number
+	---@return number r
+	local function across(pixels, x)
+		-- The top half of the picture, which is the red and green quarters of the file it came from:
+		-- the red channel is what says where the picture is drawn.
+		return select(1, pixelAt(pixels, 40, x, 6))
+	end
+
+	local sharp = drawn(nil)
+	test.equal(across(sharp, 11), 0, "a picture with no blur is drawn where its box is and no further")
+	test.equal(across(sharp, 17), 255, "and it is the picture it came from, drawn as it is")
+
+	local spread = drawn(3)
+	test.truthy((across(spread, 11) or 0) > 0, "a blurred picture is drawn past the box it is in")
+	test.truthy((across(spread, 13) or 0) > 0, "over the whole of the blur it asked for")
+	test.truthy((across(spread, 17) or 0) < 255, "and the picture itself is no longer drawn in full")
+	test.equal(across(spread, 3), 0, "while nothing at all is drawn past the blur")
+
+	os.remove(path)
+end)
+
+-- Text is not one picture but one per glyph, so a blurred line is every glyph of it spread by the
+-- blur: the ink of it goes soft and reaches where it did not, rather than staying as it was.
+test.skipIf(not canRender)("softens the text inside a blurred box", function()
+	local VALUE = "lil"
+
+	---@param blur number?
+	---@return number peak, number columns
+	local function drawn(blur)
+		local style = { width = { abs = 40 }, height = { abs = 16 }, direction = "column",
+			justify = "center", align = "center", fg = WHITE, fontSize = 14, blur = blur }
+
+		local screen = wonderland.headless.new(function()
+			return div():style(style):children({ text(VALUE) })
+		end, { width = 40, height = 16, fontPath = assert(fontPath) })
+
+		screen:draw()
+		local pixels = assert(screen:getPixels())
+		screen:close()
+
+		local peak, columns = 0, 0
+
+		for x = 0, 39 do
+			local most = 0
+
+			for y = 0, 15 do
+				most = math.max(most, select(1, pixelAt(pixels, 40, x, y)) or 0)
+			end
+
+			peak = math.max(peak, most)
+
+			if most > 0 then
+				columns = columns + 1
+			end
+		end
+
+		return peak, columns
+	end
+
+	local sharpPeak, sharpColumns = drawn(nil)
+	local softPeak, softColumns = drawn(2)
+
+	test.truthy(sharpPeak > 0, "the text of a box with no blur is drawn in ink of its own")
+	test.truthy(softPeak < sharpPeak, "the text of a blurred box is not as dark as it was")
+	test.truthy(softColumns > sharpColumns, "and its ink reaches further across the box than it did")
 end)
 
 test.skipIf(not canRender)("draws the frame of a gif the clock is on", function()

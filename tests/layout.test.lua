@@ -89,6 +89,64 @@ test.it("brightness stops at white and leaves transparency alone", function()
 	test.equal(lit.fgR, 255, "a text colour stops at white too")
 end)
 
+-- A multiplier is a multiplier either way: below one it is the colours an element already has made
+-- darker, which is what a button being held down is drawn as.
+test.it("a bright style below one darkens the colours the element already has", function()
+	local button = div():style(sty():size(200, 44):bg("#808080"):fg("#ffffff")):active(sty():bright(0.5))
+
+	wonderlandElement.hovering(button, true)
+	wonderlandElement.pressing(button, true)
+
+	local node = solve(button, 400, 300):node(1)
+	test.equal(node.bgR, 64 / 255, "the background is half as bright as it was")
+	test.equal(node.fgR, 128, "and so is a text colour")
+	test.equal(node.bgA, 1.0, "with transparency still left alone")
+end)
+
+-- A brightness is a filter over the box it is put on rather than a colour of that box, so what is
+-- drawn inside the box is lit the same way: a card that dims under the pointer dims the text in it.
+test.it("a brightness reaches the elements inside the box it is on", function()
+	local card = div():style(sty():bg("#808080"):bright(0.5)):children(
+		div():style(sty():bg("#808080"):fg("#ffffff"))
+	)
+
+	local screen = solve(card, 400, 300)
+	local inner = child(screen, 1)
+
+	test.equal(screen:node(1).bright, 0.5, "the box is lit by what it says")
+	test.equal(inner.bright, 0.5, "and so is what is inside it")
+	test.equal(inner.bgR, 128 / 255 * 0.5, "which is a background half as bright")
+	test.equal(inner.fgR, 128, "and a text colour with it")
+end)
+
+test.it("a brightness inside a brightness is the two multiplied", function()
+	local card = div():style(sty():bg("#808080"):bright(0.5)):children(
+		div():style(sty():bg("#808080"):bright(0.5))
+	)
+
+	local inner = child(solve(card, 400, 300), 1)
+	test.equal(inner.bright, 0.25, "a filter over a filtered box filters it again")
+	test.equal(inner.bgR, 128 / 255 * 0.25, "so a colour inside both comes out a quarter as bright")
+end)
+
+-- A blur is a thing the element does rather than a thing it has, so what is inside it is spread by
+-- it as well -- and there is no multiplying two of them together, so the nearest one that is named
+-- is the one an element is drawn with.
+test.it("a blur is taken by the elements inside it, unless one says otherwise", function()
+	local card = div():style(sty():blur(6)):children(
+		div(),
+		div():style(sty():blur("none")),
+		div():style(sty():blur(2))
+	)
+
+	local screen = solve(card, 400, 300)
+
+	test.equal(screen:node(1).blur, 6, "the box is spread by what it says")
+	test.equal(child(screen, 1, 1).blur, 6, "and so is what is inside it that says nothing")
+	test.equal(child(screen, 1, 2).blur, 0, "an element that says none is drawn sharp")
+	test.equal(child(screen, 1, 3).blur, 2, "and one that names its own is spread by that alone")
+end)
+
 -- Where the corners are round is what a box says about itself, so a style that stands in for it
 -- and says nothing about them leaves them alone: a card that lights up under the pointer is still
 -- a card with round corners.

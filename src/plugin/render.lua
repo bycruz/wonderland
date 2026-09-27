@@ -19,15 +19,16 @@ local shaderExt = backend.shaderExt
 ---@field capture wonderland.plugin.Render.Capture?
 ---@field clear wonderland.Color
 ---@field quadPipeline hood.Pipeline
----@field quadVertex hood.Buffer
+---@field quadInstance hood.Buffer # The instances of the frame's quads, one a quad
+---@field quadCorner hood.Buffer # The four corners every quad of it is drawn as
 ---@field quadIndex hood.Buffer
 ---@field target hood.Texture? # What this frame draws into, taken before the screen is built for it
 ---@field targetView hood.TextureView?
 ---@field targetWidth number # And how big it is, which is what a screen of this frame is laid out at
 ---@field targetHeight number
 ---@field quadRuns ffi.cdata*? # uint32_t*, the texture and first quad of each run
----@field vertexCapacity number # Bytes the vertex buffer holds before it grows
----@field indexCapacity number # And the index buffer
+---@field instanceCapacity number # Bytes the instance buffer holds before it grows
+---@field cornerCapacity number # How many corners the corner buffer holds, which never changes
 ---@field runCapacity number # How many runs of quads fit before the run buffer grows
 ---@field runCount number # How many the frame the gpu has was drawn with
 ---@field quads number # And how many quads it was, which is where the last run ends
@@ -89,48 +90,36 @@ function RenderPlugin.new(windowPlugin, opts)
 	}, RenderPlugin)
 end
 
---- A frame writes its vertices and indices into these, so they start at a screenful
---- and grow when a bigger one comes along, rather than reserving the worst case for every
---- app. Growing waits for the queue because a frame still in flight is reading them.
+--- A frame writes the instances of its quads into this, so it starts at a screenful and grows when
+--- a bigger one comes along, rather than reserving the worst case for every app. Growing waits for
+--- the queue because a frame still in flight is reading it.
 ---@param ctx wonderland.plugin.Render.Context
----@param vertexBytes number
----@param indexBytes number
-function RenderPlugin:reserve(ctx, vertexBytes, indexBytes)
-	if vertexBytes <= ctx.vertexCapacity and indexBytes <= ctx.indexCapacity then
+---@param instanceBytes number
+function RenderPlugin:reserve(ctx, instanceBytes)
+	if instanceBytes <= ctx.instanceCapacity then
 		return
 	end
 
 	self:getDevice().queue:waitIdle()
 
-	local vertexCapacity = math.max(ctx.vertexCapacity, 1)
-	while vertexCapacity < vertexBytes do
-		vertexCapacity = vertexCapacity * 2
+	local instanceCapacity = math.max(ctx.instanceCapacity, 1)
+	while instanceCapacity < instanceBytes do
+		instanceCapacity = instanceCapacity * 2
 	end
 
-	local indexCapacity = math.max(ctx.indexCapacity, 1)
-	while indexCapacity < indexBytes do
-		indexCapacity = indexCapacity * 2
-	end
+	ctx.quadInstance:destroy()
 
-	ctx.quadVertex:destroy()
-	ctx.quadIndex:destroy()
-
-	ctx.quadVertex = self:getDevice():createBuffer({
-		size = vertexCapacity,
+	ctx.quadInstance = self:getDevice():createBuffer({
+		size = instanceCapacity,
 		usages = { "VERTEX", "COPY_DST" },
 		mapped = true
 	})
-	ctx.quadIndex = self:getDevice():createBuffer({
-		size = indexCapacity,
-		usages = { "INDEX", "COPY_DST" },
-		mapped = true
-	})
-	ctx.vertexCapacity = vertexCapacity
-	ctx.indexCapacity = indexCapacity
+	ctx.instanceCapacity = instanceCapacity
 end
 
---- The frame the ui just built, handed over as the memory it was written into: the vertices, the
---- indices, and the runs of quads that share a picture, which are the draw calls it comes to.
+--- The frame the ui just built, handed over as the memory it was written into: one instance a quad,
+--- the four corners every quad is drawn as, and the runs of quads that share a picture, which are
+--- the draw calls it comes to.
 ---
 --- The runs are copied rather than referred to, because the batch the ui writes into is one batch
 --- and a screen with two windows in it is two frames: what a context is drawn from is what it was
@@ -140,14 +129,14 @@ end
 function RenderPlugin:setRenderData(window, batch)
 	local ctx = self:getContext(window)
 
-	local vertexSize = batch:vertexFloats() * ffi.sizeof("float")
-	local indexSize = batch:indexCount() * ffi.sizeof("uint32_t")
+	local instanceSize = batch:instanceBytes()
+	local cornerSize = ffi.sizeof("wl_corner") * QuadBatch.CORNERS
 
-	self:reserve(ctx, vertexSize, indexSize)
+	self:reserve(ctx, instanceSize)
 	self:reserveRuns(ctx, batch.runCount)
 
-	self:getDevice().queue:writeBuffer(ctx.quadVertex, vertexSize, batch.vertices)
-	self:getDevice().queue:writeBuffer(ctx.quadIndex, indexSize, batch.indices)
+	self:getDevice().queue:writeBuffer(ctx.quadInstance, instanceSize, batch.instances)
+	self:getDevice().queue:writeBuffer(ctx.quadCorner, cornerSize, batch.corners)
 
 	ffi.copy(ctx.quadRuns, batch.runs, batch.runCount * QuadBatch.RUN_NUMBERS * ffi.sizeof("uint32_t"))
 
@@ -287,41 +276,55 @@ end
 ---@return wonderland.plugin.Render.Context
 function RenderPlugin:createContext(window, swapchain)
 
-	-- The last two are what a cut box is cut with, in pixels: where this corner of the quad is from
-	-- the middle of the box and how far the arcs sit inside it, then the radius of the cut and how
-	-- sharp its edge is.
-	local vertexDescriptor = VertexLayout
-		.new()
-		:withAttribute({ type = "f32", size = 3, offset = 0 }) -- position (vec3)
-		:withAttribute({ type = "f32", size = 4, offset = 12 }) -- color (rgba)
-		:withAttribute({ type = "f32", size = 2, offset = 28 }) -- uv
-		:withAttribute({ type = "f32", size = 1, offset = 36 }) -- the picture it samples
-		:withAttribute({ type = "f32", size = 4, offset = 40 }) -- corner (vec4)
-		:withAttribute({ type = "f32", size = 2, offset = 56 }) -- edge (radius, band)
-		:withAttribute({ type = "f32", size = 1, offset = 64 }) -- whether the picture is its own colours
+	-- What a quad is, taken from the batch that writes them: the ui writes these itself, so they are
+	-- described in one place -- what each field is, how wide it is and where in the instance it sits
+	-- -- and this is built from that. A field narrowed into a byte or a half is normalized, which is
+	-- how a colour of 255 reaches the shader as the 1.0 it was. The stride is the struct itself,
+	-- since the fields are where it puts them and it is padded to a whole number of four byte steps:
+	-- a stride that is not is one the gpu refuses.
+	local cornerDescriptor = VertexLayout.new({ stride = ffi.sizeof("wl_corner") })
+	local instanceDescriptor = VertexLayout.new({ stride = QuadBatch.INSTANCE_SIZE }):withInstanceRate()
 
-	-- The ui writes vertices itself, so the two have to describe the same vertex.
-	assert(QuadBatch.FLOATS_PER_VERTEX * ffi.sizeof("float") == vertexDescriptor:getStride(),
-		"The quad batch and the vertex descriptor disagree about the vertex size")
+	for _, attribute in ipairs(QuadBatch.CORNER_ATTRIBUTES) do
+		cornerDescriptor:withAttribute(attribute)
+	end
 
-	-- Room for a full screen of text to start with: 256 KB of vertices and 96 KB of
-	-- indices, where the same pair used to reserve 4 MB for a screen that never came.
-	local vertexCapacity = vertexDescriptor:getStride() * INITIAL_QUADS
-	local indexCapacity = ffi.sizeof("uint32_t") * 6 * INITIAL_QUADS
+	for _, attribute in ipairs(QuadBatch.INSTANCE_ATTRIBUTES) do
+		instanceDescriptor:withAttribute(attribute)
+	end
+
+	assert(QuadBatch.INSTANCE_SIZE % 4 == 0, "An instance is not a whole number of four byte steps")
+	assert(ffi.sizeof("wl_corner") % 4 == 0, "A corner is not a whole number of four byte steps")
+
+	-- Room for a full screen of text to start with: 368 KB of instances, where the vertices and
+	-- indices of the same screen used to be a megabyte of them.
+	local instanceCapacity = QuadBatch.INSTANCE_SIZE * INITIAL_QUADS
 
 	-- Mapped, because a screen is written again every time it changes: without it each
 	-- write is a staged upload with a submit and a queue wait behind it, which measured
 	-- four tenths of a millisecond per repaint however small the screen was.
-	local quadVertex = self:getDevice():createBuffer({
-		size = vertexCapacity,
+	local quadInstance = self:getDevice():createBuffer({
+		size = instanceCapacity,
+		usages = { "VERTEX", "COPY_DST" },
+		mapped = true
+	})
+
+	-- The corners every quad of every frame is drawn as, and the indices that draw them: written
+	-- once, since neither of them is anything a quad says. The corners carry how many pixels a
+	-- coordinate of a quad is worth, which changes when the window does -- so a frame writes them
+	-- again, and a frame that does not is four corners left alone.
+	local quadCorner = self:getDevice():createBuffer({
+		size = ffi.sizeof("wl_corner") * QuadBatch.CORNERS,
 		usages = { "VERTEX", "COPY_DST" },
 		mapped = true
 	})
 	local quadIndex = self:getDevice():createBuffer({
-		size = indexCapacity,
+		size = ffi.sizeof("uint16_t") * 6,
 		usages = { "INDEX", "COPY_DST" },
 		mapped = true
 	})
+
+	self:getDevice().queue:writeBuffer(quadIndex, ffi.sizeof("uint16_t") * 6, QuadBatch.QUAD_INDICES)
 
 	-- What every context of this plugin shares: one device's textures, the fonts uploaded into
 	-- them, and the pictures an app draws. Made before the pipeline, because the layout a texture
@@ -350,7 +353,7 @@ function RenderPlugin:createContext(window, swapchain)
 		layout = quadLayout,
 		vertex = {
 			module = { type = shaderType, source = require("wonderland.shaders.main.vert." .. shaderExt) },
-			buffers = { vertexDescriptor }
+			buffers = { cornerDescriptor, instanceDescriptor }
 		},
 		fragment = {
 			module = { type = shaderType, source = require("wonderland.shaders.main.frag." .. shaderExt) },
@@ -401,11 +404,12 @@ function RenderPlugin:createContext(window, swapchain)
 	local ctx = {
 		window = window,
 		swapchain = swapchain,
-		vertexCapacity = vertexCapacity,
-		indexCapacity = indexCapacity,
+		instanceCapacity = instanceCapacity,
+		cornerCapacity = QuadBatch.CORNERS,
 		clear = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 },
 		quadPipeline = quadPipeline,
-		quadVertex = quadVertex,
+		quadInstance = quadInstance,
+		quadCorner = quadCorner,
 		quadIndex = quadIndex,
 		runCapacity = 0,
 		runCount = 0,
@@ -522,13 +526,18 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height, depthView
 	})
 	encoder:setPipeline(ctx.quadPipeline)
 	encoder:setViewport(0, 0, width, height)
-	encoder:setVertexBuffer(0, ctx.quadVertex)
-	encoder:setIndexBuffer(ctx.quadIndex, "u32")
+	encoder:setVertexBuffer(0, ctx.quadCorner)
+	encoder:setIndexBuffer(ctx.quadIndex, "u16")
 
 	-- A run at a time, in the order the walk wrote them: every quad of a run samples the picture
 	-- the run names, so the bind group changes between runs and not between quads -- and the
-	-- picture's own bands are read by the shader from the id each vertex carries. A line of text is
-	-- one run and one draw call, and a screen of pictures is as many as it has of them.
+	-- picture's own bands are read by the shader from the id each instance carries. A line of text
+	-- is one run and one draw call, and a screen of pictures is as many as it has of them.
+	--
+	-- What is drawn is the four corners every quad is, once for each of the run's instances, so the
+	-- instance buffer is bound at the run rather than the frame: the offset is what the corners of
+	-- this run's quads are written from. The backend with no `firstInstance` is why it is an offset
+	-- rather than a first instance, and an offset is what both of them take.
 	if ctx.runCount > 0 then
 		local manager = assert(self.sharedResources).textureManager
 		local runs = assert(ctx.quadRuns)
@@ -543,7 +552,8 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height, depthView
 				or ctx.quads
 
 			encoder:setBindGroup(0, manager:bindGroup(texture))
-			encoder:drawIndexed((after - first) * 6, 1, first * 6)
+			encoder:setVertexBuffer(1, ctx.quadInstance, first * QuadBatch.INSTANCE_SIZE)
+			encoder:drawIndexed(6, after - first, 0, 0, 0)
 		end
 	end
 
@@ -823,7 +833,8 @@ function RenderPlugin:destroy(window)
 
 	ctx.depthBufferView:destroy()
 	ctx.depthBuffer:destroy()
-	ctx.quadVertex:destroy()
+	ctx.quadInstance:destroy()
+	ctx.quadCorner:destroy()
 	ctx.quadIndex:destroy()
 	ctx.quadPipeline:destroy()
 

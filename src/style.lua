@@ -42,6 +42,7 @@ ffi.cdef [[
 		uint32_t texture, font;
 		double bright;    // a multiplier on the colours, 1.0 for not one
 		double radius;    // how round the corners are, in pixels, 0 for square ones
+		double blur;      // how far what it draws is spread, in pixels, 0 for not at all
 		int32_t shadowX, shadowY;  // where its shadow sits, and how far it fades out
 		int32_t shadowBlur;
 		uint8_t shadowR, shadowG, shadowB, shadowA;  // and what colour it is, 0 alpha for none
@@ -102,6 +103,7 @@ local P = {
 	fontWeight = 1 << 24,
 	fontItalic = 1 << 25,
 	ellipsis = 1 << 26,
+	blur = 1 << 27,
 }
 
 style.PRESENT = P
@@ -160,6 +162,7 @@ local PAINT = 1 << 21
 ---@field barA number
 ---@field bright number
 ---@field radius number
+---@field blur number
 ---@field shadowX number
 ---@field shadowY number
 ---@field shadowBlur number
@@ -231,6 +234,7 @@ local PAINT = 1 << 21
 ---@field bg wonderland.Color?
 ---@field bright number? # A multiplier on the colours: 1.0 as they are, 0 black
 ---@field radius number? # How round the corners of the box are, in pixels
+---@field blur number? # How far what the element draws is spread, in pixels, as `:blur` names it
 ---@field shadow wonderland.Shadow? # A shadow behind the box
 ---@field bar { width: number, least: number, color: wonderland.Color }? # A scroll bar
 ---@field bgImage Texture?
@@ -276,11 +280,14 @@ local Style = {}
 ---@field bg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
 ---@field fg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
 ---@field font fun(self: wonderland.StyleBuilder, name: string | Font, opts: { weight: number | string, italic: boolean }?): wonderland.StyleBuilder
+---@field weight fun(self: wonderland.StyleBuilder, value: number | string?): wonderland.StyleBuilder
+---@field italic fun(self: wonderland.StyleBuilder, value: boolean?): wonderland.StyleBuilder
 ---@field text fun(self: wonderland.StyleBuilder, value: string | number): wonderland.StyleBuilder
 ---@field ellipsis fun(self: wonderland.StyleBuilder): wonderland.StyleBuilder
 ---@field image fun(self: wonderland.StyleBuilder, texture: Texture, uv: wonderland.UV?): wonderland.StyleBuilder
 ---@field bright fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
 ---@field radius fun(self: wonderland.StyleBuilder, value: number): wonderland.StyleBuilder
+---@field blur fun(self: wonderland.StyleBuilder, value: number | string?): wonderland.StyleBuilder
 ---@field shadow fun(self: wonderland.StyleBuilder, x: number, y: number, blur: number, color: string | wonderland.Color?): wonderland.StyleBuilder
 ---@field bar fun(self: wonderland.StyleBuilder, width: number, least: number, color: string | wonderland.Color): wonderland.StyleBuilder
 local methods = {}
@@ -338,6 +345,38 @@ local function toSides(all, second, third, fourth)
 	end
 
 	return { top = all, right = second, bottom = third, left = fourth }
+end
+
+-- How far a blur spreads, by the names a stylesheet gives them: the pixels a stylesheet's own
+-- `blur-*` classes come to, so a screen written in these is the screen it is written as.
+local BLUR_SCALES = {
+	none = 0,
+	["2xs"] = 2,
+	xs = 4,
+	sm = 8,
+	md = 12,
+	lg = 16,
+	xl = 24,
+	["2xl"] = 40,
+	["3xl"] = 64,
+}
+
+--- What a blur is said as: one of the names above, or a number of pixels. Naming none is the blur a
+--- stylesheet calls no name at all -- eight pixels, which reads as a blur without being a smudge.
+---@param value number | string | nil
+---@return number
+local function toBlur(value)
+	if value == nil then
+		return BLUR_SCALES.sm
+	end
+
+	if type(value) == "string" then
+		return BLUR_SCALES[value:lower()] or assert(tonumber(value), "Not a blur: " .. value)
+	end
+
+	assert(type(value) == "number", "Not a blur: " .. tostring(value))
+
+	return value
 end
 
 ---@return wonderland.StyleBuilder
@@ -550,6 +589,35 @@ function methods:radius(value)
 	return self
 end
 
+--- How far what the element draws is spread, in pixels: a box whose edge fades out into what is
+--- behind it, a picture whose pixels are mixed with the ones beside them, and text gone soft.
+---
+---   sty():blur("xl")     -- twenty four pixels
+---   sty():blur(3)
+---   sty():blur("none")   -- and none at all, for an element inside a blurred one
+---
+--- The names are the ones a stylesheet's `blur-*` classes use -- `2xs`, `xs`, `sm`, `md`, `lg`,
+--- `xl`, `2xl`, `3xl`, for two pixels up to sixty four -- and a call that names none is `sm`, which
+--- is eight. A blur this wide is what a stylesheet calls its own blur with no name after it.
+---
+--- It costs what it is asked for and nothing else: an element that names no blur is drawn exactly as
+--- it was, and one that does has its edge faded over the blur and, where there is a picture or a
+--- line of text in it, a dozen samples of that picture taken per pixel rather than one. It is a
+--- thing the element *does* rather than a thing it has, so everything inside it is spread by it too
+--- -- what a filter does to what it is put on in a stylesheet -- and an element that wants out of
+--- one says `:blur("none")`.
+---
+--- A letter is a picture of its own rather than part of one picture of the line, so a blurred line
+--- is every letter of it spread on its own: the text of one goes soft and faint, which is what a
+--- large blur leaves of text in a stylesheet too, but it does not run into the letters beside it.
+---@param value number | string?
+---@return wonderland.StyleBuilder
+function methods:blur(value)
+	self.values.blur = toBlur(value)
+	self.version = self.version + 1
+	return self
+end
+
 --- A shadow behind the box: where it sits, how far it fades out, and what colour it is. The
 --- offset is in pixels, and positive goes down and right, the way the box's own `offset`
 --- does. `blur` is how far the edge of it fades -- nought is a shadow with a hard edge -- and
@@ -609,6 +677,24 @@ local FONT_WEIGHTS = {
 	black = 900,
 }
 
+--- What a weight is said as: one of the names above -- the ones a stylesheet is written in -- or the
+--- number itself. Naming none is bold, which is the weight text is usually made heavy at.
+---@param value number | string | nil
+---@return number
+local function toWeight(value)
+	if value == nil then
+		return FONT_WEIGHTS.bold
+	end
+
+	if type(value) == "string" then
+		return FONT_WEIGHTS[value:lower()] or assert(tonumber(value), "Not a font weight: " .. value)
+	end
+
+	assert(type(value) == "number", "Not a font weight: " .. tostring(value))
+
+	return value
+end
+
 --- The family text inside this element is drawn in, and how that family is drawn.
 ---
 ---   sty():font("Inter")
@@ -618,7 +704,9 @@ local FONT_WEIGHTS = {
 --- A name this machine does not have is drawn in the machine's own sans rather than in nothing:
 --- see `wonderland.font.Registry`, which is what knows the names, and `wonderland.FontSpec`.
 --- What it changes is one thing about the text inside the element: the size, the weight and the
---- slant stay what the nearest element above it that named them said.
+--- slant stay what the nearest element above it that named them said. The weight and the slant are
+--- also calls of their own -- `:weight` and `:italic` -- for a style that says nothing about a
+--- family: a line made bold in the family it was already in is the common case.
 ---@param name string | Font
 ---@param opts { weight: number | string, italic: boolean }?
 ---@return wonderland.StyleBuilder
@@ -633,8 +721,7 @@ function methods:font(name, opts)
 		local weight = opts.weight
 
 		if weight ~= nil then
-			self.values.fontWeight = type(weight) == "string" and (FONT_WEIGHTS[weight:lower()]
-				or assert(tonumber(weight), "Not a font weight: " .. weight)) or weight
+			self.values.fontWeight = toWeight(weight)
 		end
 
 		if opts.italic ~= nil then
@@ -642,6 +729,37 @@ function methods:font(name, opts)
 		end
 	end
 
+	self.version = self.version + 1
+	return self
+end
+
+--- How heavy the text inside this element is drawn: a name off the same list a stylesheet uses --
+--- thin, extraLight, light, normal, medium, semiBold, bold, extraBold, black -- or the number itself.
+---
+---   sty():weight()
+---   sty():weight("semibold")
+---   sty():weight(600)
+---
+--- It is a call of its own rather than an option of `:font` because the two are two things: a family
+--- is often named after a weight that is not the one it is drawn at, so a family and a weight cannot
+--- be told apart in one argument. What it changes is the weight alone, which is inherited like the
+--- family and the size: naming it makes a line heavier without saying which family it is in.
+---@param value number | string?
+---@return wonderland.StyleBuilder
+function methods:weight(value)
+	self.values.fontWeight = toWeight(value)
+	self.version = self.version + 1
+	return self
+end
+
+--- Text inside this element is set on a slant, which is a face the family it is drawn in is asked
+--- for: a family with an italic face is drawn in that one, and a family with none at all is drawn
+--- upright, since a slant is a face rather than something done to one. `:italic(false)` is how an
+--- element inside a slanted one is set upright again.
+---@param value boolean?
+---@return wonderland.StyleBuilder
+function methods:italic(value)
+	self.values.fontItalic = value ?? true
 	self.version = self.version + 1
 	return self
 end
@@ -929,6 +1047,15 @@ local function fill(fields)
 		scratch.paint = 1
 		flags = flags + P.texture
 
+		-- A picture with no colour named over it is drawn as it comes, which is what white
+		-- multiplies it by. Written here rather than left for the quad pass to work out from the
+		-- numbers, so that a brightness -- a multiplier over the colours a node ends up with --
+		-- reaches a picture the way it reaches any other colour, and so that a box that named
+		-- black is drawn black rather than taken for a box that named nothing.
+		if bg == nil then
+			scratch.bgR, scratch.bgG, scratch.bgB, scratch.bgA = 1.0, 1.0, 1.0, 1.0
+		end
+
 		local uv = fields.bgImageUV
 		scratch.u0, scratch.v0 = uv and uv.u0 or 0, uv and uv.v0 or 0
 		scratch.u1, scratch.v1 = uv and uv.u1 or 1, uv and uv.v1 or 1
@@ -965,6 +1092,14 @@ local function fill(fields)
 
 	if fields.radius ~= nil then
 		flags = flags + P.radius
+	end
+
+	-- A style that says nothing about a blur says nothing rather than none: an element inside a
+	-- blurred one is spread by the blur it inherits, and one that wants out of it says nought.
+	scratch.blur = fields.blur or 0
+
+	if fields.blur ~= nil then
+		flags = flags + P.blur
 	end
 
 	-- A shadow is behind the box, so it is nothing at all until a style names one: the colour

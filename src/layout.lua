@@ -61,6 +61,7 @@ ffi.cdef [[
 		uint32_t texture, font;        // the texture it paints, and the font it is drawn in
 		double bright;                 // a multiplier on the colours, 1.0 for not one
 		double radius;                 // how round its corners are, in pixels, 0 for square
+		double blur;                   // how far what it draws is spread, in pixels, 0 for not at all
 		int32_t shadowX, shadowY;      // where its shadow sits, how far it fades out, and
 		int32_t shadowBlur;
 		uint8_t shadowR, shadowG, shadowB, shadowA;  // what colour it is, 0 alpha for none
@@ -118,7 +119,7 @@ ffi.cdef [[
 -- memory that does not line up, which shows up as a screen that draws nonsense. Checked once, at
 -- load, so it is the library that refuses rather than a frame that comes out wrong.
 for _, field in ipairs({ "wantWidth", "wantHeight", "bgR", "borderR", "u0", "gap", "zIndex", "paddingTop",
-	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "shadowX",
+	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "blur", "shadowX",
 	"shadowBlur", "shadowA", "widthUnit", "paint", "fontFamily", "fontSize", "fontWeight", "fontItalic",
 	"ellipsis" }) do
 	assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
@@ -190,6 +191,7 @@ local layout = {}
 ---@field styleFlags number
 ---@field bright number
 ---@field radius number
+---@field blur number
 ---@field shadowX number
 ---@field shadowY number
 ---@field shadowBlur number
@@ -397,6 +399,10 @@ local function applyOver(given, node)
 		node.radius = given.radius
 	end
 
+	if bit.band(present, PRESENT.blur) ~= 0 then
+		node.blur = given.blur
+	end
+
 	if bit.band(present, PRESENT.shadow) ~= 0 then
 		node.shadowX, node.shadowY, node.shadowBlur = given.shadowX, given.shadowY, given.shadowBlur
 		node.shadowR, node.shadowG = given.shadowR, given.shadowG
@@ -407,6 +413,10 @@ end
 --- What a node is drawn with, lit differently: a multiplier over the colours it already has, so
 --- a hover style can say "brighter" instead of naming a second set of colours that has to be kept
 --- in step with the first. Transparency is not a colour and is left alone.
+---
+--- What it is given is everything the elements above it said as well as its own, because a colour
+--- is lit by every filter over it: a card that dims under the pointer dims the text and the shadows
+--- inside it too, which is what putting a brightness on a box means.
 ---@param node wonderland.Node
 local function lighten(node)
 	local bright = node.bright
@@ -416,15 +426,23 @@ local function lighten(node)
 	node.borderR, node.borderG = math.min(1.0, node.borderR * bright), math.min(1.0, node.borderG * bright)
 	node.borderB = math.min(1.0, node.borderB * bright)
 
-	-- A text colour is bytes, so it is rounded to one and stops at white.
+	-- A text colour and a shadow colour are bytes, so they are rounded to one and stop at white.
 	node.fgR = math.min(255, math.floor(node.fgR * bright + 0.5))
 	node.fgG = math.min(255, math.floor(node.fgG * bright + 0.5))
 	node.fgB = math.min(255, math.floor(node.fgB * bright + 0.5))
+	node.shadowR = math.min(255, math.floor(node.shadowR * bright + 0.5))
+	node.shadowG = math.min(255, math.floor(node.shadowG * bright + 0.5))
+	node.shadowB = math.min(255, math.floor(node.shadowB * bright + 0.5))
 end
 
+--- Builds one node. What the elements above it said about the two things that carry further than
+--- the box that said them -- how brightly it is lit, and how far what it draws is spread -- comes in
+--- with it, because neither is a thing a box can answer on its own.
 ---@param element wonderland.Element
+---@param bright number? # How brightly the elements above this one are lit, 1.0 for not at all
+---@param blur number? # And how far what they draw is spread, in pixels, 0 for not at all
 ---@return number # The node the element became
-function Screen:add(element)
+function Screen:add(element, bright, blur)
 	self.count = self.count + 1
 	self:reserve(self.count)
 
@@ -493,10 +511,27 @@ function Screen:add(element)
 		applyOver(worn, node)
 	end
 
-	-- Brightness is the one thing that is not a field of the frame's own: it is applied to the
-	-- colours the node ends up with, whichever style said it, and the children inherit the
-	-- result because they are built from the node after this.
-	if node.bright ~= 1.0 then
+	-- A blur is what the nearest element that named one says, nought included: an element inside a
+	-- blurred one is spread by it, and one that wants out of it says `:blur("none")`. There is no
+	-- multiplying two blurs together, so it is taken whole rather than carried like a brightness.
+	local spread = nil
+
+	if worn and bit.band(worn.flags, PRESENT.blur) ~= 0 then
+		spread = worn.blur
+	elseif bit.band(given.flags, PRESENT.blur) ~= 0 then
+		spread = given.blur
+	end
+
+	node.blur = spread ?? (blur or 0)
+
+	-- Brightness is not a field of the frame's own: it is applied to the colours the node ends up
+	-- with, whichever style said it, over and above what the elements above it said -- a brightness
+	-- is a filter, and a filter over a filtered box filters it again. The product is what the node
+	-- keeps, so that its children carry it further.
+	bright = (node.bright or 1.0) * (bright or 1.0)
+	node.bright = bright
+
+	if bright ~= 1.0 then
 		lighten(node)
 	end
 
@@ -533,9 +568,11 @@ end
 ---@param fgB number?
 ---@param fgA number?
 ---@param font number? # And the font they draw it with
+---@param bright number? # And how brightly they are lit, which a brightness under them adds to
+---@param blur number? # And how far they spread what they draw, which a blur under them replaces
 ---@return number # The node the element became
-function Screen:build(element, fgR, fgG, fgB, fgA, font)
-	local node = self:add(element)
+function Screen:build(element, fgR, fgG, fgB, fgA, font, bright, blur)
+	local node = self:add(element, bright, blur)
 	local entry = self.nodes[node - 1]
 
 	-- Text properties are inherited; everything else is not, because a background belongs
@@ -591,7 +628,8 @@ function Screen:build(element, fgR, fgG, fgB, fgA, font)
 
 	for index = 1, count do
 		local childElement = pointers[child]
-		local childNode = self:build(childElement, entry.fgR, entry.fgG, entry.fgB, entry.fgA, entry.font)
+		local childNode = self:build(childElement, entry.fgR, entry.fgG, entry.fgB, entry.fgA, entry.font,
+			entry.bright, entry.blur)
 
 		self.childIndices[firstChild + index - 2] = childNode
 		child = childElement.nextSibling

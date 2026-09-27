@@ -216,8 +216,25 @@ local PAST_THE_LINE = 1 << 24
 ---@param radius number? # How round the box's corners are, in pixels, nothing for square ones
 ---@param band number? # How sharp the edge of it is, one pixel either side by default
 ---@param grow number? # How far past the box the quad is drawn: a shadow is its own blur
+---@param blur number? # How far what the box draws is spread, in pixels, nothing for not at all
 local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, right, bottom, z, r, g, b, a,
-	texture, u0, v0, u1, v1, radius, band, grow, own)
+	texture, u0, v0, u1, v1, radius, band, grow, own, blur)
+	if blur ~= nil and blur > 0 then
+		-- What a blur spreads has to be drawn somewhere, so the quad is grown by the room the taps
+		-- read in: twice the blur, which is as far as the furthest of them reaches.
+		grow = blur * 2
+
+		-- A box with round corners is cut where its corners are, and that cut is what fades its edge
+		-- -- spread over the blur rather than over the one pixel it is antialiased by. Everything
+		-- else is its own picture, and what the taps read past the part of it that is there is what
+		-- fades its edge out.
+		if radius ~= nil and radius > 0 then
+			band = 1 / (2 * blur)
+		else
+			band = 0
+		end
+	end
+
 	-- A quad that is drawn past its box is one whose edge is spread out, so what is drawn is the
 	-- box and the space the spreading needs; the box itself is what the corner arithmetic is about.
 	local drawnLeft, drawnTop = left - (grow or 0), top - (grow or 0)
@@ -244,7 +261,8 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 				toNDC(right, windowWidth),
 				-toNDC(bottom, windowHeight),
 				band,
-				own
+				own,
+				blur
 			)
 		else
 			batch:quad(
@@ -275,6 +293,16 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 	local du = (u1 - u0) / (drawnRight - drawnLeft)
 	local dv = (v1 - v0) / (drawnBottom - drawnTop)
 
+	-- The part of the picture this cut of the quad shows. A blurred quad is handed the whole of the
+	-- part of the picture the box is instead, because the batch maps that across the box itself:
+	-- the picture stays where it is and the room the taps read in is what is not there of it.
+	local shownU0, shownV0 = u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop)
+	local shownU1, shownV1 = u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop)
+
+	if blur ~= nil and blur > 0 then
+		shownU0, shownV0, shownU1, shownV1 = u0, v0, u1, v1
+	end
+
 	-- What is drawn is what is inside the clip but the corners are the corners of the whole box: a
 	-- box cut down to a sliver by the pane it is in is still a box with round corners, and the
 	-- corners of the sliver are not corners of it.
@@ -287,15 +315,15 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 			z,
 			r, g, b, a,
 			texture,
-			u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop),
-			u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop),
+			shownU0, shownV0, shownU1, shownV1,
 			radius or 0,
 			toNDC(left, windowWidth),
 			-toNDC(top, windowHeight),
 			toNDC(right, windowWidth),
 			-toNDC(bottom, windowHeight),
 			band,
-			own
+			own,
+			blur
 		)
 
 		return
@@ -309,8 +337,7 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		z,
 		r, g, b, a,
 		texture,
-		u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop),
-		u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop),
+		shownU0, shownV0, shownU1, shownV1,
 		own
 	)
 end
@@ -327,13 +354,14 @@ end
 ---@param z number
 ---@param windowWidth number
 ---@param windowHeight number
-local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowWidth, windowHeight)
+---@param blur number? # How far the line is spread, in pixels, which is the blur of the box it is on
+local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowWidth, windowHeight, blur)
 	if bw <= 0 or bh <= 0 then
 		return
 	end
 
 	clippedQuad(batch, clip, windowWidth, windowHeight, bx, by, bx + bw, by + bh, convertZ(z + 1), r, g, b, a, 0,
-		0, 0, 1, 1)
+		0, 0, 1, 1, nil, nil, nil, nil, blur)
 end
 
 --- A line is drawn from the run it measured into, which is where its glyphs are. A run of
@@ -400,10 +428,12 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 
 			-- A glyph that is a picture of its own -- an emoji -- is drawn as the picture rather
 			-- than through the text's colour: what the colour is of it is how opaque the element is.
+			-- A line inside a blurred element is drawn with every glyph of it spread by the same
+			-- blur, which is what makes the text of one soft rather than its box alone.
 			clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, y + glyph.y,
 				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, gr, gg, gb,
 				node.fgA / 255, picture, glyph.u0, glyph.v0, glyph.u1, glyph.v1, nil, nil, nil,
-				glyph.own)
+				glyph.own, node.blur)
 		end
 
 		if selecting then
@@ -802,14 +832,12 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 	end
 
 	if node.visible ~= 0 and node.paint ~= 0 then
-		local r, g, b, a = node.bgR, node.bgG, node.bgB, node.bgA
-
-		if node.texture ~= 0 and r == 0 and g == 0 and b == 0 then
-			r, g, b, a = WHITE_R, WHITE_G, WHITE_B, WHITE_A
-		end
-
+		-- The colours the node came out with, whatever said them: a box with a picture and no colour
+		-- of its own was given white by its style, and one that named a colour of its own is drawn in
+		-- it however dark that colour is.
 		clippedQuad(batch, clip, windowWidth, windowHeight, x, y, x + node.width, y + node.height,
-			convertZ(z), r, g, b, a, node.texture, node.u0, node.v0, node.u1, node.v1, node.radius)
+			convertZ(z), node.bgR, node.bgG, node.bgB, node.bgA, node.texture, node.u0, node.v0, node.u1,
+			node.v1, node.radius, nil, nil, nil, node.blur)
 	end
 
 	-- What the element draws itself goes where its own text goes: over what is under it -- the
@@ -855,21 +883,23 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		local width, height = node.width, node.height
 
 		if node.borderTop > 0 then
-			addBorderQuad(batch, clip, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight)
+			addBorderQuad(batch, clip, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight,
+				node.blur)
 		end
 
 		if node.borderBottom > 0 then
 			addBorderQuad(batch, clip, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
-				windowWidth, windowHeight)
+				windowWidth, windowHeight, node.blur)
 		end
 
 		if node.borderLeft > 0 then
-			addBorderQuad(batch, clip, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight)
+			addBorderQuad(batch, clip, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight,
+				node.blur)
 		end
 
 		if node.borderRight > 0 then
 			addBorderQuad(batch, clip, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
-				windowWidth, windowHeight)
+				windowWidth, windowHeight, node.blur)
 		end
 	end
 
