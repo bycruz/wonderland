@@ -25,14 +25,15 @@ ffi.cdef [[
 	int memcmp(const void *a, const void *b, size_t n);
 
 	// A style, as the arena holds it. It is the same fields the layout reads, in the
-	// arithmetic it works in: a colour the layout rounds to bytes is bytes here, one it
-	// hands to the gpu as it is stays a double, and a size is a double because a fraction
-	// in a float32 is not the fraction.
+	// arithmetic it works in: a colour and the part of a texture are what the gpu is given, so they
+	// are kept the way it is given them -- a byte a channel, a 65535th a corner -- and a size or a
+	// share of one is a double, because a fraction in a float32 is not the fraction: 0.7 becomes
+	// 0.69999999, which is 1.4e-5 of a 1200 pixel screen and enough to round a position wrong.
 	typedef struct {
 		double wantWidth, wantHeight;
-		double bgR, bgG, bgB, bgA;
-		double borderR, borderG, borderB, borderA;
-		double u0, v0, u1, v1;
+		uint8_t bgR, bgG, bgB, bgA;      // what it is painted with, a byte a channel
+		uint8_t borderR, borderG, borderB, borderA;
+		uint16_t u0, v0, u1, v1;         // and the part of its texture to use, of 65535
 		int32_t gap, zIndex;
 		int32_t paddingTop, paddingRight, paddingBottom, paddingLeft;
 		int32_t marginTop, marginRight, marginBottom, marginLeft;
@@ -40,9 +41,9 @@ ffi.cdef [[
 		int32_t borderTop, borderRight, borderBottom, borderLeft;
 		uint32_t fgR, fgG, fgB, fgA;
 		uint32_t texture, font;
-		double bright;    // a multiplier on the colours, 1.0 for not one
-		double radius;    // how round the corners are, in pixels, 0 for square ones
-		double blur;      // how far what it draws is spread, in pixels, 0 for not at all
+		float bright;     // a multiplier on the colours, 1.0 for not one
+		float radius;     // how round the corners are, in pixels, 0 for square ones
+		float blur;       // how far what it draws is spread, in pixels, 0 for not at all
 		int32_t shadowX, shadowY;  // where its shadow sits, and how far it fades out
 		int32_t shadowBlur;
 		uint8_t shadowR, shadowG, shadowB, shadowA;  // and what colour it is, 0 alpha for none
@@ -53,7 +54,7 @@ ffi.cdef [[
 		// its contents inherit: the family is a handle into the table of family names, and a size,
 		// a weight or a slant of nought is one the element above it says rather than none.
 		uint32_t fontFamily;
-		double fontSize;
+		float fontSize;
 		uint32_t fontWeight;
 		uint8_t fontItalic, ellipsis;
 
@@ -61,7 +62,7 @@ ffi.cdef [[
 		// copies a style into itself in one go. Everything below is only ever looked at when a
 		// box scrolls, which is why it is kept out of that copy -- and out of the nodes.
 		int32_t barWidth, barLeast;
-		double barR, barG, barB, barA;
+		uint8_t barR, barG, barB, barA;
 	} wl_style;
 ]]
 
@@ -345,6 +346,26 @@ local function toSides(all, second, third, fourth)
 	end
 
 	return { top = all, right = second, bottom = third, left = fourth }
+end
+
+-- A colour, and a corner of a picture, as the narrow numbers the gpu is given them as: a byte a
+-- channel and a 65535th of a picture. They are narrowed here rather than per node, so that what a
+-- node carries, what a style slot carries and what a frame writes are the same numbers -- and a
+-- screen of a thousand boxes of one colour is a thousand copies of four bytes rather than of
+-- thirty two.
+--
+-- The clamp is what keeps a colour that is not a fraction of one -- nought to one is what a caller
+-- hands over -- from wrapping round to the far end of the byte it is in.
+---@param value number
+---@return number
+local function toByte(value)
+	return math.min(255, math.max(0, math.floor(value * 255 + 0.5)))
+end
+
+---@param value number
+---@return number
+local function toUnit(value)
+	return math.min(65535, math.max(0, math.floor(value * 65535 + 0.5)))
 end
 
 -- How far a blur spreads, by the names a stylesheet gives them: the pixels a stylesheet's own
@@ -1014,8 +1035,8 @@ local function fill(fields)
 			scratch.borderTop = top.width or 0
 
 			if top.color then
-				scratch.borderR, scratch.borderG = top.color.r, top.color.g
-				scratch.borderB, scratch.borderA = top.color.b, top.color.a
+				scratch.borderR, scratch.borderG = toByte(top.color.r), toByte(top.color.g)
+				scratch.borderB, scratch.borderA = toByte(top.color.b), toByte(top.color.a)
 			end
 		end
 
@@ -1026,7 +1047,8 @@ local function fill(fields)
 
 	local bg = fields.bg
 	if bg then
-		scratch.bgR, scratch.bgG, scratch.bgB, scratch.bgA = bg.r, bg.g, bg.b, bg.a
+		scratch.bgR, scratch.bgG = toByte(bg.r), toByte(bg.g)
+		scratch.bgB, scratch.bgA = toByte(bg.b), toByte(bg.a)
 		scratch.paint = 1
 		flags = flags + P.bg
 	end
@@ -1034,11 +1056,8 @@ local function fill(fields)
 	local fg = fields.fg
 	if fg then
 		flags = flags + P.fg
-		-- Rounded here rather than per node: the gpu takes a text colour as bytes.
-		scratch.fgR = math.floor(fg.r * 255 + 0.5)
-		scratch.fgG = math.floor(fg.g * 255 + 0.5)
-		scratch.fgB = math.floor(fg.b * 255 + 0.5)
-		scratch.fgA = math.floor(fg.a * 255 + 0.5)
+		scratch.fgR, scratch.fgG = toByte(fg.r), toByte(fg.g)
+		scratch.fgB, scratch.fgA = toByte(fg.b), toByte(fg.a)
 	end
 
 	local image = fields.bgImage
@@ -1053,14 +1072,14 @@ local function fill(fields)
 		-- reaches a picture the way it reaches any other colour, and so that a box that named
 		-- black is drawn black rather than taken for a box that named nothing.
 		if bg == nil then
-			scratch.bgR, scratch.bgG, scratch.bgB, scratch.bgA = 1.0, 1.0, 1.0, 1.0
+			scratch.bgR, scratch.bgG, scratch.bgB, scratch.bgA = 255, 255, 255, 255
 		end
 
 		local uv = fields.bgImageUV
-		scratch.u0, scratch.v0 = uv and uv.u0 or 0, uv and uv.v0 or 0
-		scratch.u1, scratch.v1 = uv and uv.u1 or 1, uv and uv.v1 or 1
+		scratch.u0, scratch.v0 = toUnit(uv and uv.u0 or 0), toUnit(uv and uv.v0 or 0)
+		scratch.u1, scratch.v1 = toUnit(uv and uv.u1 or 1), toUnit(uv and uv.v1 or 1)
 	else
-		scratch.u0, scratch.v0, scratch.u1, scratch.v1 = 0, 0, 1, 1
+		scratch.u0, scratch.v0, scratch.u1, scratch.v1 = 0, 0, 65535, 65535
 	end
 
 	if fields.font ~= nil then
@@ -1073,8 +1092,8 @@ local function fill(fields)
 		local color = assert(bar.color)
 
 		scratch.barWidth, scratch.barLeast = bar.width, bar.least
-		scratch.barR, scratch.barG = color.r, color.g
-		scratch.barB, scratch.barA = color.b, color.a
+		scratch.barR, scratch.barG = toByte(color.r), toByte(color.g)
+		scratch.barB, scratch.barA = toByte(color.b), toByte(color.a)
 		flags = flags + P.bar
 	end
 

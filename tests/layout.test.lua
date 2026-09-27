@@ -42,7 +42,7 @@ test.it("a style kept for the pointer says only what it names", function()
 	local node = solve(button, 400, 300):node(1)
 	test.equal(node.width, 200, "the size is what the style it stood in for said")
 	test.equal(node.height, 44)
-	test.equal(node.bgR, 1.0, "and the background is what it said itself")
+	test.equal(node.bgR, 255, "and the background is what it said itself")
 	test.equal(node.bgG, 0.0)
 	test.equal(node.bgB, 0.0)
 end)
@@ -57,7 +57,7 @@ test.it("a bright style lights the colours the element already has", function()
 	local node = solve(button, 400, 300):node(1)
 	test.equal(node.width, 200, "the size is what the style it stood in for said")
 	test.equal(node.height, 44)
-	test.equal(node.bgR, 128 / 255, "and the background is twice as bright")
+	test.equal(node.bgR, 128, "and the background is twice as bright")
 	test.equal(node.fgA, 0, "with nothing said about a colour it did not have")
 end)
 
@@ -84,8 +84,8 @@ end)
 test.it("brightness stops at white and leaves transparency alone", function()
 	local lit = solve(div():style(sty():bg("#808080"):fg("#404040"):bright(4)), 400, 300):node(1)
 
-	test.equal(lit.bgR, 1.0, "four times a half is white, and not more than white")
-	test.equal(lit.bgA, 1.0, "alpha is not a colour")
+	test.equal(lit.bgR, 255, "four times a half is white, and not more than white")
+	test.equal(lit.bgA, 255, "alpha is not a colour")
 	test.equal(lit.fgR, 255, "a text colour stops at white too")
 end)
 
@@ -98,9 +98,9 @@ test.it("a bright style below one darkens the colours the element already has", 
 	wonderlandElement.pressing(button, true)
 
 	local node = solve(button, 400, 300):node(1)
-	test.equal(node.bgR, 64 / 255, "the background is half as bright as it was")
+	test.equal(node.bgR, 64, "the background is half as bright as it was")
 	test.equal(node.fgR, 128, "and so is a text colour")
-	test.equal(node.bgA, 1.0, "with transparency still left alone")
+	test.equal(node.bgA, 255, "with transparency still left alone")
 end)
 
 -- A brightness is a filter over the box it is put on rather than a colour of that box, so what is
@@ -115,7 +115,7 @@ test.it("a brightness reaches the elements inside the box it is on", function()
 
 	test.equal(screen:node(1).bright, 0.5, "the box is lit by what it says")
 	test.equal(inner.bright, 0.5, "and so is what is inside it")
-	test.equal(inner.bgR, 128 / 255 * 0.5, "which is a background half as bright")
+	test.equal(inner.bgR, 64, "which is a background half as bright")
 	test.equal(inner.fgR, 128, "and a text colour with it")
 end)
 
@@ -126,7 +126,7 @@ test.it("a brightness inside a brightness is the two multiplied", function()
 
 	local inner = child(solve(card, 400, 300), 1)
 	test.equal(inner.bright, 0.25, "a filter over a filtered box filters it again")
-	test.equal(inner.bgR, 128 / 255 * 0.25, "so a colour inside both comes out a quarter as bright")
+	test.equal(inner.bgR, 32, "so a colour inside both comes out a quarter as bright")
 end)
 
 -- A blur is a thing the element does rather than a thing it has, so what is inside it is spread by
@@ -145,6 +145,75 @@ test.it("a blur is taken by the elements inside it, unless one says otherwise", 
 	test.equal(child(screen, 1, 1).blur, 6, "and so is what is inside it that says nothing")
 	test.equal(child(screen, 1, 2).blur, 0, "an element that says none is drawn sharp")
 	test.equal(child(screen, 1, 3).blur, 2, "and one that names its own is spread by that alone")
+end)
+
+-- A frame is compared with the last one through what it was built from -- the styles in play, what
+-- the element says, and the window it was solved in -- rather than through the nodes: the nodes are
+-- mostly a copy of a style a slot already names, and the frame the gpu was given is kept as the
+-- small thing rather than the big one.
+--
+-- What follows is every kind of change such a comparison has to notice. A frame that came out the
+-- same is not one; a window of another size is, because every share of the space follows from it.
+test.it("a frame that came out the same is not a change", function()
+	local screen = layout.new()
+	local button = div():style(sty():size(200, 44):bg("#426bd9"))
+
+	---@param width number
+	---@param height number
+	---@return boolean changed
+	local function frame(width, height)
+		screen:fromElement(button)
+		screen:solve(width, height)
+
+		return screen.changed
+	end
+
+	test.truthy(frame(400, 300), "a screen with no frame to compare against is a change")
+	test.falsy(frame(400, 300), "and the same screen again is not")
+	test.falsy(frame(400, 300), "or however many times it is solved")
+	test.truthy(frame(401, 300), "a window of another size is, since every share of it is")
+	test.truthy(frame(400, 300), "and so is going back to the size of the frame before that")
+end)
+
+test.it("an element the pointer makes a different box is a change", function()
+	local screen = layout.new()
+	local button = div():style(sty():size(200, 44):bg("#426bd9")):hover(sty():bg("#ff0000"))
+
+	---@return boolean changed
+	local function frame()
+		screen:fromElement(button)
+		screen:solve(400, 300)
+
+		return screen.changed
+	end
+
+	frame()
+	test.falsy(frame(), "a button nobody is pointing at is the same frame twice")
+
+	wonderlandElement.hovering(button, true)
+	test.truthy(frame(), "and one the pointer is over is another frame")
+	test.falsy(frame(), "which is the same twice as well")
+end)
+
+test.it("a box scrolled to somewhere else is a change", function()
+	local screen = layout.new()
+	local list = div():style(sty():size(200, 100)):scroll(0):children(
+		div():style(sty():size(200, 400))
+	)
+
+	---@return boolean changed
+	local function frame()
+		screen:fromElement(list)
+		screen:solve(400, 300)
+
+		return screen.changed
+	end
+
+	frame()
+	test.falsy(frame(), "a list that has not moved is the same frame twice")
+
+	list:scroll(120)
+	test.truthy(frame(), "and a list scrolled down is another frame")
 end)
 
 -- Where the corners are round is what a box says about itself, so a style that stands in for it
@@ -181,7 +250,7 @@ test.it("a pressed style is used in place of a hovered one", function()
 
 	local node = solve(button, 400, 300):node(1)
 	test.equal(node.width, 200)
-	test.equal(node.bgB, 1.0, "held down, the active style is the one used")
+	test.equal(node.bgB, 255, "held down, the active style is the one used")
 	test.equal(node.bgR, 0.0)
 end)
 
@@ -445,6 +514,6 @@ test.it("a text property is inherited and a background is not", function()
 
 	test.equal(inner.fgR, 255, "the colour is taken from above")
 	test.equal(outer.fgR, 255)
-	test.equal(inner.bgB, 1.0, "and a background belongs to the box that has it")
+	test.equal(inner.bgB, 255, "and a background belongs to the box that has it")
 	test.equal(outer.paint, 0, "so the one that has none paints nothing")
 end)

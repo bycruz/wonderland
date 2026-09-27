@@ -836,8 +836,9 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		-- of its own was given white by its style, and one that named a colour of its own is drawn in
 		-- it however dark that colour is.
 		clippedQuad(batch, clip, windowWidth, windowHeight, x, y, x + node.width, y + node.height,
-			convertZ(z), node.bgR, node.bgG, node.bgB, node.bgA, node.texture, node.u0, node.v0, node.u1,
-			node.v1, node.radius, nil, nil, nil, node.blur)
+			convertZ(z), node.bgR / 255, node.bgG / 255, node.bgB / 255, node.bgA / 255, node.texture,
+			node.u0 / 65535, node.v0 / 65535, node.u1 / 65535, node.v1 / 65535, node.radius, nil, nil,
+			nil, node.blur)
 	end
 
 	-- What the element draws itself goes where its own text goes: over what is under it -- the
@@ -879,7 +880,7 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 
 	-- Borders come after the box they are on, so they land on top of it.
 	if node.visible ~= 0 then
-		local r, g, b, a = node.borderR, node.borderG, node.borderB, node.borderA
+		local r, g, b, a = node.borderR / 255, node.borderG / 255, node.borderB / 255, node.borderA / 255
 		local width, height = node.width, node.height
 
 		if node.borderTop > 0 then
@@ -959,9 +960,9 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		-- Drawn inside its own pane rather than the clip it is under, so a bar cannot come out of
 		-- the box it belongs to and over whatever is beside it.
 		clippedQuad(batch, below, windowWidth, windowHeight, left, y, left + bar.width, y + node.height,
-			convertZ(z), bar.r, bar.g, bar.b, bar.a * 0.25, 0, 0, 0, 1, 1)
+			convertZ(z), bar.r / 255, bar.g / 255, bar.b / 255, bar.a / 255 * 0.25, 0, 0, 0, 1, 1)
 		clippedQuad(batch, below, windowWidth, windowHeight, left, top, left + bar.width, top + thumb,
-			convertZ(z + 1), bar.r, bar.g, bar.b, bar.a, 0, 0, 0, 1, 1)
+			convertZ(z + 1), bar.r / 255, bar.g / 255, bar.b / 255, bar.a / 255, 0, 0, 0, 1, 1)
 	end
 end
 

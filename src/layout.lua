@@ -45,13 +45,15 @@ ffi.cdef [[
 		// the two ever disagree. Every field of a node being written one at a time is what made
 		// the build long, and a build the recorder gives up on runs in the interpreter.
 		//
-		// A share of the space is a fraction, and a fraction in a float32 is not the fraction:
-		// 0.7 becomes 0.69999999, which is 1.4e-5 of a 1200 pixel screen and enough to round a
-		// position the wrong way. So the numbers the solver works in are doubles.
+		// A colour and the part of a texture are what the gpu is given, so they are the narrow
+		// numbers it is given them as: a byte a channel and a 65535th a corner. A share of the
+		// space is a fraction, and a fraction in a float32 is not the fraction: 0.7 becomes
+		// 0.69999999, which is 1.4e-5 of a 1200 pixel screen and enough to round a position the
+		// wrong way. So the numbers the solver works in are doubles.
 		double wantWidth, wantHeight;
-		double bgR, bgG, bgB, bgA;     // what it is painted with, if anything
-		double borderR, borderG, borderB, borderA;
-		double u0, v0, u1, v1;         // and the part of its texture to use
+		uint8_t bgR, bgG, bgB, bgA;    // what it is painted with, if anything
+		uint8_t borderR, borderG, borderB, borderA;
+		uint16_t u0, v0, u1, v1;       // and the part of its texture to use, of 65535
 		int32_t gap, zIndex;
 		int32_t paddingTop, paddingRight, paddingBottom, paddingLeft;
 		int32_t marginTop, marginRight, marginBottom, marginLeft;
@@ -59,9 +61,9 @@ ffi.cdef [[
 		int32_t borderTop, borderRight, borderBottom, borderLeft;
 		uint32_t fgR, fgG, fgB, fgA;   // text colour as bytes, 0 for nothing
 		uint32_t texture, font;        // the texture it paints, and the font it is drawn in
-		double bright;                 // a multiplier on the colours, 1.0 for not one
-		double radius;                 // how round its corners are, in pixels, 0 for square
-		double blur;                   // how far what it draws is spread, in pixels, 0 for not at all
+		float bright;                  // a multiplier on the colours, 1.0 for not one
+		float radius;                  // how round its corners are, in pixels, 0 for square
+		float blur;                    // how far what it draws is spread, in pixels, 0 for not at all
 		int32_t shadowX, shadowY;      // where its shadow sits, how far it fades out, and
 		int32_t shadowBlur;
 		uint8_t shadowR, shadowG, shadowB, shadowA;  // what colour it is, 0 alpha for none
@@ -71,7 +73,7 @@ ffi.cdef [[
 		// Text inside it is drawn in the family, at the size, at the weight and on the slant the
 		// nearest element above it that named them says: nought is one the element above says.
 		uint32_t fontFamily;
-		double fontSize;
+		float fontSize;
 		uint32_t fontWeight;
 		uint8_t fontItalic, ellipsis;
 
@@ -102,15 +104,43 @@ ffi.cdef [[
 -- then this is the number that keeps the loop compiled.
 jit.opt.start("maxrecord=12000")
 
+--- What a node was built from, which is what a frame is compared against the last one through: a
+--- node is mostly a copy of a style that a slot already names, so what is kept of it is only what
+--- nothing else holds. Every field of an element that the layout or the solver reads is here --
+--- which is what makes two frames that agree on every record and on the window they were solved in
+--- the same frame. An element field added to what the layout reads and not to this is a frame that
+--- draws what the one before it drew.
+---
+--- What is written in an element is not among them, because the handle of a string says nothing
+--- across two frames: they are handed out per frame, so "12" and "21" are the same number. What a
+--- line was measured into does say something -- a run is cached by the text and the font it was
+--- measured in, so two frames that draw the same text read the same run -- and it is the id the
+--- font gave it that is kept, not the handle this frame put it at.
+ffi.cdef [[
+	typedef struct {
+		uint32_t style, over;          // what it was styled with, and the style standing in for it
+		uint32_t flags;                // the element's own: hovered, pressed, scrolls, grows, ...
+		uint32_t runId;                // which measured line it draws, and which one a field's
+		uint32_t valueRunId;           // value did: what the font measured them into
+		uint32_t font;                 // the font it was measured in
+		float maxLines;                // the most lines it holds, and how far it is scrolled
+		float scroll;
+		float sliderValue, min, max;   // and where a slider of it is, between its ends
+	} wl_record;
+]]
+
 -- What a scroll bar is told: how far there is to scroll, and how it is drawn. It lives beside the
 -- nodes rather than in them because only a box that scrolls has one, and every field of a node is
 -- written for every node of every frame -- which is what makes the build one long function, and a
 -- function the recorder gives up on is a build that runs in the interpreter, ten times slower.
+--
+-- What it is drawn in is bytes for the same reason a box's own colour is: the frame is given the
+-- colour as bytes either way.
 ffi.cdef [[
 	typedef struct {
-		double max;                    // how far the content goes past what the box shows
+		float max;                     // how far the content goes past what the box shows
 		int32_t width, least;          // the strip it takes, and the least a thumb of it is
-		double r, g, b, a;
+		uint8_t r, g, b, a;
 	} wl_bar;
 ]]
 
@@ -135,7 +165,9 @@ local STYLE_COPY = ffi.offsetof("wl_style", "barWidth")
 
 local nodeArray = ffi.typeof("wl_node[?]")
 local barArray = ffi.typeof("wl_bar[?]")
+local recordArray = ffi.typeof("wl_record[?]")
 local NODE_SIZE = assert(ffi.sizeof("wl_node"))
+local RECORD_SIZE = assert(ffi.sizeof("wl_record"))
 
 --- A position is put on a whole pixel. Glyph quads are exactly as wide as their ink, so
 --- one that starts halfway across a pixel loses its last column, and a background edge
@@ -241,14 +273,17 @@ local layout = {}
 ---@field nodes wonderland.Node[] # The node array itself
 ---@field childIndices ffi.cdata* # uint32_t, one run per node
 ---@field bars ffi.cdata* # `wl_bar` per node, for the ones that scroll
+---@field records ffi.cdata* # `wl_record` per node: what each was built from
 ---@field count number # Nodes in use
 ---@field childCount number # Child indices in use
 ---@field capacity number
 ---@field runs wonderland.font.Run[] # And the measured line each text node draws
 ---@field changed boolean # Whether this frame is different from the one the gpu has
----@field private last ffi.cdata* # The frame the gpu was last given
+---@field private lastRecords ffi.cdata* # What the frame the gpu was last given was built from
 ---@field private lastCount number
 ---@field private lastChildren number
+---@field private lastWidth number # And the window it was solved in, which every box follows
+---@field private lastHeight number
 ---@field root number # 1 based index of the root
 local Screen = {}
 Screen.__index = Screen
@@ -264,12 +299,15 @@ function layout.new(capacity)
 		childIndices = ffi.new("uint32_t[?]", capacity),
 		bars = barArray(capacity),
 		barNone = ffi.new("wl_bar"),
-		last = nodeArray(capacity),
+		records = recordArray(capacity),
+		lastRecords = recordArray(capacity),
 		capacity = capacity,
 		count = 0,
 		childCount = 0,
 		lastCount = 0,
 		lastChildren = 0,
+		lastWidth = 0,
+		lastHeight = 0,
 		changed = true,
 		runs = {},
 		root = 0,
@@ -292,9 +330,11 @@ function Screen:reserve(nodes)
 	local nodes_ = nodeArray(capacity)
 	local childIndices = ffi.new("uint32_t[?]", capacity)
 	local bars = barArray(capacity)
+	local records = recordArray(capacity)
 
 	if self.count > 0 then
 		ffi.copy(nodes_, self.nodes, self.count * NODE_SIZE)
+		ffi.copy(records, self.records, self.count * RECORD_SIZE)
 	end
 
 	if self.childCount > 0 then
@@ -308,7 +348,8 @@ function Screen:reserve(nodes)
 	self.nodes = nodes_
 	self.childIndices = childIndices
 	self.bars = bars
-	self.last = nodeArray(capacity)
+	self.records = records
+	self.lastRecords = recordArray(capacity)
 	self.lastCount = 0
 	self.capacity = capacity
 end
@@ -417,16 +458,20 @@ end
 --- What it is given is everything the elements above it said as well as its own, because a colour
 --- is lit by every filter over it: a card that dims under the pointer dims the text and the shadows
 --- inside it too, which is what putting a brightness on a box means.
+---
+--- Every colour a node holds is bytes, which is what the frame is given them as, so lighting one is
+--- rounding a byte to a byte: what comes out is what a shader would have been handed anyway.
 ---@param node wonderland.Node
 local function lighten(node)
 	local bright = node.bright
 
-	node.bgR, node.bgG, node.bgB = math.min(1.0, node.bgR * bright), math.min(1.0, node.bgG * bright),
-		math.min(1.0, node.bgB * bright)
-	node.borderR, node.borderG = math.min(1.0, node.borderR * bright), math.min(1.0, node.borderG * bright)
-	node.borderB = math.min(1.0, node.borderB * bright)
+	node.bgR = math.min(255, math.floor(node.bgR * bright + 0.5))
+	node.bgG = math.min(255, math.floor(node.bgG * bright + 0.5))
+	node.bgB = math.min(255, math.floor(node.bgB * bright + 0.5))
+	node.borderR = math.min(255, math.floor(node.borderR * bright + 0.5))
+	node.borderG = math.min(255, math.floor(node.borderG * bright + 0.5))
+	node.borderB = math.min(255, math.floor(node.borderB * bright + 0.5))
 
-	-- A text colour and a shadow colour are bytes, so they are rounded to one and stop at white.
 	node.fgR = math.min(255, math.floor(node.fgR * bright + 0.5))
 	node.fgG = math.min(255, math.floor(node.fgG * bright + 0.5))
 	node.fgB = math.min(255, math.floor(node.fgB * bright + 0.5))
@@ -480,10 +525,41 @@ function Screen:add(element, bright, blur)
 	node.firstChild, node.childCount = 0, 0
 	node.run, node.runId = 0, 0
 
+	-- What this node was built from, in the few numbers that everything else about it follows
+	-- from: a style is a slot, so which styles are in play, which way the element is being pointed
+	-- at, what is written in it, the font it was measured in, and how far it is scrolled. The frame
+	-- is compared against the last one through these rather than through the nodes, which are six
+	-- times the size and mostly a copy of a style that the slot already names.
+	--
+	-- Everything else a node holds is derived: the colours and the cut come from the styles and the
+	-- brightness, the geometry from the styles and the box it was solved in -- which follows from
+	-- the elements above it, whose own records are in the same array. So two frames that agree on
+	-- every record and on the window they were solved in are the same frame, and the array is one
+	-- memcmp rather than one per node.
+	local record = self.records[self.count - 1]
+
+	record.style = element.baseStyle
+	record.over = over
+	record.flags = flags
+	record.font = element.fontId
+	record.maxLines = element.maxLines
+	record.sliderValue = element.sliderValue
+	record.min, record.max = element.min, element.max
+
+	-- Which lines it draws is written after this, where the runs are known: what is said here is that
+	-- it draws none, which is what a node that stopped drawing text has to say rather than keeping
+	-- the one the frame before it had.
+	record.runId, record.valueRunId = 0, 0
+
 	-- A box that scrolls shows only what is inside it: how far its content is moved up is the
 	-- app's, and snapped to a whole pixel so the text in it stays crisp.
 	node.scrolls = bit.band(element.flags, SCROLLS) ~= 0 and 1 or 0
 	node.scroll = snap(element.scrollOffset)
+
+	-- How far it is scrolled is kept by the record as well, and is read from the node rather than
+	-- from the element: what a box does follows from the snapped number, not from the one it was
+	-- snapped from.
+	record.scroll = node.scroll
 
 	-- A bar is taken out of the content rather than drawn over it, so nothing is under the strip it
 	-- is in. A box that does not scroll has no bar, whatever its style says -- and no bar is
@@ -551,6 +627,11 @@ local function sizeToRun(screen, node, index, run)
 	screen.runs[index] = run
 	node.run, node.runId = index, run.id
 
+	-- What the frame was built from remembers the line by what the font measured, not by where this
+	-- frame put it: a run is cached by the text and the font, so the same text measured again is the
+	-- same run, and a line that changed is a different one.
+	screen.records[index - 1].runId = run.id
+
 	if bit.band(node.styleFlags, WIDTH) == 0 then
 		node.widthUnit, node.wantWidth = ABS, run.width
 	end
@@ -602,6 +683,10 @@ function Screen:build(element, fgR, fgG, fgB, fgA, font, bright, blur)
 	-- last of it that shows. The value was measured with everything else the frame draws, in the
 	-- font it is drawn in, so the box comes out exactly as tall as the text in it.
 	local valueRun = runs[element.valueRun]
+
+	if valueRun ~= nil then
+		self.records[node - 1].valueRunId = valueRun.id
+	end
 
 	if valueRun ~= nil and bit.band(element.flags, GROWS) ~= 0 then
 		local lines = valueRun.lineCount
@@ -953,9 +1038,14 @@ end
 
 --- Solves the screen, and works out whether anything about it actually changed.
 ---
---- Nodes are one flat array of plain data, so "is this the same screen as last time" is
---- a comparison of memory: an app that repainted because something might have changed
---- pays for the layout and nothing else. What the gpu was given is kept alongside.
+--- What a frame was built from is one flat array of plain data -- a record a node, holding the
+--- styles in play, what the element says and what is written in it -- so "is this the same screen
+--- as last time" is a comparison of memory, and an app that repainted because something *might*
+--- have changed pays for the layout and nothing else. What the gpu was given is kept alongside.
+---
+--- The window is part of it because every box that is a share of the space follows from it, and
+--- the count is, because a screen of fewer boxes than the last one is not the same screen.
+---
 --- A solve made part of the way through a frame is not that frame: the pointer's state is worked
 --- out from the boxes a solve produced, and a screen where something is drawn differently for the
 --- pointer is solved again. The first of those must not be what the frame is compared against,
@@ -971,23 +1061,24 @@ function Screen:solve(width, height, provisional)
 		return self
 	end
 
-	local bytes = self.count * NODE_SIZE
-
-	local same = bytes > 0 and ffi.C.memcmp(self.last, self.nodes, bytes) == 0
+	local bytes = self.count * RECORD_SIZE
+	local same = bytes > 0 and ffi.C.memcmp(self.lastRecords, self.records, bytes) == 0
 
 	if os.getenv("WL_DIFF_DEBUG") then
-		local asString = bytes > 0 and ffi.string(self.last, bytes) == ffi.string(self.nodes, bytes)
-		print(string.format("solve: count %d/%d bytes %d memcmpSame %s stringSame %s", self.count, self.lastCount,
-			bytes, tostring(same), tostring(asString)))
+		print(string.format("solve: count %d/%d, %dx%d/%dx%d, %d bytes of records, same %s", self.count,
+			self.lastCount, width, height, self.lastWidth, self.lastHeight, bytes, tostring(same)))
 	end
 
 	self.changed = self.count ~= self.lastCount
 		or self.childCount ~= self.lastChildren
+		or width ~= self.lastWidth
+		or height ~= self.lastHeight
 		or not same
 
 	if self.changed then
-		ffi.copy(self.last, self.nodes, bytes)
+		ffi.copy(self.lastRecords, self.records, bytes)
 		self.lastCount, self.lastChildren = self.count, self.childCount
+		self.lastWidth, self.lastHeight = width, height
 	end
 
 	return self
