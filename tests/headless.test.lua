@@ -1117,9 +1117,11 @@ test.skipIf(not canRender)("draws a shadow behind the box", function()
 	screen:close()
 
 	-- The box is where it was put, and the side the shadow was not moved towards has nothing
-	-- on it but the screen.
+	-- on it but the screen. The screen is a half grey, which reaches the gpu as byte 128 rather than
+	-- 127: a colour is narrowed to the nearest byte of the 255 on the way, and half of 255 is nearer
+	-- to 128 than to 127.
 	test.equal(select(1, pixelAt(pixels, 60, 30, 20)), 255, "the box is the box")
-	test.equal(select(1, pixelAt(pixels, 60, 30, 4)), 127, "and above it there is nothing but the screen")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 4)), 128, "and above it there is nothing but the screen")
 
 	-- Below it the shadow is: darker than the screen, lighter than the box, and lighter the
 	-- further from the box it gets, which is what spreading its edge over six pixels means.
@@ -1129,8 +1131,8 @@ test.skipIf(not canRender)("draws a shadow behind the box", function()
 	test.truthy(near < 100, "the shadow darkens what is under it")
 	test.truthy(near > 0, "and is not the box")
 	test.truthy(far > near, "while fading out with the distance")
-	test.truthy(far < 127, "and is still there eleven pixels past the box")
-	test.equal(select(1, pixelAt(pixels, 60, 30, 50)), 127, "and is gone further down than it was blurred")
+	test.truthy(far < 128, "and is still there eleven pixels past the box")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 50)), 128, "and is gone further down than it was blurred")
 end)
 
 -- What is not asked to fade has an edge where the box does: the same shadow with no blur is a
@@ -1157,7 +1159,7 @@ test.skipIf(not canRender)("a shadow with no blur has a hard edge", function()
 	screen:close()
 
 	test.truthy(select(1, pixelAt(pixels, 60, 30, 34)) < 90, "the band under the box is the shadow")
-	test.equal(select(1, pixelAt(pixels, 60, 30, 40)), 127, "and past the offset there is none of it")
+	test.equal(select(1, pixelAt(pixels, 60, 30, 40)), 128, "and past the offset there is the screen alone")
 	test.equal(select(1, pixelAt(pixels, 60, 30, 28)), 255, "and the box is still the box")
 end)
 
@@ -1194,6 +1196,50 @@ test.skipIf(not canRender)("a rounded box cut by a pane keeps only the corners i
 	-- drawn where it landed.
 	test.equal(select(1, pixelAt(pixels, 100, 0, 50)), 0, "the box below is round at the top too")
 	test.equal(select(1, pixelAt(pixels, 100, 50, 58)), 255, "and it is drawn where it lands")
+end)
+
+-- A picture cut by the pane it is in is drawn where it is rather than squeezed into the part of it
+-- that shows: what a cut shows is the part of the picture that is there, at the scale the box draws
+-- it at. A glyph is a picture of its own, so this is what a line scrolled halfway out of a list is
+-- made of, and one squeezed into the half of it that shows is a line of squashed letters.
+test.skipIf(not canRender)("draws the part of a picture a cut pane shows, not a squeezed picture", function()
+	local path = os.tmpname() .. ".png"
+	local written = image.new(1, 2, 3)
+
+	written:setPixel(0, 0, 255, 0, 0)
+	written:setPixel(0, 1, 0, 0, 255)
+	assert(written:save(path))
+	written:close()
+
+	-- A pane of ten rows over a picture of twenty, scrolled halfway down it: what shows is the
+	-- picture's own second half, so the pane's first row is the line the two halves meet on -- red
+	-- and blue together. A picture squeezed into the ten rows that show would start at its own top,
+	-- which is red alone.
+	local screen = wonderland.headless.new(function(_, assets)
+		local art = assets:image(path)
+
+		local pane = div():style({ direction = "column", width = { abs = 20 }, height = { abs = 10 } })
+			:scroll(10)
+
+		pane:children(
+			div():style({ width = { abs = 20 }, height = { abs = 20 }, bgImage = art.texture,
+				bgImageUV = art.uv })
+		)
+
+		return pane
+	end, { width = 20, height = 10, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local pixels = assert(screen:getPixels())
+	screen:close()
+
+	local r, _, b = pixelAt(pixels, 20, 5, 0)
+
+	test.truthy(r < 200, "the pane's first row is not the top of the picture")
+	test.truthy(b > 50, "and the half of it below that line is drawn with it")
+
+	os.remove(path)
 end)
 
 -- A frame is built once for the frame rather than once for every event behind it, so what an
@@ -2808,15 +2854,21 @@ test.skipIf(not canRender)("asks the loop for the time the next frame of a gif i
 	test.truthy(waited ~= nil and waited > 0, "and told the loop when to come back")
 
 	-- The frame it owes is drawn as the display's time allows, and once it has been the loop is
-	-- woken for the gif's own next frame rather than for a frame that is already there.
+	-- woken for the gif's own next frame rather than for a frame that is already there. Drawing
+	-- that frame costs what the machine costs, and the wait that comes out of it is what is left of
+	-- the gif's own delay -- so the frame's start is set again here, and what is asked for is the
+	-- whole of that delay rather than the delay less the time a frame took.
 	ctx.owed = false
 	waited = nil
+
+	---@cast dance wonderland.Gif
+	dance.at = wonderland.time.now()
 
 	screen.plugins.ui:tick(screen.window, handler)
 
 	test.equal(dance.index, was + 1, "which is not due yet")
 	test.truthy(waited ~= nil, "so the loop is told when it is")
-	test.greater(waited or 0, 0.05, "which is most of the tenth of a second the frame is shown for")
+	test.greater(waited or 0, 0.09, "which is most of the tenth of a second the frame is shown for")
 	test.lessEqual(waited or 0, 0.1)
 
 	screen:close()

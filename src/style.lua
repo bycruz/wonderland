@@ -858,7 +858,12 @@ end
 -- styles byte for byte -- which is also the whole of interning, since it is the same
 -- comparison that says "this style is already here".
 local CAPACITY = 64 -- styles are few, and this grows by being copied
-local BUCKETS = 256 -- a power of two, so the hash keeps the bits it needs
+local BUCKETS = 256 -- a power of two, so the hash keeps the bits it needs: see `rehash`
+
+-- How many styles there can be before a screen is told it is making one a frame. What one costs is
+-- the struct it is kept in and the room it takes in the table; what a screen of a few hundred
+-- elements has is a few dozen of them.
+local STYLE_LIMIT = 65536
 local arena = ffi.new("wl_style[?]", CAPACITY)
 local buckets = ffi.new("uint32_t[?]", BUCKETS)
 local slots = 0
@@ -899,19 +904,25 @@ end
 local SIZE = assert(ffi.sizeof("wl_style"))
 local scratchBytes = ffi.cast("const uint8_t *", scratch)
 
---- A hash of the struct itself, so interning costs one pass over it and no allocation: a
+--- A hash of the bytes of one style, so interning costs one pass over it and no allocation: a
 --- Lua string key would be one more thing to throw away every repaint. It is written as
 --- shifts and adds because a 32 bit multiply is not exact in a double.
+---@param bytes ffi.cdata* # const uint8_t *, one style
 ---@return number
-local function hashScratch()
+local function hashBytes(bytes)
 	local hash = 2166136261
 
 	for index = 0, SIZE - 1 do
-		hash = bit.bxor(hash, scratchBytes[index])
+		hash = bit.bxor(hash, bytes[index])
 		hash = bit.tobit(bit.lshift(hash, 5) - hash)
 	end
 
 	return hash
+end
+
+---@return number
+local function hashScratch()
+	return hashBytes(scratchBytes)
 end
 
 ---@param value ScaleUnitInput
@@ -1186,6 +1197,39 @@ local function grow(count)
 	style.arena = arena
 end
 
+--- More buckets, with every slot put back where it now belongs.
+---
+--- The table is as wide as it is because a style was meant to be written once and shared: a screen
+--- of a few hundred elements has a few dozen of them, and a table of two hundred and fifty six has
+--- room for all of them. What fills it is a style built from a value -- a width, a colour, anything
+--- that changes -- which is a style that is new every time it is different, and a screen that has
+--- drawn a few hundred of those has a table with no room in it at all. A lookup for something the
+--- table does not hold then has nowhere to put it, and the probe for a place is one that never ends:
+--- the app stops, the cursor stops changing, and nothing is drawn again.
+---@param count number # How many buckets to make room for
+local function rehash(count)
+	local capacity = BUCKETS
+
+	while capacity < count do
+		capacity = capacity * 2
+	end
+
+	local wider = ffi.new("uint32_t[?]", capacity)
+	local mask = capacity - 1
+
+	for slot = 0, slots - 1 do
+		local at = bit.band(hashBytes(ffi.cast("const uint8_t *", arena[slot])), mask)
+
+		while wider[at] ~= 0 do
+			at = bit.band(at + 1, mask)
+		end
+
+		wider[at] = slot + 1
+	end
+
+	buckets, BUCKETS = wider, capacity
+end
+
 --- The slot a style is, which is the whole of what an element holds of it. A style that
 --- says the same thing as one already interned is that one: the comparison is the two
 --- structs, so nothing has to be looked up twice.
@@ -1193,6 +1237,24 @@ end
 ---@return number
 local function intern(fields)
 	fill(fields)
+
+	-- Room for one more before looking for it: a table three quarters full is a table a slot does not
+	-- fit in comfortably, and the probe for a place to put it is the one thing here that can end
+	-- nowhere. See `rehash`.
+	if slots * 4 >= BUCKETS * 3 then
+		rehash(BUCKETS * 2)
+	end
+
+	-- And a stop, because the table growing for ever is a screen making a style a frame: a width that
+	-- follows a pointer, a colour that follows a clock. Each of them is kept for good, and the number
+	-- the message names is the whole of what is wrong with it. What a screen like that wants is the
+	-- style written once and drawn with -- see `wonderland.Canvas`, which is what a value that moves
+	-- every frame is drawn with.
+	if slots >= STYLE_LIMIT then
+		error(string.format("Too many styles: %d of them, which is a style a value -- the styles of a "
+			.. "screen are written to be shared, and one built from a number that changes is a new one "
+			.. "every time it does. Write it once, or draw what changes with a canvas", slots), 2)
+	end
 
 	local mask = BUCKETS - 1
 	local at = bit.band(hashScratch(), mask)

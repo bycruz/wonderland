@@ -1086,14 +1086,32 @@ end
 
 ---@param element wonderland.Element
 ---@return number
-local function countElements(element)
+--- How many elements a tree holds, which is what room is taken for before it is walked.
+---
+--- A tree is walked once per element, so it is no deeper than the elements the frame made: a walk
+--- that goes deeper than that is a tree that holds itself, which is what an element kept from an
+--- earlier frame and linked in again comes to -- it points at whatever the slot it is in holds now,
+--- and that element is one of this frame's. See the walk in `wonderland.plugin.Text`, which is where
+--- a tree of a frame that draws text is caught.
+---@param element wonderland.Element
+---@param depth number
+---@param limit number # The most elements the frame made, which is the most a tree can hold
+---@return number
+local function countElements(element, depth, limit)
+	if depth > limit then
+		error("The element tree holds itself: an element was laid out in a frame later than the one "
+			.. "it was made in. An element is built by the view and used in the repaint it was built "
+			.. "for -- one kept from an earlier frame points at whatever the slot it is in holds now",
+			0)
+	end
+
 	local total = 1
 	local child = element.childFirst
 
 	while child ~= 0 do
 		local childElement = pointers[child]
 
-		total = total + countElements(childElement)
+		total = total + countElements(childElement, depth + 1, limit)
 		child = childElement.nextSibling
 	end
 
@@ -1109,7 +1127,7 @@ function Screen:fromElement(element)
 
 	-- Room is taken before anything is written: growing the array moves it, and a node
 	-- held across the move would be written into memory that is no longer the screen.
-	self:reserve(countElements(element))
+	self:reserve(countElements(element, 1, wonderlandElement.count()))
 
 	self.count = 0
 	self.childCount = 0

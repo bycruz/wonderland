@@ -16,14 +16,13 @@ layout(location = 2) in vec4 aCorner01;   // its top left and top right corners
 layout(location = 3) in vec4 aCorner23;   // and its bottom right and bottom left ones
 layout(location = 4) in vec4 aBox;        // the middle of the box a corner is measured from, and
                                           // where the arcs of a round one sit inside it, in pixels
-layout(location = 5) in vec4 aPicture;    // where its top left samples the picture, and across it
-layout(location = 6) in vec4 aPart;       // the part of the picture the box is, of one
-layout(location = 7) in vec3 aCut;        // how round its corners are, how sharp that edge is, and
+layout(location = 5) in vec4 aPart;       // the part of the picture the box is, of one
+layout(location = 6) in vec3 aCut;        // how round its corners are, how sharp that edge is, and
                                           // how far what it draws is spread: pixels, as halves
-layout(location = 8) in vec4 aColour;     // the colour it is drawn in
-layout(location = 9) in float aTexture;   // which picture it samples
-layout(location = 10) in float aDepth;    // and how deep it is
-layout(location = 11) in float aOwn;      // whether the picture is drawn as it is, of one
+layout(location = 7) in vec4 aColour;     // the colour it is drawn in
+layout(location = 8) in float aTexture;   // which picture it samples
+layout(location = 9) in float aDepth;     // and how deep it is
+layout(location = 10) in float aOwn;      // whether the picture is drawn as it is, of one
 
 layout(location = 0) flat out vec4 vertexColor;
 layout(location = 1) out vec2 texCoord;
@@ -52,9 +51,17 @@ void main() {
     // is not square.
     corner = (where - aBox.xy) * aScale;
 
-    // Which point of the picture this corner samples: where the quad's own top left samples it, and
-    // how far across and down the whole of the quad goes.
-    texCoord = aPicture.xy + aPicture.zw * aUnit;
+    // Which point of the picture this corner samples: the part of it the box is, mapped across the
+    // box. A quad drawn past the box -- what a blur is -- reads past that part of the picture,
+    // which is what the fragment takes as nothing and fades the edge out by.
+    vec2 halfBox = aBox.zw + vec2(aCut.x);
+    vec2 box = 2.0 * halfBox;
+    vec2 along = (corner + halfBox) / max(box, vec2(1.0));
+
+    // Across the picture is across the window, and down it is up the window: a picture's rows run
+    // down from its own top left, and a corner of a box is measured up from the middle of it.
+    texCoord = vec2(aPart.x + along.x * (aPart.z - aPart.x),
+        aPart.w - along.y * (aPart.w - aPart.y));
 
     vertexColor = aColour;
     texIndex = int(aTexture);

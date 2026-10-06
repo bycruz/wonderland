@@ -68,7 +68,7 @@ end
 ---@field plugins { window: wonderland.plugin.Window<any>, render: wonderland.plugin.Render, text: wonderland.plugin.Text, layout: wonderland.plugin.Layout<any>, ui: wonderland.plugin.UI }
 ---@field order wonderland.Plugin[] # The plugins, in the order an event goes down them
 ---@field handler winit.EventManager # What an event is handed with, which a screen with no loop does nothing with
----@field view wonderland.Headless.View
+---@field view fun(self: wonderland.Headless, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element
 ---@field onMessage fun(message: any)?
 local Headless = {}
 Headless.__index = Headless
@@ -90,10 +90,25 @@ function headless.new(view, opts)
 	self.plugins.window = WindowPlugin.new({ type = "onWindowCreate" })
 	self.plugins.render = RenderPlugin.new(self.plugins.window)
 	self.plugins.text = TextPlugin.new(self.plugins.render)
+
+	-- The view is called as an app's is -- as a method of what it draws -- rather than as the
+	-- function it was handed, so that a thing wired over a screen is wired over an app the same
+	-- way: see `wonderland.devtools`, which wraps whichever of the two it was built on.
+	local drawn = view
+
+	self.view = function(_, window, assets)
+		return drawn(window, assets)
+	end
+
 	self.plugins.layout = LayoutPlugin.new(function(window)
-		return self.view(window, self.assets)
+		return self:view(window, self.assets)
 	end, self.plugins.text, self.plugins.render)
 	self.plugins.ui = UIPlugin.new(self.plugins.layout, self.plugins.render)
+
+	-- Named as the shell names them, because what is wired here is the same screen: a panel over a
+	-- screen asks for the layout, or the renderer, by the name an app asks for it by.
+	self.plugins.window.name, self.plugins.render.name = "window", "render"
+	self.plugins.text.name, self.plugins.layout.name, self.plugins.ui.name = "text", "layout", "ui"
 
 	-- The same order the window shell asks the plugins in: an event goes down them, and the
 	-- first message is the one the app hears, so a screen without a window behaves like one
@@ -253,6 +268,19 @@ function Headless:drag(fromX, fromY, toX, toY)
 	self:draw()
 
 	return message
+end
+
+--- The plugins a screen is made of, by the names an app knows them by: what a thing that is about a
+--- screen -- a panel over it, a test that wants the batch it wrote -- asks for rather than reaching
+--- into the table the plugins are kept in.
+---@param name string
+---@return wonderland.Plugin?
+function Headless:getPlugin(name)
+	for _, plugin in ipairs(self.order) do
+		if plugin.name == name then
+			return plugin
+		end
+	end
 end
 
 function Headless:close()

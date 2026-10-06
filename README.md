@@ -113,3 +113,38 @@ local shown = video:current()
 
 div():style(sty():size(shown.width, shown.height):image(shown.texture, shown.uv))
 ```
+
+## Devtools
+
+A panel over the app's own screen, drawn by the screen itself: what the frame came out to, what it
+cost, and the style of whatever the pointer is over. `f12` shows and hides it, `f11` draws a box
+around every element rather than around the one under the pointer, and it is left out of an app that
+is finished.
+
+```lua
+App:plugin(wonderland.devtools.new())     -- f12, and the panel starts shown
+```
+
+It shows the box of the element under the pointer, the numbers a repaint comes to -- elements,
+nodes, quads, runs, the bytes of instance data, lua's own memory, the frame's milliseconds and its
+rate -- the tree of the screen indented by depth with each node's size, and the resolved style of
+the node under the pointer: its box and place, its padding, margin and gap, its direction and
+alignment, its colours, radius, blur, shadow and texture, and whether it scrolls.
+
+```lua
+div():style(BOX)
+	:children("hover me")
+
+-- The panel over it reads: box 240x80 at 16,120  pad 8 margin 0 gap 4  row align start justify
+-- start in flow  bg #1b202cff fg #e6e6ffff  border none radius 6 blur 0  ...
+```
+
+What it reads is the frame before the one it is drawn in, since a screen is solved before its frame
+is handed over. A node whose box is not the size its own call asked for is what it is looked at for:
+a box that names no height fills what holds it, and the panel is where that is visible.
+
+The panel is part of the screen it is over, so it is rebuilt in the frames the app's own events ask
+for and costs the app a few hundred quads a frame -- which is why the box of every element is a key
+of its own rather than what is drawn by default: a box is four lines as wide as the window, and a
+screen of a thousand elements is four thousand of them over the app's every frame.
+

@@ -71,4 +71,8 @@ function App:update(message, _window)
 	end
 end
 
+-- What the screen is doing, over it: f12 shows and hides it. An app being written has this in it,
+-- and one that is finished is one with the line taken out.
+App:plugin(wonderland.devtools.new())
+
 App:run()

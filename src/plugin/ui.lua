@@ -290,22 +290,15 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		return
 	end
 
-	local du = (u1 - u0) / (drawnRight - drawnLeft)
-	local dv = (v1 - v0) / (drawnBottom - drawnTop)
-
-	-- The part of the picture this cut of the quad shows. A blurred quad is handed the whole of the
-	-- part of the picture the box is instead, because the batch maps that across the box itself:
-	-- the picture stays where it is and the room the taps read in is what is not there of it.
-	local shownU0, shownV0 = u0 + du * (atLeft - drawnLeft), v0 + dv * (atTop - drawnTop)
-	local shownU1, shownV1 = u0 + du * (atRight - drawnLeft), v0 + dv * (atBottom - drawnTop)
-
-	if blur ~= nil and blur > 0 then
-		shownU0, shownV0, shownU1, shownV1 = u0, v0, u1, v1
-	end
-
-	-- What is drawn is what is inside the clip but the corners are the corners of the whole box: a
-	-- box cut down to a sliver by the pane it is in is still a box with round corners, and the
-	-- corners of the sliver are not corners of it.
+	-- What is drawn is what is inside the clip, but what it is drawn from is the box it was asked
+	-- for: the shader maps the picture across that box and measures a corner of it from its middle,
+	-- so a picture stays where it is under a cut rather than being squeezed into the sliver of it
+	-- that shows, and a box cut down to a sliver by the pane it is in is still a box with round
+	-- corners -- the corners of the sliver are not corners of it.
+	--
+	-- Both calls take that box: `roundQuad` asks for it, and `quad` cannot, because a quad of two
+	-- corners is its own box. So a square box that a clip cut down is drawn with `roundQuad` at a
+	-- radius of nought -- a cut of the picture, with an edge as hard as the one it has uncut.
 	if band or (radius and radius > 0) then
 		batch:roundQuad(
 			toNDC(atLeft, windowWidth),
@@ -315,7 +308,7 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 			z,
 			r, g, b, a,
 			texture,
-			shownU0, shownV0, shownU1, shownV1,
+			u0, v0, u1, v1,
 			radius or 0,
 			toNDC(left, windowWidth),
 			-toNDC(top, windowHeight),
@@ -329,7 +322,7 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		return
 	end
 
-	batch:quad(
+	batch:roundQuad(
 		toNDC(atLeft, windowWidth),
 		-toNDC(atTop, windowHeight),
 		toNDC(atRight, windowWidth),
@@ -337,8 +330,15 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 		z,
 		r, g, b, a,
 		texture,
-		shownU0, shownV0, shownU1, shownV1,
-		own
+		u0, v0, u1, v1,
+		0,
+		toNDC(left, windowWidth),
+		-toNDC(top, windowHeight),
+		toNDC(right, windowWidth),
+		-toNDC(bottom, windowHeight),
+		0,
+		own,
+		blur
 	)
 end
 

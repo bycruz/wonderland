@@ -22,9 +22,10 @@ end
 -- What a quad is written as is one instance, and the descriptor the render plugin draws it with is
 -- built from the same table: a field added, widened or reordered here is one the descriptor follows.
 -- This is the size of one as it stands, against the two hundred and forty the four vertices of a
--- quad used to be.
+-- quad used to be -- and what the shader works out for itself is not in it, which is most of what
+-- one used to be.
 test.it("a quad is one instance, and one a whole number of four byte steps", function()
-	test.equal(batch.INSTANCE_SIZE, 92, "the bytes one instance is")
+	test.equal(batch.INSTANCE_SIZE, 76, "the bytes one instance is")
 	test.equal(batch.INSTANCE_SIZE % 4, 0, "which the gpu asks to be a whole number of them")
 
 	local names = {}
@@ -36,7 +37,7 @@ test.it("a quad is one instance, and one a whole number of four byte steps", fun
 		names[attribute.offset] = true
 	end
 
-	test.equal(#batch.INSTANCE_ATTRIBUTES, 10, "and it holds what the shader reads it as")
+	test.equal(#batch.INSTANCE_ATTRIBUTES, 9, "and it holds what the shader reads it as")
 	test.equal(#batch.CORNER_ATTRIBUTES, 2, "with what a corner of the unit square is read as")
 	test.equal(batch.QUAD_INDICES[0], 0, "and the indices every quad is drawn with")
 	test.equal(batch.QUAD_INDICES[2], 2)
@@ -105,8 +106,23 @@ test.it("a quad that is neither round nor spread writes noughts", function()
 	test.equal(instance.radius, 0, "the cut of the second quad is nought")
 	test.equal(instance.band, 0)
 	test.equal(instance.blur, 0, "and so is the blur of it")
-	test.equal(instance.innerX, 0, "and where its arcs would have been")
-	test.equal(instance.u0, 0, "and the part of a picture it is drawn with")
+	test.equal(instance.u0, 32768, "while the part of a picture it draws is what it was given")
+end)
+
+-- A quad of two corners is a box, and the box is what everything about it follows from: what it is
+-- cut against, what a corner of it is measured from, and what its picture is mapped across.
+test.it("a quad of two corners is written as the box it is", function()
+	local quads = batch.new()
+
+	quads:setViewport(100, 100)
+	quads:quad(0, 0, 0.5, 0.5, 1, 1, 1, 1, 1, 7, 0.5, 0.5, 1, 1)
+
+	local instance = quads.instances[0]
+
+	test.equal(instance.centreX, 0.25, "the middle of the box is the middle of the quad")
+	test.equal(instance.innerX, 12.5, "and the arcs of it sit a half of it inside")
+	test.equal(instance.innerY, 12.5, "both ways, since half the window either way is fifty pixels")
+	test.equal(instance.texture, 7, "and it samples the picture it named")
 end)
 
 -- A quad is drawn as one, whatever shape it is: the four corners are what it is, and the box they

@@ -27,14 +27,15 @@
 -- An instance is the one the render plugin's descriptor declares, and the descriptor is built from
 -- the same tables below, so the two cannot describe different things:
 --
---   the four corners (8) | the middle of the box and the arcs inside it (4) | the picture, and
---   where across it this quad is (4) | the part of the picture the box is (4) | the cut (3)
---   | the colour (4) | the picture's id (1) | how deep it is (1) | whether it is its own colours (2)
+--   the four corners (8) | the middle of the box and the arcs inside it (4) | the picture's id (1)
+--   | how deep it is (1) | the part of the picture the box is (4) | the cut (3) | the colour (4)
+--   | whether it is its own colours (2)
 --
 -- The corners are in the coordinates the batch is handed; the middle of the box is where a corner
 -- of the quad is measured from, in those same coordinates, and the arcs are how far inside the box
--- their own box starts, in pixels. The part of the picture the box is and how far it is spread are
--- what the fragment blurs with, and are nought for a quad that asked for no blur.
+-- their own box starts, in pixels. The part of the picture the box is is what the shader maps across
+-- the box, and what the fragment blurs with, so it is written for every quad rather than left for
+-- the blurred ones to write.
 --
 -- What is narrowed is narrowed once a quad rather than four times: a colour is four bytes rather
 -- than sixteen, a cut and a blur are halves, and the part of a picture a box is costs two bytes an
@@ -57,6 +58,11 @@ ffi.cdef [[
 	// than at hand counted offsets, and the descriptor is built from the same tables below, so the
 	// two cannot describe different things.
 	//
+	// What the shader can work out from the rest is not carried: where a quad samples the picture is
+	// the part of the picture the box is, mapped across the box, which is the box the cut is
+	// measured against and the part of the picture it is drawn from -- so it is the two corners and
+	// the two of the box that are written, and the fragment works the rest out.
+	//
 	// The fields are in the order that leaves no room for padding between them: what is a whole
 	// float first, then what is two bytes, then what is one. What the shader reads them as is the
 	// order of the tables below rather than the order here, so the two are free to differ.
@@ -64,7 +70,6 @@ ffi.cdef [[
 		float c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y;  // its four corners, top left round
 		float centreX, centreY;                        // the middle of the box a corner is measured from
 		float innerX, innerY;                          // and where the arcs of a round one sit inside it
-		float u, v, du, dv;                            // where its top left samples the picture, and across
 		float texture;                                 // which picture it samples
 		float z;                                       // and how deep it is
 		uint16_t u0, v0, u1, v1;                       // the part of the picture the box is, of 65535
@@ -109,7 +114,6 @@ local INSTANCE_ATTRIBUTES = {
 	{ type = "f32", size = 4, name = "c0x" },     -- the quad's four corners, top left round
 	{ type = "f32", size = 4, name = "c2x" },
 	{ type = "f32", size = 4, name = "centreX" }, -- the middle of the box, and the arcs inside it
-	{ type = "f32", size = 4, name = "u" },       -- the picture, and where across it this quad is
 	{ type = "u16", size = 4, name = "u0", normalized = true },
 	{ type = "f16", size = 3, name = "radius" },
 	{ type = "u8", size = 4, name = "r", normalized = true },
@@ -153,10 +157,6 @@ batch.QUAD_INDICES = QUAD_INDICES
 ---@field centreY number
 ---@field innerX number
 ---@field innerY number
----@field u number
----@field v number
----@field du number
----@field dv number
 ---@field u0 number
 ---@field v0 number
 ---@field u1 number
@@ -392,10 +392,10 @@ end
 ---@param centreY number
 ---@param innerX number # Where the arcs of a round corner sit inside it, in pixels
 ---@param innerY number
----@param u number # Where its top left samples the picture, and how far one corner of it moves that
----@param v number
----@param du number
----@param dv number
+---@param u0 number # The part of the picture the box is, which is what it is drawn from
+---@param v0 number
+---@param u1 number
+---@param v1 number
 ---@param z number
 ---@param r number
 ---@param g number
@@ -404,12 +404,13 @@ end
 ---@param texture number
 ---@param own number? # Whether the picture is drawn as it is rather than through the colour
 local function put(instance, c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y, centreX, centreY, innerX, innerY,
-	u, v, du, dv, z, r, g, b, a, texture, own)
+	u0, v0, u1, v1, z, r, g, b, a, texture, own)
 	instance.c0x, instance.c0y, instance.c1x, instance.c1y = c0x, c0y, c1x, c1y
 	instance.c2x, instance.c2y, instance.c3x, instance.c3y = c2x, c2y, c3x, c3y
 	instance.centreX, instance.centreY = centreX, centreY
 	instance.innerX, instance.innerY = innerX, innerY
-	instance.u, instance.v, instance.du, instance.dv = u, v, du, dv
+	instance.u0, instance.v0 = toUnit(u0), toUnit(v0)
+	instance.u1, instance.v1 = toUnit(u1), toUnit(v1)
 	instance.z = z
 
 	-- Narrowed here rather than four times over, and clamped: a colour that is not a fraction of one
@@ -417,30 +418,26 @@ local function put(instance, c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y, centreX, ce
 	-- the byte it is in.
 	instance.r, instance.g, instance.b, instance.a = toByte(r), toByte(g), toByte(b), toByte(a)
 
+	-- Which picture it samples, as the id it is: narrowed no further than it is, because the two
+	-- backends do not agree on an integer vertex attribute -- one scales a narrowed one back into a
+	-- fraction and the other reads a number -- and a picture is a number the shader looks a band up
+	-- by either way.
 	instance.texture = texture
 
 	-- Whether this one's picture is drawn as it is or through the colour, which every quad but a
 	-- glyph says no to.
 	instance.own = own or 0
 
-	-- A quad that is not round and not spread says so in a cut of nought and a blur of nought, and
-	-- reads nothing of the rest: which is what every quad in a screen that asked for neither writes.
+	-- A quad that is not round and not spread says so in a cut of nought and a blur of nought, which
+	-- is what every quad in a screen that asked for neither writes.
 	instance.radius, instance.band, instance.blur = 0, 0, 0
-	instance.u0, instance.v0, instance.u1, instance.v1 = 0, 0, 0, 0
 end
 
---- What a blurred quad is read with: the part of the picture the box is, which a tap that falls
---- past reads as nothing at all -- the picture beside a glyph in a sheet is another glyph -- and how
---- far what it draws is spread, in pixels.
+--- How far what a quad draws is spread, in pixels, as the half an instance keeps it in: nought for
+--- every quad that asked for none, which is nearly all of them.
 ---@param instance wonderland.ffi.wl_instance
----@param u0 number
----@param v0 number
----@param u1 number
----@param v1 number
 ---@param blur number
-local function putBlur(instance, u0, v0, u1, v1, blur)
-	instance.u0, instance.v0 = toUnit(u0), toUnit(v0)
-	instance.u1, instance.v1 = toUnit(u1), toUnit(v1)
+local function putBlur(instance, blur)
 	instance.blur = toHalf(blur)
 end
 
@@ -492,8 +489,13 @@ function QuadBatch:quad(left, top, right, bottom, z, r, g, b, a, texture, u0, v0
 
 	u0, v0, u1, v1 = u0 or 0, v0 or 0, u1 or 1, v1 or 1
 
-	put(instances[at], left, top, right, top, right, bottom, left, bottom, left, top, 0, 0,
-		u0, v0, u1 - u0, v1 - v0, z, r, g, b, a, texture, own)
+	-- The box a quad of two corners is cut against is the quad itself, which is what the shader maps
+	-- the picture across and measures a corner of it from.
+	local halfX = math.abs(right - left) * self.scaleX * 0.5
+	local halfY = math.abs(bottom - top) * self.scaleY * 0.5
+
+	put(instances[at], left, top, right, top, right, bottom, left, bottom, (left + right) * 0.5,
+		(top + bottom) * 0.5, halfX, halfY, u0, v0, u1, v1, z, r, g, b, a, texture, own)
 
 	finish(self)
 end
@@ -527,11 +529,15 @@ function QuadBatch:points(x1, y1, x2, y2, x3, y3, x4, y4, z, r, g, b, a, texture
 		self:startRun(texture)
 	end
 
-	-- A shape of a canvas is drawn in one colour and samples one point of a picture, so where its
-	-- corners are is all it has to say: there is no box it is cut against and nothing to map across
-	-- it, which is what a cut of nought and a picture that does not move say.
-	put(self.instances[self.quads], x1, y1, x2, y2, x3, y3, x4, y4, x1, y1, 0, 0, 0, 0, 0, 0, z,
-		r, g, b, a, texture, 0)
+	-- A shape of a canvas is four points and no box: what it is cut against is the box its corners
+	-- come to, which nothing reads -- a shape names no cut and no blur, and what it samples is one
+	-- point of a picture whatever it is drawn across.
+	local left, right = math.min(x1, x2, x3, x4), math.max(x1, x2, x3, x4)
+	local top, bottom = math.min(y1, y2, y3, y4), math.max(y1, y2, y3, y4)
+
+	put(self.instances[self.quads], x1, y1, x2, y2, x3, y3, x4, y4, (left + right) * 0.5,
+		(top + bottom) * 0.5, math.abs(right - left) * self.scaleX * 0.5,
+		math.abs(bottom - top) * self.scaleY * 0.5, 0, 0, 1, 1, z, r, g, b, a, texture, 0)
 
 	finish(self)
 end
@@ -632,29 +638,17 @@ function QuadBatch:roundQuad(left, top, right, bottom, z, r, g, b, a, texture, u
 	local innerX, innerY = halfX - radius, halfY - radius
 	local centreX, centreY = (boxLeft + boxRight) * 0.5, (boxTop + boxBottom) * 0.5
 
-	-- A blurred quad is drawn past the box it is in, because that is the room the spread needs, and
-	-- its picture is mapped across the box rather than across the quad: the picture stays where it
-	-- is and the room around it is the part of it that is not there, which is what the taps that
-	-- land in it read as nothing. Every other quad maps it across the quad, which is the same thing
-	-- for a quad that was not grown.
-	local leftU, topV, rightU, bottomV = u0, v0, u1, v1
-
-	if blur and blur > 0 then
-		local spanX, spanY = boxRight - boxLeft, boxBottom - boxTop
-		local du = spanX ~= 0 and (u1 - u0) / spanX or 0
-		local dv = spanY ~= 0 and (v1 - v0) / spanY or 0
-
-		leftU, rightU = u0 + du * (left - boxLeft), u0 + du * (right - boxLeft)
-		topV, bottomV = v0 + dv * (top - boxTop), v0 + dv * (bottom - boxTop)
-	end
-
+	-- Where the quad samples the picture is worked out from the box and the part of the picture the
+	-- box is, so what is written is that part and no mapping of it: a quad drawn past the box it is
+	-- in -- what a blur is -- reads past the part of the picture that is there, which is what fades
+	-- its edge out.
 	local instance = instances[at]
 
 	put(instance, left, top, right, top, right, bottom, left, bottom, centreX, centreY,
-		innerX, innerY, leftU, topV, rightU - leftU, bottomV - topV, z, r, g, b, a, texture, own)
+		innerX, innerY, u0, v0, u1, v1, z, r, g, b, a, texture, own)
 
 	if blur and blur > 0 then
-		putBlur(instance, u0, v0, u1, v1, blur)
+		putBlur(instance, blur)
 	end
 
 	putCut(instance, innerX, innerY, radius, band)

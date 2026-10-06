@@ -16,6 +16,7 @@
 --   wonderland.app(opts) an app: the window and the plugins a screen needs, installed
 --   wonderland.run(app)  run one, if you would rather not call `app:run()`
 --   wonderland.headless  the same screen with no window, for tests and screenshots
+--   wonderland.devtools  what a screen is doing, drawn by the screen: see `wonderland.devtools`
 --
 -- Pictures are loaded with the asset manager an app is handed when its window is made -- an
 -- app's `self.assets`, and a headless screen's `screen.assets`:
@@ -36,6 +37,7 @@ local Assets = require("wonderland.util.assets")
 ---@field Element wonderland.Element
 ---@field Assets wonderland.Assets # The class pictures are loaded through, for one wired by hand
 ---@field headless wonderland.headless
+---@field devtools wonderland.devtools # A panel of what a screen is doing, for an app being written
 ---@field time wonderland.time.Time # Seconds on a clock that only goes forwards
 ---@field app fun(title: string?): wonderland.App
 ---@field run fun(app: wonderland.App)
@@ -48,6 +50,7 @@ local wonderland = {
 	Element = element.Element,
 	Assets = Assets,
 	headless = require("wonderland.headless"),
+	devtools = require("wonderland.devtools"),
 	time = time,
 	app = app.new,
 	run = app.run,

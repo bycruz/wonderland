@@ -387,19 +387,6 @@ function RenderPlugin:createContext(window, swapchain)
 		usages = { "RENDER_ATTACHMENT" }
 	})
 
-	-- Initialize shared resources
-	if not self.mainCtx then
-		local textureManager = TextureManager.new(self:getDevice())
-
-		local fontManager = FontManager.new(textureManager)
-
-		self.sharedResources = {
-			textureManager = textureManager,
-			fontManager = fontManager,
-			assets = Assets.new(textureManager)
-		}
-	end
-
 	---@type wonderland.plugin.Render.Context
 	local ctx = {
 		window = window,
@@ -818,12 +805,20 @@ end
 --- Frees what a context holds, and what the contexts shared once the last one goes.
 --- Something that makes a screen per test wants this: the shared resources alone hold every
 --- picture the app has uploaded.
+---
+--- Waiting first, because a frame is submitted and not waited for -- the display paces it, and a
+--- screen with no display behind it is paced by nothing -- so what the last frame copied into is
+--- still being written when this is called. A capture freed under the driver's own submit thread is
+--- a crash inside the driver rather than an error here, which is what a screen that drew and then
+--- closed used to leave behind every few closes.
 ---@param window wonderland.RenderWindow
 function RenderPlugin:destroy(window)
 	local ctx = self.contexts[window]
 	if not ctx then
 		return
 	end
+
+	self:getDevice().queue:waitIdle()
 
 	if ctx.capture then
 		ctx.capture.view:destroy()
