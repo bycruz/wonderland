@@ -412,6 +412,99 @@ test.skipIf(not canRender)("moves the keyboard with tab, and works what it lands
 	screen:close()
 end)
 
+-- A box that asks for what is left is given nothing where nothing is left, rather than a share of
+-- what is not there: a box with a negative width is drawn inside out, and the line after it lands
+-- on top of it -- which reads as a rendering fault rather than as a row with no room in it.
+-- What the pointer is drawn with over a box that resizes: an edge is a cursor of its own where the
+-- platform has one, and a hand where it does not -- a shape asked for by a name a backend does not
+-- know is one it falls over on, so a window that lists nothing is asked for nothing new.
+test.skipIf(not canRender)("the pointer over a resizable edge is drawn as the cursor for it", function()
+	local asked = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill():row()):children(
+			div():style(sty():w(100):hrel(1.0)):resize({ edge = "right", grab = 8,
+				onchange = function(size) return { type = "resized", size = size } end })
+		)
+	end)
+
+	-- A window that draws resize cursors says so, and a screen with no window has none of this:
+	-- the stand-in is given the two calls a window has.
+	screen.window.cursors = { pointer = true, hand2 = true, sizewe = true, sizens = true }
+	screen.window.setCursor = function(_, shape)
+		asked[#asked + 1] = shape
+	end
+	screen.window.resetCursor = function()
+		asked[#asked + 1] = "default"
+	end
+
+	---@param x number
+	---@param y number
+	local function move(x, y)
+		send(screen, { name = "mouseMove", x = x, y = y })
+	end
+
+	move(50, 70)
+	test.equal(#asked, 0, "a pointer in the middle of a box is left as it was")
+
+	move(97, 70)
+	test.equal(asked[#asked], "sizewe", "and one on the edge it resizes by is the cursor across it")
+
+	-- Asked once: setting a cursor is a round trip to the server, and a move that changes nothing
+	-- about what the pointer is over is not a second one.
+	move(96, 70)
+	test.equal(#asked, 1, "which is asked for once while it stays on the edge")
+
+	move(50, 70)
+	test.equal(asked[#asked], "default", "and letting go of the edge is the cursor it had")
+
+	screen:close()
+end)
+
+test.skipIf(not canRender)("an edge on a window with no such cursor is a hand", function()
+	local asked = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill():column()):children(
+			div():style(sty():hrel(1.0):wrel(1.0)):resize({ edge = "bottom", grab = 8,
+				onchange = function(size) return { type = "resized", size = size } end })
+		)
+	end)
+
+	-- Every window has the hand: a backend that draws no resize cursor is asked for the one it has,
+	-- which is what the pointer over something draggable is.
+	screen.window.setCursor = function(_, shape)
+		asked[#asked + 1] = shape
+	end
+	screen.window.resetCursor = function()
+		asked[#asked + 1] = "default"
+	end
+
+	send(screen, { name = "mouseMove", x = 100, y = 137 })
+
+	test.equal(asked[#asked], "hand2", "the bottom edge of a box is grabbed with a hand")
+
+	screen:close()
+end)
+
+test.skipIf(not canRender)("a share of nothing is nothing rather than less than nothing", function()
+	local screen = aScreen(function()
+		-- A row of forty with a hundred pixels of children in it: nothing is left over, so what is
+		-- left over is nothing rather than the negative number the arithmetic comes to.
+		return div():style(sty():row():w(40):h(20):gap(8):bg("#000000")):children({
+			div():style(sty():w(100):h(20)),
+			div():style(sty():w("auto"):h(20)),
+		})
+	end)
+
+	local nodes, root = solved(screen)
+
+	test.equal(nodes:node(root + 1).width, 100, "the box that asked for more than there is gets it")
+	test.equal(nodes:node(root + 2).width, 0, "and the one beside it gets what is left, which is nothing")
+
+	screen:close()
+end)
+
 test.skipIf(not canRender)("draws text at the size and in the family a style names", function()
 	local screen = aScreen(function()
 		return div():style(sty():fill():column():gap(4):bg("#000000")):children({

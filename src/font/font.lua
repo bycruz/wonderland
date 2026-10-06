@@ -14,7 +14,7 @@ local utf8 = require("wonderland.font.utf8")
 ffi.cdef [[
 	typedef struct {
 		int32_t x, y, width, height;  // where the ink is drawn, in whole pixels
-		float u0, v0, u1, v1;         // and where it is in its picture
+		uint32_t uv0, uv1;            // and the part of its picture it is, packed: see `packUv`
 		float pen;                    // where the pen was when it was placed, from the start of its
 		                              // line: where a caret before it sits
 		float advance;                // how far it moved the pen
@@ -31,6 +31,28 @@ ffi.cdef [[
 		double width;
 	} wl_line;
 ]]
+
+-- A fraction of a picture as the whole number of 65535ths a quad keeps it in, which is what
+-- narrowing a glyph's own fractions on every frame that draws it cost.
+---@param value number
+---@return number
+local function toUnit(value)
+	return math.min(65535, math.max(0, math.floor(value * 65535 + 0.5)))
+end
+
+--- The part of its picture a glyph is, packed the way a quad keeps it: a 65535th across and a
+--- 65535th down in one number, in each of the two corners.
+---
+--- A run is measured once and drawn every frame, and what a glyph is of its picture never changes
+--- between them, so the narrowing is done here rather than four times over in every frame the run
+--- is drawn in: see `wonderland.util.quad_batch`'s `uv`, which is what this is. What it is done
+--- from is the glyph of the atlas, which keeps the fractions.
+---@param into wonderland.font.PlacedGlyph
+---@param from wonderland.font.Glyph
+local function packUv(into, from)
+	into.uv0 = toUnit(from.u0) + toUnit(from.v0) * 65536
+	into.uv1 = toUnit(from.u1) + toUnit(from.v1) * 65536
+end
 
 --- The line box of a run: the font's line height, times how many lines there are.
 ---@class wonderland.font.Run
@@ -49,10 +71,8 @@ ffi.cdef [[
 ---@field y number
 ---@field width number
 ---@field height number
----@field u0 number
----@field v0 number
----@field u1 number
----@field v1 number
+---@field uv0 number # The part of its picture, packed as a quad keeps it: see `packUv`
+---@field uv1 number
 ---@field pen number # Where the pen was when it was placed, from the start of its line
 ---@field advance number # And how far it moved it
 ---@field texture number
@@ -371,7 +391,7 @@ function Font:getRun(text, maxWidth)
 					into.x = math.floor(pen + glyph.x + ink.left + 0.5)
 					into.y = math.floor(baseline + ink.top + 0.5)
 					into.width, into.height = ink.width, ink.height
-					into.u0, into.v0, into.u1, into.v1 = ink.u0, ink.v0, ink.u1, ink.v1
+					packUv(into, ink)
 					into.pen, into.advance = pen + piecePen, glyph.advance
 					into.texture = ink.texture
 					into.cluster = piece.from - 1 - base + glyph.cluster
@@ -405,7 +425,7 @@ function Font:getRun(text, maxWidth)
 					into.x = math.floor(pen + glyph.left + 0.5)
 					into.y = math.floor(baseline + glyph.top + 0.5)
 					into.width, into.height = glyph.width, glyph.height
-					into.u0, into.v0, into.u1, into.v1 = glyph.u0, glyph.v0, glyph.u1, glyph.v1
+					packUv(into, glyph)
 					into.pen, into.advance = pen, glyph.advance
 					into.texture = glyph.texture
 					into.cluster = at - 1 - base
@@ -487,7 +507,7 @@ function Font:getRun(text, maxWidth)
 			into.x = math.floor(dotsPen + dots.left + 0.5)
 			into.y = math.floor(baseline + dots.top + 0.5)
 			into.width, into.height = dots.width, dots.height
-			into.u0, into.v0, into.u1, into.v1 = dots.u0, dots.v0, dots.u1, dots.v1
+			packUv(into, dots)
 			into.pen, into.advance = dotsPen, dots.advance
 			into.texture = dots.texture
 			into.cluster = rtl ~= 0 and 0 or (kept < total and assert(array)[first + kept].cluster or 0)

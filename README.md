@@ -26,6 +26,8 @@ You can run the examples in ./examples with:
 lde run -C ./examples/app        # the tour: text, a field, a slider, a gif, a scroller
 lde run -C ./examples/canvas     # a spectrum drawn by hand, every shape a `:canvas` call
 lde run -C ./examples/lupa       # a lupa 3d scene, drawn on an element of the screen
+lde run -C ./examples/tree       # a file tree: rows, a sidebar dragged wider, the keyboard
+lde run -C ./examples/todo       # a list with a field, a scroller and a bar
 ```
 
 ```lua
@@ -113,6 +115,53 @@ local shown = video:current()
 
 div():style(sty():size(shown.width, shown.height):image(shown.texture, shown.uv))
 ```
+
+## Lists and trees
+
+A list is rows, and a row is a box: the indentation of an outline is padding, a chevron is a line of
+text, the row that is chosen is a background, and the row under the pointer is `:hover`. What a
+list needs that is not a style is only how far it is scrolled -- which is state, and therefore the
+app's: `:scroll(offset)` moves what is inside the box and clips it to the box, and `:onScroll` says
+what a wheel or a bar asked for. `examples/tree` is a file tree built out of exactly this.
+
+Every row is an element and a node on every frame, shown or not, so a list of a thousand rows is a
+thousand of each. A screen whose list is long enough for that to matter builds the rows that show
+and `:hidden()`s the rest, or keeps its own window of them: what is off the end of the box is
+clipped away at draw time, which is not the same as not being built.
+
+## Resizing
+
+A box that is dragged wider or taller says so with `:resize`, which is `:slider`'s idea again: the
+library reports where the pointer is, and the app is what keeps the number.
+
+```lua
+local wide = 240
+
+div():style(sidebar:width(wide)):resize({
+	edge = "right",                                 -- which edge is dragged, and which way it grows
+	grab = 8,                                       -- how near that edge a press counts as being on it
+	min = 160,
+	max = 420,
+	onchange = |size| -> { type = "resized", size = size },
+})
+```
+
+What is reported is the size the box is asked to be, in pixels: the size it was when the edge was
+taken, plus how far the pointer has come since, held between `min` and `max`. It is a size rather
+than a difference because what the box is drawn at is the app's -- the style of the frame after the
+message is the one that is that size -- and it is reported only when it changes, so a pointer held
+still is not a screen built again.
+
+The edge is grabbed *inside* the box, so the strip it is grabbed by is part of the box and is taken
+out of whatever is laid out in it. A pane that scrolls draws its bar on its own right edge, and the
+bar is pressed before the edge is, so a sidebar that resizes and scrolls keeps its bar off the strip
+with its own padding -- see the sidebar in `examples/tree`.
+
+A press on an edge is a press on the edge rather than a press on the box, so a row that is clicked
+and an edge that is dragged are not the same press. The pointer over an edge is drawn as the cursor
+for it where the platform has one: a window that lists what it draws in `cursors` is asked for
+`sizewe` or `sizens`, and a window that lists nothing keeps the cursor it had -- a shape asked for by
+a name a backend does not know is one it falls over on rather than one it draws.
 
 ## Devtools
 

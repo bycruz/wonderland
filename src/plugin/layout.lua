@@ -13,6 +13,9 @@ local callbacks = wonderlandElement.callbacks
 local TEXT_INPUT = wonderlandElement.TEXT_INPUT
 local MULTILINE = wonderlandElement.MULTILINE
 local SLIDE = wonderlandElement.SLIDE
+local RESIZE = wonderlandElement.RESIZE
+local EDGE_RIGHT, EDGE_LEFT, EDGE_TOP, EDGE_BOTTOM = wonderlandElement.EDGE_RIGHT, wonderlandElement.EDGE_LEFT,
+	wonderlandElement.EDGE_TOP, wonderlandElement.EDGE_BOTTOM
 
 --- Where a node ended up, and which element it is.
 ---@class wonderland.plugin.Layout.Hit
@@ -50,7 +53,7 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 		local child = screen.childIndices[node.firstChild + at - 1]
 		local found = findElementAtPosition(screen, child, x, y, absX, absY, acceptFn)
 
-		if found and (not acceptFn or acceptFn(found.element)) then
+		if found and (not acceptFn or acceptFn(found.element, found.absX, found.absY, found.node)) then
 			return found
 		end
 	end
@@ -58,7 +61,10 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 	if x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height then
 		local element = pointers[node.element]
 
-		if not acceptFn or acceptFn(element) then
+		-- What a box is given is where it is as well as what it is: which edge of it a point is on
+		-- is a question about the two together, and only a predicate that needs it is handed the
+		-- four numbers -- see `findResizeEdge`.
+		if not acceptFn or acceptFn(element, absX, absY, node) then
 			return { element = element, node = node, absX = absX, absY = absY }
 		end
 	end
@@ -170,7 +176,7 @@ end
 ---@field barDrag wonderland.plugin.Layout.BarDrag? # The scroll bar being dragged, while one is
 ---@field dragging wonderland.plugin.Layout.Drag? # The slider being dragged, while one is
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
----@field pointing boolean? # Whether the pointer cursor is the one for something clickable
+---@field pointing string? # What the pointer cursor was last set to, nothing for the one a window has
 ---@field cursorPos number
 ---@field anchorPos number? # The other end of the selection, from nought: nothing where there is none
 ---@field typed string? # What has been typed into the focused field since the frame that built it
@@ -474,6 +480,91 @@ local function hasMouseDownOrClick(e) ---@param e wonderland.Element
 		or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0
 end
 
+--- Whether a point is on the edge of a box that resizes: within the grab of that edge, inside the
+--- box. Inside rather than outside so that a box is grabbed by a strip of itself, which is what
+--- makes a handle a box of its own that is as wide as it should be grabbed by -- and a strip of a
+--- pane's own edge, where the pane is what is resized.
+---@param element wonderland.Element
+---@param x number
+---@param y number
+---@param absX number
+---@param absY number
+---@param node wonderland.Node
+---@return boolean
+local function onResizeEdge(element, x, y, absX, absY, node)
+	local edge = element.resizeEdge
+	local grab = element.resizeGrab
+
+	if edge == EDGE_RIGHT then
+		return x >= absX + node.width - grab and x <= absX + node.width
+	elseif edge == EDGE_LEFT then
+		return x <= absX + grab and x >= absX
+	elseif edge == EDGE_BOTTOM then
+		return y >= absY + node.height - grab and y <= absY + node.height
+	end
+
+	return y <= absY + grab and y >= absY
+end
+
+--- What the pointer is over that it could resize with, which is the innermost box under it whose
+--- edge it is on: a press there is a press on that edge rather than a press on the box.
+---@param screen wonderland.Layout.Screen
+---@param root number
+---@param x number
+---@param y number
+---@return wonderland.plugin.Layout.Hit?
+local function findResizeEdge(screen, root, x, y)
+	return findElementAtPosition(screen, root, x, y, 0, 0,
+		function(element, absX, absY, node) ---@param element wonderland.Element
+			return bit.band(element.flags, RESIZE) ~= 0 and element.onchange ~= 0
+				and onResizeEdge(element, x, y, absX, absY, node)
+		end)
+end
+
+--- Whether a window has a cursor shape: `hand2` is one every platform draws, and anything else is
+--- only had where the window says so -- `cursors`, a table of what it has, which a backend that
+--- draws resize cursors fills in. A window that says nothing of its cursors is a window with the
+--- one rather than one that is asked for a shape it will not know.
+---@param window wonderland.RenderWindow
+---@param shape string
+---@return boolean
+local function hasCursor(window, shape)
+	if shape == "hand2" then
+		return true
+	end
+
+	local cursors = window.cursors
+
+	return cursors ~= nil and cursors[shape] ~= nil
+end
+
+--- What the pointer is drawn with, where it is not what it was drawn with before: a shape is asked
+--- of the window it is drawn in, and an edge whose cursor the platform does not have is a hand --
+--- a shape asked for by a name a backend does not know is one it falls over on rather than one it
+--- draws. A screen with no window has no cursor to point with, so it is asked for rather than
+--- assumed, and a window that is asked is a round trip to the server: what is set is what changed.
+---@param ctx wonderland.plugin.Layout.Context
+---@param shape string?
+local function setShape(ctx, shape)
+	local window = ctx.window
+
+	if shape ~= nil and not hasCursor(window, shape) then
+		shape = "hand2"
+	end
+
+	if window.setCursor == nil or shape == ctx.pointing then
+		return
+	end
+
+	ctx.pointing = shape
+
+	if shape ~= nil then
+		window:setCursor(shape)
+	elseif window.resetCursor then
+		window:resetCursor()
+	end
+end
+
 ---@param element wonderland.Element
 ---@param id string
 ---@return wonderland.Element?
@@ -651,12 +742,15 @@ local function setPointer(ctx, x, y, pressed)
 	end
 end
 
---- A slider being dragged: what to tell about it, the box it is measured along, and the two
---- values its ends are. The callback is held rather than the element, because an element is
---- built again every frame and its callbacks are the frame's, while a drag goes on across them.
---- What the pointer is measured against is where the middle of the nub sits at the low end of the
---- slider: a nub is what the pointer grabs, so a pointer at a nub's middle is the value that nub
---- is at, and one whose box has no nub is measured from the end of the box.
+--- What the pointer is dragging: a slider being slid, or a box being resized. The callback is
+--- held rather than the element, because an element is built again every frame and its callbacks
+--- are the frame's, while a drag goes on across them.
+---
+--- A slider is measured along the box it was grabbed in, and what the pointer is measured against
+--- is where the middle of the nub sits at the low end of it: a nub is what the pointer grabs, so a
+--- pointer at a nub's middle is the value that nub is at, and one whose box has no nub is measured
+--- from the end of the box. A resize is measured from where the pointer was when it took hold of
+--- the edge, since what it reports is the size the box was plus how far the pointer has come.
 ---@class wonderland.plugin.Layout.Drag
 ---@field change fun(value: number): any
 ---@field x number # Where the pointer is measured from, absolute
@@ -666,6 +760,9 @@ end
 ---@field min number
 ---@field max number
 ---@field value number? # The value it reported last, which is what says a change is a change
+---@field edge number? # Which edge of a box it took hold of, where it is a resize and not a slide
+---@field size number? # How big that box was when it did
+---@field grows number? # Which way it grows along the axis the edge is on: one, or minus one
 
 --- Where a pointer is along a dragged slider, as the value that sits there: the two ends of the
 --- box are the two ends of the slider, and a pointer past either of them is as far as it goes.
@@ -674,6 +771,16 @@ end
 ---@param y number
 ---@return number
 local function valueAt(drag, x, y)
+	if drag.edge ~= nil then
+		-- A box resized by its edge is as big as it was when it was grabbed plus what the pointer
+		-- has moved since, which is minus what it has moved for an edge on the far side of it: a
+		-- left edge dragged left is a wider box.
+		local size = assert(drag.size) + ((drag.vertical and y or x) - (drag.vertical and drag.y or drag.x))
+			* assert(drag.grows)
+
+		return math.min(math.max(size, drag.min), drag.max)
+	end
+
 	local span = drag.span > 0 and drag.span or 1
 	local along = ((drag.vertical and y or x) - (drag.vertical and drag.y or drag.x)) / span
 	local fraction = math.min(math.max(along, 0), 1)
@@ -699,6 +806,35 @@ local function report(drag, x, y)
 
 	drag.value = value
 	return drag.change(value)
+end
+
+--- The edge a press took hold of, as the drag that goes with it: how big the box is, where the
+--- pointer was, and which way the edge grows. Nothing is reported until the pointer moves, since a
+--- press on an edge is not a resize by itself -- and what it reports then is the size the box would
+--- be, which is what the app says in the style of the frame after.
+---@param hit wonderland.plugin.Layout.Hit
+---@param element wonderland.Element
+---@param x number
+---@param y number
+---@return wonderland.plugin.Layout.Drag
+local function resizeFor(hit, element, x, y)
+	local edge = element.resizeEdge
+	local vertical = edge == EDGE_BOTTOM or edge == EDGE_TOP
+	local grows = edge == EDGE_RIGHT or edge == EDGE_BOTTOM
+
+	return {
+		change = callbacks[element.onchange],
+		x = x,
+		y = y,
+		span = 0,
+		vertical = vertical,
+		min = element.min,
+		max = element.max,
+		value = vertical and hit.node.height or hit.node.width,
+		edge = edge,
+		size = vertical and hit.node.height or hit.node.width,
+		grows = grows and 1 or -1,
+	}
 end
 
 --- The box a press on a slider is measured in, as the drag that goes with it: the box less its
@@ -1475,27 +1611,23 @@ function Layout:event(event)
 		findElementsAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hoveredElements)
 
 		local anyWithMouseDown = false
-		for el, _ in pairs(hoveredElements) do
+		local edge = nil
+
+		for el, hit in pairs(hoveredElements) do
+			if bit.band(el.flags, RESIZE) ~= 0 and onResizeEdge(el, event.x, event.y, hit.absX, hit.absY, hit.node) then
+				-- An edge that can be dragged is the one shape that is not the pointer: which way it
+				-- is dragged is which way its cursor points across the screen or down it.
+				edge = (el.resizeEdge == EDGE_RIGHT or el.resizeEdge == EDGE_LEFT) and "sizewe" or "sizens"
+				break
+			end
+
 			if bit.band(el.flags, TEXT_INPUT) ~= 0 or bit.band(el.flags, SLIDE) ~= 0
 				or el.onmousedown ~= 0 or el.onclick ~= 0 then
 				anyWithMouseDown = true
-				break
 			end
 		end
 
-		-- A screen with no window has no cursor to point with, so it is asked for rather than
-		-- assumed -- and only asked when the answer changed. Setting a cursor is a round trip
-		-- to the server, and one per mouse move is time the pointer spends waiting.
-		local window = ctx.window
-		if window.setCursor and anyWithMouseDown ~= ctx.pointing then
-			ctx.pointing = anyWithMouseDown
-
-			if anyWithMouseDown then
-				window:setCursor("hand2")
-			elseif window.resetCursor then
-				window:resetCursor()
-			end
-		end
+		setShape(ctx, edge or (anyWithMouseDown and "hand2" or nil))
 
 		for el, layout in pairs(hoveredElements) do
 			local handler = callbacks[el.onmousemove]
@@ -1544,6 +1676,22 @@ function Layout:event(event)
 
 		if bar ~= nil then
 			return bar
+		end
+
+		-- A press on the edge of a box that resizes is a press on that edge and nothing else: it is
+		-- asked before anything the box itself would do with a press, so a pane that resizes and a
+		-- row that is clicked are not the same press twice. What it reports is asked of the app on
+		-- the move that follows rather than here: a press on an edge is not a resize until the
+		-- pointer has moved, and a frame is nothing to build for a size that has not changed.
+		local edgeHit = findResizeEdge(assert(ctx.screen), assert(ctx.root), event.x, event.y)
+
+		if edgeHit ~= nil then
+			local drag = resizeFor(edgeHit, edgeHit.element, event.x, event.y)
+
+			ctx.dragging = drag
+			setShape(ctx, drag.vertical and "sizens" or "sizewe")
+
+			return nil
 		end
 
 		local info = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hasMouseDownOrClick)

@@ -38,6 +38,8 @@ ffi.cdef [[
 		double maxLines;             // the most lines a field that takes a paragraph holds, 0 for no end to it
 		double sliderValue;          // where a slider of an element is, and the values its
 		double min, max;             // two ends are, which its dragging is reported between
+		uint32_t resizeEdge;         // which edge of an element is dragged to resize it, and how
+		uint32_t resizeGrab;         // near that edge a press counts as being on it: see `element.RESIZE`
 		uint32_t fontId;             // the font its text is measured in, from the top down
 		uint32_t flags;              // hovered, pressed, focused, takes typing
 		uint32_t index;              // which element this is, from one
@@ -69,6 +71,18 @@ element.THUMB = 128
 --- without this keeps the height its style gave it.
 element.GROWS = 256
 
+--- A box a press on one of its edges resizes: the edge is the one its `resizeEdge` names, and a
+--- press within `resizeGrab` pixels of it inside the box is a press on that edge rather than a
+--- press on the box. What is reported is how big the box has been asked to be, in pixels -- the
+--- size it was when it was grabbed, and how far the pointer has moved since -- so the app is what
+--- keeps the size, as it is what keeps the value of a slider.
+element.RESIZE = 512
+
+--- The edges a box can be resized by, which is the name an app uses said as the number the
+--- element keeps: which way the pointer moves is which way the box grows, so dragging the left
+--- edge to the left and the right edge to the right both make it wider.
+element.EDGE_RIGHT, element.EDGE_LEFT, element.EDGE_TOP, element.EDGE_BOTTOM = 0, 1, 2, 3
+
 --- One element, as the arena holds it. The language server cannot see an ffi.cdef, so the
 --- fields are spelled out here: it is the only way to get them checked. The ones that
 --- hold a number are a handle -- `text`, `name`, `run`, the handlers -- and are read
@@ -96,6 +110,8 @@ element.GROWS = 256
 ---@field sliderValue number # Where a slider is: the value, as the app last said
 ---@field min number # And the values its two ends are
 ---@field max number
+---@field resizeEdge number # Which edge of it is dragged to resize it: see `element.RESIZE`
+---@field resizeGrab number # And how near that edge a press counts as being on it
 ---@field onsubmit number
 ---@field onscroll number
 ---@field oncontextmenu number
@@ -117,6 +133,7 @@ element.GROWS = 256
 ---@field data fun(self: wonderland.Element, data: any): wonderland.Element
 ---@field input fun(self: wonderland.Element, opts: wonderland.InputOpts<any>): wonderland.Element
 ---@field slider fun(self: wonderland.Element, opts: wonderland.SliderOpts<any>): wonderland.Element
+---@field resize fun(self: wonderland.Element, opts: wonderland.ResizeOpts<any>): wonderland.Element
 ---@field thumb fun(self: wonderland.Element): wonderland.Element
 ---@field scroll fun(self: wonderland.Element, offset: number): wonderland.Element
 ---@field onMouseMove fun(self: wonderland.Element, message: any): wonderland.Element
@@ -332,36 +349,47 @@ function element.from(value)
 	return intoElement(value)
 end
 
+--- The last child of an element, as the index the element is: nought where it has none.
+---
+--- An index rather than the element or nothing, because what it is for is the loop that adds
+--- children, and that loop is one shape to compile only if the value it walks along is one type from
+--- the first turn to the last: a value that is nothing on one turn and an element on the next is a
+--- loop the recorder gives up on -- see `link`.
 ---@param self wonderland.Element
----@return wonderland.Element? # The child it should follow, if it has one
+---@return number
 local function lastChild(self)
 	local index = self.childFirst
-	if index == 0 then
-		return nil
+
+	while index ~= 0 do
+		local nextSibling = pointers[index].nextSibling
+
+		if nextSibling == 0 then
+			return index
+		end
+
+		index = nextSibling
 	end
 
-	local child = pointers[index]
-	while child.nextSibling ~= 0 do
-		child = pointers[child.nextSibling]
-	end
-
-	return child
+	return 0
 end
 
+--- Adds one child after another, both as the indices they are: the index nought is the first child
+--- rather than a child that is nothing, which is what keeps the value the loop walks along a number
+--- the whole way round.
 ---@param parent wonderland.Element
----@param after wonderland.Element?
+---@param after number # The index of the child it follows, nought for the first
 ---@param child wonderland.Element
----@return wonderland.Element # The child, so the next one knows what to follow
+---@return number # The index of the child, so the next one knows what to follow
 local function link(parent, after, child)
-	if after then
-		after.nextSibling = child.index
-	else
+	if after == 0 then
 		parent.childFirst = child.index
+	else
+		pointers[after].nextSibling = child.index
 	end
 
 	parent.childCount = parent.childCount + 1
 
-	return child
+	return child.index
 end
 
 -- ────────────────────────────────────────────────────────────────
@@ -673,6 +701,60 @@ function methods:slider(opts)
 	self.flags = bit.bor(self.flags, element.SLIDE)
 	self.sliderValue = opts.value
 	self.min, self.max = opts.min or 0, opts.max or 1
+	self.onchange = pushCallback(opts.onchange)
+
+	return self
+end
+
+---@class wonderland.ResizeOpts<T>
+---@field edge "right" | "left" | "top" | "bottom" # Which edge of the box is dragged, and which way it grows
+---@field grab number? # How near that edge a press counts as being on it, four pixels by default
+---@field min number? # The least the box can be sized to, nought by default
+---@field max number? # And the most, without end by default
+---@field onchange fun(size: number): T
+
+--- What edges are called, as the numbers an element keeps them as.
+local EDGES = {
+	right = element.EDGE_RIGHT,
+	left = element.EDGE_LEFT,
+	top = element.EDGE_TOP,
+	bottom = element.EDGE_BOTTOM,
+}
+
+--- A box a press near one of its edges resizes: what is reported is how big the box has been asked
+--- to be, in pixels, which is the size it was when it was grabbed and how far the pointer has moved
+--- since -- the way a slider reports the value the pointer sits at rather than a difference. What
+--- the box is drawn as is the app's: it says the size in the style of whatever it is resizing, and
+--- the frame after the message is the one that is that size.
+---
+---   local wide = 240
+---
+---   div():style(sidebar:width(wide)):resize({
+---     edge = "right",
+---     min = 120,
+---     max = 480,
+---     onchange = function(size) return { type = "sidebar", size = size } end,
+---   })
+---
+--- The edge is grabbed inside the box rather than outside it, so a handle is a box of its own that
+--- is as wide as it should be grabbed by, and one element per edge where a box is resized by two
+--- of them. A box with no edge of its own -- a pane that fills what it is given -- has no size to
+--- change: what is resized is the size the style of the box says.
+---@generic T
+---@param opts wonderland.ResizeOpts<T>
+---@return wonderland.Element
+function methods:resize(opts)
+	check(self)
+	local edge = EDGES[opts.edge]
+
+	if edge == nil then
+		error("resize: edge is one of right, left, top or bottom, not " .. tostring(opts.edge), 2)
+	end
+
+	self.flags = bit.bor(self.flags, element.RESIZE)
+	self.resizeEdge = edge
+	self.resizeGrab = opts.grab or 4
+	self.min, self.max = opts.min or 0, opts.max or math.huge
 	self.onchange = pushCallback(opts.onchange)
 
 	return self

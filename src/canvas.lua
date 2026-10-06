@@ -19,6 +19,7 @@
 -- allocates and what a caller keeps is its own state: this frame's spectrum is the app's, and so is
 -- the history of the last ones.
 local ffi = require("ffi")
+local Quads = require("wonderland.util.quad_batch")
 
 --- The colours a canvas knows by name. What a caller writes as a hex string is anything at all.
 local NAMED = {
@@ -31,25 +32,22 @@ local NAMED = {
 	gray = { 0.5, 0.5, 0.5 },
 }
 
---- The four numbers a colour is, as the numbers a frame is written with: a name, a hex string, or
---- a table of channels. What none of those is is white, which is what a canvas draws where it was
---- given something it cannot read rather than drawing nothing.
+--- The colour of a shape as the number a frame is written with: a name, a hex string, or a table of
+--- channels. What none of those is is white, which is what a canvas draws where it was given
+--- something it cannot read rather than drawing nothing.
 ---@param colour string|wonderland.Color
----@return number r
----@return number g
----@return number b
----@return number a
+---@return number # The four bytes of it, which is what a quad takes
 local function colourOf(colour)
 	if type(colour) == "table" then
-		return colour.r or colour[1] or 0, colour.g or colour[2] or 0, colour.b or colour[3] or 0,
-			colour.a or colour[4] or 1
+		return Quads.colour(colour.r or colour[1] or 0, colour.g or colour[2] or 0, colour.b or colour[3] or 0,
+			colour.a or colour[4] or 1)
 	end
 
 	if type(colour) == "string" then
 		local named = NAMED[colour:lower()]
 
 		if named ~= nil then
-			return named[1], named[2], named[3], 1
+			return Quads.colour(named[1], named[2], named[3], 1)
 		end
 
 		local hex = colour:match("^#(%x+)$")
@@ -65,11 +63,11 @@ local function colourOf(colour)
 				return step == 1 and byte / 15 or byte / 255
 			end
 
-			return part(0), part(1), part(2), #hex == 8 and part(3) or 1
+			return Quads.colour(part(0), part(1), part(2), #hex == 8 and part(3) or 1)
 		end
 	end
 
-	return 1, 1, 1, 1
+	return 0xffffffff
 end
 
 --- Where a point is in the frame's own coordinates: what the frame's vertices are written in.
@@ -172,12 +170,9 @@ end
 --- whether or not the shape needs cutting.
 ---@param self wonderland.Canvas
 ---@param points number[] # The corners, from the canvas's corner
----@param r number
----@param g number
----@param b number
----@param a number
+---@param colour number # The four bytes of it, as `colourOf` answers with
 ---@return wonderland.Canvas
-local function fan(self, points, r, g, b, a)
+local function fan(self, points, colour)
 	local store = self.store
 	local clip = store.clip
 	local count = #points / 2
@@ -228,7 +223,7 @@ local function fan(self, points, r, g, b, a)
 	for at = 1, count - 2 do
 		batch:triangle(toNDC(moved[1], windowWidth), -toNDC(moved[2], windowHeight),
 			toNDC(moved[at * 2 + 1], windowWidth), -toNDC(moved[at * 2 + 2], windowHeight),
-			toNDC(moved[at * 2 + 3], windowWidth), -toNDC(moved[at * 2 + 4], windowHeight), z, r, g, b, a,
+			toNDC(moved[at * 2 + 3], windowWidth), -toNDC(moved[at * 2 + 4], windowHeight), z, colour,
 			white)
 	end
 
@@ -313,17 +308,17 @@ function Canvas:rect(x, y, width, height, colour, radius)
 		return self
 	end
 
-	local r, g, b, a = colourOf(colour)
+	local rgba = colourOf(colour)
 	local cut = left < clip.left or top < clip.top or right > clip.right or bottom > clip.bottom
 
 	if not cut then
 		if radius ~= nil and radius > 0 then
 			store.batch:roundQuad(toNDC(left, store.windowWidth), -toNDC(top, store.windowHeight),
-				toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight), store.z, r, g, b, a,
-				store.white, 0, 0, 1, 1, radius)
+				toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight), store.z, rgba,
+				store.white, nil, nil, radius)
 		else
 			store.batch:quad(toNDC(left, store.windowWidth), -toNDC(top, store.windowHeight),
-				toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight), store.z, r, g, b, a,
+				toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight), store.z, rgba,
 				store.white)
 		end
 
@@ -341,13 +336,13 @@ function Canvas:rect(x, y, width, height, colour, radius)
 
 	if radius ~= nil and radius > 0 then
 		store.batch:roundQuad(toNDC(drawnLeft, store.windowWidth), -toNDC(drawnTop, store.windowHeight),
-			toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight), store.z, r, g, b, a,
-			store.white, 0, 0, 1, 1, radius, toNDC(left, store.windowWidth),
+			toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight), store.z, rgba,
+			store.white, nil, nil, radius, nil, nil, nil, toNDC(left, store.windowWidth),
 			-toNDC(top, store.windowHeight), toNDC(right, store.windowWidth),
 			-toNDC(bottom, store.windowHeight))
 	else
 		store.batch:quad(toNDC(drawnLeft, store.windowWidth), -toNDC(drawnTop, store.windowHeight),
-			toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight), store.z, r, g, b, a,
+			toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight), store.z, rgba,
 			store.white)
 	end
 
@@ -379,7 +374,7 @@ function Canvas:line(x1, y1, x2, y2, thickness, colour)
 	local half = thickness / 2
 	-- Either side of the line, which is its direction turned a quarter turn.
 	local nx, ny = -dy / length * half, dx / length * half
-	local r, g, b, a = colourOf(colour)
+	local rgba = colourOf(colour)
 	local points = {
 		x1 + nx, y1 + ny,
 		x2 + nx, y2 + ny,
@@ -387,7 +382,7 @@ function Canvas:line(x1, y1, x2, y2, thickness, colour)
 		x1 - nx, y1 - ny,
 	}
 
-	return fan(self, points, r, g, b, a)
+	return fan(self, points, rgba)
 end
 
 --- A circle, as a shape of as many sides as it is told: sixteen, or as many as make a side shorter
@@ -403,10 +398,10 @@ function Canvas:circle(x, y, radius, colour, sides)
 		return self
 	end
 
-	local r, g, b, a = colourOf(colour)
+	local rgba = colourOf(colour)
 	local count = sides or math.max(8, math.min(64, math.ceil(radius)))
 
-	return fan(self, circlePoints(x, y, radius, count), r, g, b, a)
+	return fan(self, circlePoints(x, y, radius, count), rgba)
 end
 
 --- A shape of as many corners as are given, filled: the corners are `x1, y1, x2, y2`, and on.
@@ -418,9 +413,9 @@ end
 ---@param colour string|wonderland.Color
 ---@return wonderland.Canvas
 function Canvas:polygon(points, colour)
-	local r, g, b, a = colourOf(colour)
+	local rgba = colourOf(colour)
 
-	return fan(self, points, r, g, b, a)
+	return fan(self, points, rgba)
 end
 
 return Canvas

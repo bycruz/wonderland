@@ -263,7 +263,7 @@ local layout = {}
 --- What a screen is laid out against. A real window has more than this and a headless
 --- screen has less; both are laid out by their size, the redraw flag is how the ui asks for
 --- another frame, and the cursor is there to be pointed with when there is one.
----@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))? }
+---@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))?, cursors: table<string, boolean>? }
 
 ---@class wonderland.layout
 ---@field new fun(capacity: number?): wonderland.Layout.Screen
@@ -801,7 +801,13 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 
 	local totalGaps = math.max(0, count - 1) * node.gap
 	local remaining = containerMain - totalMain - totalGaps
-	local autoSpace = autoCount > 0 and (remaining / autoCount) or 0
+
+	-- What is left for the children that asked for what is left is never less than nothing: a box
+	-- cannot be a negative number of pixels wide, and one that is comes out drawn inside out -- the
+	-- line after it is drawn on top of it, which is a screen that reads as a rendering fault rather
+	-- than as a box with no room in it. A row of children that ask for more than the row has is a
+	-- row with nothing left over, and the ones that asked for a share of it get none.
+	local autoSpace = autoCount > 0 and math.max(0, remaining / autoCount) or 0
 
 	-- Solve the children, then place them.
 	for at = 0, count - 1 do

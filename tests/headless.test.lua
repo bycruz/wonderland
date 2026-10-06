@@ -82,6 +82,7 @@ end
 
 local WHITE = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 }
 local BLACK = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 }
+local BLUE = { r = 0.0, g = 0.0, b = 1.0, a = 1.0 }
 
 ---@param pixels string
 ---@param width number
@@ -601,6 +602,164 @@ test.skipIf(not canRender)("a slider reports where it was pressed and dragged", 
 	test.equal(last(), 25, "and moving after that is not dragging it")
 
 	test.equal(#slid, 5, "which is the press, the three drags and letting go, and nothing else")
+
+	screen:close()
+end)
+
+-- A box is resized by a press on one of its edges: what is reported is how big it is asked to be,
+-- which is the size it was when the edge was grabbed plus how far the pointer has come since, held
+-- between the two sizes the app named. It is a size rather than a difference because what the box
+-- is drawn at is the app's: the frame after the message is the one that is that size, and a box
+-- that reported a difference would be an app adding up what it already knows.
+test.skipIf(not canRender)("a box resized by an edge reports the size it is asked to be", function()
+	local sizes = {}
+
+	---@param pane wonderland.Element
+	local function sidebar(pane)
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children(
+			pane:resize({
+				edge = "right",
+				min = 100,
+				max = 400,
+				onchange = function(size) return { type = "resized", size = size } end,
+			}):children(div():style({ width = { rel = 1.0 }, height = { rel = 1.0 } }))
+		)
+	end
+
+	local screen = wonderland.headless.new(function()
+		return sidebar(div():style({ width = { abs = 200 }, height = { rel = 1.0 }, bg = BLUE }))
+	end, {
+		width = 300,
+		height = 100,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			sizes[#sizes + 1] = message.size
+		end,
+	})
+
+	---@param name string
+	---@param x number
+	local function send(name, x)
+		screen:event({ name = name, window = screen.window, x = x, y = 50, button = 1 })
+	end
+
+	---@return number
+	local function last()
+		return sizes[#sizes]
+	end
+
+	screen:draw()
+
+	-- The edge is grabbed inside the box, so the press is on the last few pixels of it, and a press
+	-- is not a resize by itself: the box is already the size it says.
+	send("mousePress", 199)
+	test.equal(#sizes, 0, "a press on the edge resizes nothing until the pointer moves")
+
+	send("mouseMove", 249)
+	test.equal(last(), 250, "and then the box is as much wider as the pointer has gone")
+
+	send("mouseMove", 500)
+	test.equal(last(), 400, "dragging past the widest the app allows stops at it")
+
+	send("mouseMove", 0)
+	test.equal(last(), 100, "and past the narrowest stops at that")
+
+	send("mouseRelease", 249)
+	test.equal(last(), 250, "letting go leaves the box where it was let go")
+
+	send("mouseMove", 280)
+	test.equal(last(), 250, "and moving after that is not resizing it")
+
+	test.equal(#sizes, 4, "which is the three drags and letting go, and nothing else")
+
+	screen:close()
+end)
+
+test.skipIf(not canRender)("a press away from the edge is a press on the box", function()
+	local messages = {}
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children(
+			div():style({ width = { abs = 200 }, height = { rel = 1.0 }, bg = BLUE })
+				:resize({ edge = "right", onchange = function(size) return { type = "resized", size = size } end })
+				:onClick({ type = "clicked" })
+		)
+	end, {
+		width = 300,
+		height = 100,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			messages[#messages + 1] = message.type
+		end,
+	})
+
+	---@param name string
+	---@param x number
+	local function send(name, x)
+		screen:event({ name = name, window = screen.window, x = x, y = 50, button = 1 })
+	end
+
+	screen:draw()
+
+	-- The middle of the box is not its edge, so what a press there is is what the box itself does
+	-- with a press -- and a drag from there moves nothing.
+	send("mousePress", 100)
+	send("mouseMove", 160)
+	send("mouseRelease", 160)
+
+	test.equal(#messages, 1, "the press was a click and the drag was nothing")
+	test.equal(messages[1], "clicked")
+
+	-- And the edge is a press on the edge rather than one on the box: the click is not told, and no
+	-- size is reported until the pointer has moved.
+	send("mousePress", 199)
+	send("mouseRelease", 199)
+
+	test.equal(#messages, 1, "while a press on the edge is neither a click nor a resize by itself")
+
+	screen:close()
+end)
+
+test.skipIf(not canRender)("an edge on the far side of a box grows it the other way", function()
+	local sizes = {}
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children(
+			div():style({ width = { abs = 200 }, height = { rel = 1.0 }, bg = BLUE }):resize({
+				edge = "left",
+				grab = 8,
+				onchange = function(size) return { type = "resized", size = size } end,
+			})
+		)
+	end, {
+		width = 300,
+		height = 100,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			sizes[#sizes + 1] = message.size
+		end,
+	})
+
+	---@param name string
+	---@param x number
+	local function send(name, x)
+		screen:event({ name = name, window = screen.window, x = x, y = 50, button = 1 })
+	end
+
+	screen:draw()
+
+	-- The left edge is the one grabbed, and the pointer moving left is the box growing: a box that
+	-- grew by a pointer moving right would be a box resized by the wrong side of itself.
+	send("mousePress", 4)
+	send("mouseMove", 4 - 40)
+
+	test.equal(sizes[#sizes], 240, "dragging the left edge left makes the box wider")
+
+	-- What the pointer is measured from is where it was when it took hold, and being inside the box
+	-- is what counts as being on its edge: a press past it is a press on what is behind it.
+	send("mouseRelease", 4 - 40)
+
+	test.equal(#sizes, 1, "and one press is one message")
 
 	screen:close()
 end)

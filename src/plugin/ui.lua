@@ -131,11 +131,25 @@ function UI:present(window)
 	self:requestRedraw(window, true)
 end
 
+-- Where a coordinate of a frame is in the frame's own numbers, which is what the gpu is given.
+--
+-- The window they are worked out against is taken once a frame rather than handed to every quad: a
+-- frame is one size and a quad is placed in it a few thousand times, and two arguments to every one
+-- of those calls are two values the recorder has to keep alive across them. What is kept is what a
+-- coordinate is worth -- half the window, as the multiply it is divided by -- which is what makes
+-- this a multiply rather than a division as well.
+local frameScaleX, frameScaleY = 1, 1
+
 ---@param pos number
----@param screenSize number
 ---@return number
-local function toNDC(pos, screenSize)
-	return (pos / (screenSize * 0.5)) - 1.0
+local function toNDCX(pos)
+	return pos * frameScaleX - 1.0
+end
+
+---@param pos number
+---@return number
+local function toNDCY(pos)
+	return 1.0 - pos * frameScaleY
 end
 
 --- Converts a z-index to an NDC z-value
@@ -145,7 +159,7 @@ local function convertZ(z)
 end
 
 -- A box with no colour of its own is drawn with its texture as it is, which is white.
-local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
+local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 255, 255, 255, 255
 
 --- Where a box that scrolls shows through: a quad is drawn down to this, and the part of the
 --- texture that goes with the part that is left, so a glyph half out of a pane is cut rather
@@ -178,7 +192,7 @@ local WHITE_R, WHITE_G, WHITE_B, WHITE_A = 1.0, 1.0, 1.0, 1.0
 -- A highlight of the text's own colour would be invisible on a background of a shade near it, which
 -- is the one thing a highlight cannot be.
 local SELECTION_R, SELECTION_G, SELECTION_B = 0.23, 0.51, 0.96
-local SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B = 1.0, 1.0, 1.0
+local SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B = 255, 255, 255
 
 -- How wide a highlight is at the least, which is what an empty line inside a selection is drawn as:
 -- a line of nothing selected still has to look like it is part of what is selected.
@@ -197,28 +211,22 @@ local PAST_THE_LINE = 1 << 24
 
 ---@param batch wonderland.QuadBatch
 ---@param clip wonderland.plugin.UI.Clip
----@param windowWidth number
----@param windowHeight number
 ---@param left number
 ---@param top number
 ---@param right number
 ---@param bottom number
 ---@param z number
----@param r number
----@param g number
----@param b number
----@param a number
+---@param colour number # The colour as its four bytes: see `QuadBatch`'s `colour` and `rgba`
 ---@param texture number
----@param u0 number
----@param v0 number
----@param u1 number
----@param v1 number
+---@param uv0 number? # The part of the picture the box is, as its corners: see `QuadBatch`'s `uv`
+---@param uv1 number?
 ---@param radius number? # How round the box's corners are, in pixels, nothing for square ones
 ---@param band number? # How sharp the edge of it is, one pixel either side by default
 ---@param grow number? # How far past the box the quad is drawn: a shadow is its own blur
+---@param own number? # Whether the picture is drawn as it is rather than through the colour
 ---@param blur number? # How far what the box draws is spread, in pixels, nothing for not at all
-local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, right, bottom, z, r, g, b, a,
-	texture, u0, v0, u1, v1, radius, band, grow, own, blur)
+local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, texture, uv0, uv1, radius, band,
+	grow, own, blur)
 	if blur ~= nil and blur > 0 then
 		-- What a blur spreads has to be drawn somewhere, so the quad is grown by the room the taps
 		-- read in: twice the blur, which is as far as the furthest of them reaches.
@@ -245,42 +253,36 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 	if drawnLeft >= clip.left and drawnTop >= clip.top and drawnRight <= clip.right and drawnBottom <= clip.bottom then
 		-- Cut and square are a call each rather than one argument to the same call: they are not
 		-- drawn in the same numbers, and a screen of text is nearly all of one of them.
+		--
+		-- A quad drawn past its box is the one case where the corners and the box differ, and it is
+		-- the box that is handed over then: a quad that is its own box leaves the call at the
+		-- radius, which is four values the recorder does not have to keep alive for nothing.
+		-- The box it is drawn as, in the coordinates the gpu reads, which are the ones this batch
+		-- was handed a viewport for: a multiply and a subtract each rather than a call each, because
+		-- a call among the arguments of a call is one the recorder has to keep the arguments it has
+		-- already worked out alive across -- see `putBox` in `wonderland.util.quad_batch`.
+		local scaleX, scaleY = frameScaleX, frameScaleY
+		local ndcLeft, ndcTop = left * scaleX - 1.0, 1.0 - top * scaleY
+		local ndcRight, ndcBottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
+
 		if band or (radius and radius > 0) then
-			batch:roundQuad(
-				toNDC(drawnLeft, windowWidth),
-				-toNDC(drawnTop, windowHeight),
-				toNDC(drawnRight, windowWidth),
-				-toNDC(drawnBottom, windowHeight),
-				z,
-				r, g, b, a,
-				texture,
-				u0, v0, u1, v1,
-				radius or 0,
-				toNDC(left, windowWidth),
-				-toNDC(top, windowHeight),
-				toNDC(right, windowWidth),
-				-toNDC(bottom, windowHeight),
-				band,
-				own,
-				blur
-			)
+			if grow then
+				batch:roundQuad(drawnLeft * scaleX - 1.0, 1.0 - drawnTop * scaleY, drawnRight * scaleX - 1.0,
+					1.0 - drawnBottom * scaleY, z, colour, texture, uv0, uv1, radius or 0, band, own, blur,
+					ndcLeft, ndcTop, ndcRight, ndcBottom)
+			else
+				batch:roundQuad(ndcLeft, ndcTop, ndcRight, ndcBottom, z, colour, texture, uv0, uv1,
+					radius or 0, band, own, blur)
+			end
 		else
-			batch:quad(
-				toNDC(left, windowWidth),
-				-toNDC(top, windowHeight),
-				toNDC(right, windowWidth),
-				-toNDC(bottom, windowHeight),
-				z,
-				r, g, b, a,
-				texture,
-				u0, v0, u1, v1,
-				own
-			)
+			batch:quad(ndcLeft, ndcTop, ndcRight, ndcBottom, z, colour, texture, uv0, uv1, own)
 		end
 
 		return
 	end
 
+	-- The part of the quad that shows: what the clip cut off it is not drawn, and the box the
+	-- corners of it are measured from is still the whole box -- see below.
 	local atLeft = drawnLeft < clip.left and clip.left or drawnLeft
 	local atTop = drawnTop < clip.top and clip.top or drawnTop
 	local atRight = drawnRight > clip.right and clip.right or drawnRight
@@ -299,48 +301,23 @@ local function clippedQuad(batch, clip, windowWidth, windowHeight, left, top, ri
 	-- Both calls take that box: `roundQuad` asks for it, and `quad` cannot, because a quad of two
 	-- corners is its own box. So a square box that a clip cut down is drawn with `roundQuad` at a
 	-- radius of nought -- a cut of the picture, with an edge as hard as the one it has uncut.
+	local scaleX, scaleY = frameScaleX, frameScaleY
+	local ndcLeft, ndcTop = left * scaleX - 1.0, 1.0 - top * scaleY
+	local ndcRight, ndcBottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
+	local shownLeft, shownTop = atLeft * scaleX - 1.0, 1.0 - atTop * scaleY
+	local shownRight, shownBottom = atRight * scaleX - 1.0, 1.0 - atBottom * scaleY
+
 	if band or (radius and radius > 0) then
-		batch:roundQuad(
-			toNDC(atLeft, windowWidth),
-			-toNDC(atTop, windowHeight),
-			toNDC(atRight, windowWidth),
-			-toNDC(atBottom, windowHeight),
-			z,
-			r, g, b, a,
-			texture,
-			u0, v0, u1, v1,
-			radius or 0,
-			toNDC(left, windowWidth),
-			-toNDC(top, windowHeight),
-			toNDC(right, windowWidth),
-			-toNDC(bottom, windowHeight),
-			band,
-			own,
-			blur
-		)
+		batch:roundQuad(shownLeft, shownTop, shownRight, shownBottom, z, colour, texture, uv0, uv1,
+			radius or 0, band, own, blur, ndcLeft, ndcTop, ndcRight, ndcBottom)
 
 		return
 	end
 
-	batch:roundQuad(
-		toNDC(atLeft, windowWidth),
-		-toNDC(atTop, windowHeight),
-		toNDC(atRight, windowWidth),
-		-toNDC(atBottom, windowHeight),
-		z,
-		r, g, b, a,
-		texture,
-		u0, v0, u1, v1,
-		0,
-		toNDC(left, windowWidth),
-		-toNDC(top, windowHeight),
-		toNDC(right, windowWidth),
-		-toNDC(bottom, windowHeight),
-		0,
-		own,
-		blur
-	)
+	batch:roundQuad(shownLeft, shownTop, shownRight, shownBottom, z, colour, texture, uv0, uv1, 0, 0, own, blur,
+		ndcLeft, ndcTop, ndcRight, ndcBottom)
 end
+
 
 ---@param batch wonderland.QuadBatch
 ---@param bx number
@@ -360,8 +337,8 @@ local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowW
 		return
 	end
 
-	clippedQuad(batch, clip, windowWidth, windowHeight, bx, by, bx + bw, by + bh, convertZ(z + 1), r, g, b, a, 0,
-		0, 0, 1, 1, nil, nil, nil, nil, blur)
+	clippedQuad(batch, clip, bx, by, bx + bw, by + bh, convertZ(z + 1), QuadBatch.colour(r, g, b, a), 0, nil, nil,
+		nil, nil, nil, nil, blur)
 end
 
 --- A line is drawn from the run it measured into, which is where its glyphs are. A run of
@@ -381,7 +358,11 @@ end
 ---@param to number?
 local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, windowWidth, windowHeight,
 	value, from, to)
-	local r, g, b = node.fgR / 255, node.fgG / 255, node.fgB / 255
+	-- What a glyph is drawn in is the same for every glyph of the line, so it is packed once here
+	-- rather than four numbers narrowed into a colour per glyph: the colour of the text, and the one
+	-- that reads on the highlight for a glyph the selection covers.
+	local ink = QuadBatch.rgba(node.fgR, node.fgG, node.fgB, node.fgA)
+	local marked = QuadBatch.rgba(SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B, node.fgA)
 	local selecting = value ~= nil and from ~= nil and to ~= nil and from < to
 	local lineBase = 0
 
@@ -393,6 +374,11 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 	local font = node.font ~= 0 and fontManager:get(node.font - 1)
 		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
 
+	-- Where a glyph with no picture of its own is drawn from, which is the same answer for every
+	-- glyph of the line: asked once, since asking it per glyph is a walk of the font's faces per
+	-- glyph per frame.
+	local fallback = font:picture()
+	local glyphs = assert(run.glyphs)
 	local zIndex = convertZ(z)
 
 	-- One array of glyphs and one of lines, read by index: the run was measured as structs, so
@@ -411,9 +397,9 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 		local originX = x + offset
 
 		for at = 0, line.count - 1 do
-			local glyph = assert(run.glyphs)[line.first + at]
-			local picture = glyph.texture ~= 0 and glyph.texture or font:picture()
-			local gr, gg, gb = r, g, b
+			local glyph = glyphs[line.first + at]
+			local picture = glyph.texture ~= 0 and glyph.texture or fallback
+			local colour = ink
 
 			-- A glyph the selection covers is drawn in the colour that reads on the highlight rather
 			-- than in the colour of the text: what a glyph came from is the byte it kept, so which
@@ -422,7 +408,7 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 				local byte = lineBase + glyph.cluster
 
 				if byte >= from and byte < to then
-					gr, gg, gb = SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B
+					colour = marked
 				end
 			end
 
@@ -430,9 +416,8 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 			-- than through the text's colour: what the colour is of it is how opaque the element is.
 			-- A line inside a blurred element is drawn with every glyph of it spread by the same
 			-- blur, which is what makes the text of one soft rather than its box alone.
-			clippedQuad(batch, clip, windowWidth, windowHeight, originX + glyph.x, y + glyph.y,
-				originX + glyph.x + glyph.width, y + glyph.y + glyph.height, zIndex, gr, gg, gb,
-				node.fgA / 255, picture, glyph.u0, glyph.v0, glyph.u1, glyph.v1, nil, nil, nil,
+			clippedQuad(batch, clip, originX + glyph.x, y + glyph.y, originX + glyph.x + glyph.width,
+				y + glyph.y + glyph.height, zIndex, colour, picture, glyph.uv0, glyph.uv1, nil, nil, nil,
 				glyph.own, node.blur)
 		end
 
@@ -624,9 +609,9 @@ local function selectionQuads(batch, clip, caret, element, node, x, y, z, fontMa
 				right = inkedRight
 			end
 
-			clippedQuad(batch, clip, windowWidth, windowHeight, x + offset + left, y + line * lineStep,
-				x + offset + right, y + line * lineStep + lineStep, zIndex, SELECTION_R, SELECTION_G,
-				SELECTION_B, 1.0, 0, 0, 0, 1, 1)
+			clippedQuad(batch, clip, x + offset + left, y + line * lineStep, x + offset + right,
+				y + line * lineStep + lineStep, zIndex,
+				QuadBatch.colour(SELECTION_R, SELECTION_G, SELECTION_B, 1.0), 0, nil, nil)
 		end
 
 		start = lineTo + 2
@@ -773,8 +758,8 @@ local function addCaretQuad(batch, caret, windowWidth, windowHeight)
 		return
 	end
 
-	clippedQuad(batch, caret.clip, windowWidth, windowHeight, caret.left, caret.top, caret.right,
-		caret.bottom, convertZ(caret.z), caret.r, caret.g, caret.b, caret.a, 0, 0, 0, 1, 1)
+	clippedQuad(batch, caret.clip, caret.left, caret.top, caret.right, caret.bottom,
+		convertZ(caret.z), QuadBatch.rgba(caret.r, caret.g, caret.b, caret.a), 0, nil, nil)
 end
 
 --- Walks the laid out screen, which is an array of nodes: a walk is an index and an
@@ -813,8 +798,7 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		if field.fgA == 0 then
 			caret.r, caret.g, caret.b, caret.a = WHITE_R, WHITE_G, WHITE_B, WHITE_A
 		else
-			caret.r, caret.g, caret.b, caret.a =
-				field.fgR / 255, field.fgG / 255, field.fgB / 255, field.fgA / 255
+			caret.r, caret.g, caret.b, caret.a = field.fgR, field.fgG, field.fgB, field.fgA
 		end
 	end
 
@@ -825,20 +809,19 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		local blur = node.shadowBlur
 		local band = blur > 0 and (1 / (2 * blur)) or 1
 
-		clippedQuad(batch, clip, windowWidth, windowHeight, x + node.shadowX, y + node.shadowY,
-			x + node.shadowX + node.width, y + node.shadowY + node.height, convertZ(z),
-			node.shadowR / 255, node.shadowG / 255, node.shadowB / 255, node.shadowA / 255,
-			0, 0, 0, 1, 1, node.radius, band, blur + 1)
+		clippedQuad(batch, clip, x + node.shadowX, y + node.shadowY, x + node.shadowX + node.width,
+			y + node.shadowY + node.height, convertZ(z),
+			QuadBatch.rgba(node.shadowR, node.shadowG, node.shadowB, node.shadowA), 0, nil, nil, node.radius,
+			band, blur + 1)
 	end
 
 	if node.visible ~= 0 and node.paint ~= 0 then
 		-- The colours the node came out with, whatever said them: a box with a picture and no colour
 		-- of its own was given white by its style, and one that named a colour of its own is drawn in
 		-- it however dark that colour is.
-		clippedQuad(batch, clip, windowWidth, windowHeight, x, y, x + node.width, y + node.height,
-			convertZ(z), node.bgR / 255, node.bgG / 255, node.bgB / 255, node.bgA / 255, node.texture,
-			node.u0 / 65535, node.v0 / 65535, node.u1 / 65535, node.v1 / 65535, node.radius, nil, nil,
-			nil, node.blur)
+		clippedQuad(batch, clip, x, y, x + node.width, y + node.height, convertZ(z),
+			QuadBatch.rgba(node.bgR, node.bgG, node.bgB, node.bgA), node.texture,
+			node.u0 + node.v0 * 65536, node.u1 + node.v1 * 65536, node.radius, nil, nil, nil, node.blur)
 	end
 
 	-- What the element draws itself goes where its own text goes: over what is under it -- the
@@ -959,10 +942,10 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 
 		-- Drawn inside its own pane rather than the clip it is under, so a bar cannot come out of
 		-- the box it belongs to and over whatever is beside it.
-		clippedQuad(batch, below, windowWidth, windowHeight, left, y, left + bar.width, y + node.height,
-			convertZ(z), bar.r / 255, bar.g / 255, bar.b / 255, bar.a / 255 * 0.25, 0, 0, 0, 1, 1)
-		clippedQuad(batch, below, windowWidth, windowHeight, left, top, left + bar.width, top + thumb,
-			convertZ(z + 1), bar.r / 255, bar.g / 255, bar.b / 255, bar.a / 255, 0, 0, 0, 1, 1)
+		clippedQuad(batch, below, left, y, left + bar.width, y + node.height, convertZ(z),
+			QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a * 0.25), 0, nil, nil)
+		clippedQuad(batch, below, left, top, left + bar.width, top + thumb, convertZ(z + 1),
+			QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a), 0, nil, nil)
 	end
 end
 
@@ -1360,6 +1343,10 @@ function UI:walk(window, ctx, key)
 
 	batch:reset()
 	batch:setViewport(width, height)
+
+	-- What a coordinate of this frame is worth in it, which every quad of it is written with: see
+	-- `toNDCX`, which is a multiply because of these two.
+	frameScaleX, frameScaleY = 2 / width, 2 / height
 
 	generateNodeQuads(batch, assert(ctx.screen), { left = 0, top = 0, right = width,
 		bottom = height }, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret, nil, self.canvas)

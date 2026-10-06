@@ -1,5 +1,6 @@
 -- The instances of a frame: what one is made of, and what of it is packed. Nothing here needs a
 -- gpu: the batch writes plain memory, and what it wrote is what is read back.
+local bit = require("bit")
 local test = require("lde-test")
 local batch = require("wonderland.util.quad_batch")
 
@@ -13,8 +14,8 @@ local function written(opts)
 
 	-- The whole of the window, so that a radius of twenty four is not cut down to the box it is
 	-- asked for: a radius bigger than the box is the roundest the box can be.
-	quads:roundQuad(-1, -1, 1, 1, 1, opts.r or 0.5, 0.25, 1.0, 0.5, 7, opts.u0 or 0.5, 0.25, 1.0, 0.75,
-		opts.radius, nil, nil, nil, nil, opts.band, nil, opts.blur)
+	quads:roundQuad(-1, -1, 1, 1, 1, batch.colour(opts.r or 0.5, 0.25, 1.0, 0.5), 7,
+		batch.uv(opts.u0 or 0.5, 0.25), batch.uv(1.0, 0.75), opts.radius, opts.band, nil, opts.blur)
 
 	return quads.instances[0]
 end
@@ -66,10 +67,12 @@ end)
 test.it("a colour is kept as a byte", function()
 	local instance = written({ radius = 0 })
 
-	test.equal(instance.r, 128, "half of one is a byte of 128")
-	test.equal(instance.g, 64, "and a quarter of it is 64")
-	test.equal(instance.b, 255, "as one is the top of the range")
-	test.equal(instance.a, 128, "each channel on its own")
+	local rgba = instance.rgba
+
+	test.equal(bit.band(rgba, 0xff), 128, "half of one is a byte of 128")
+	test.equal(bit.band(bit.rshift(rgba, 8), 0xff), 64, "and a quarter of it is 64")
+	test.equal(bit.band(bit.rshift(rgba, 16), 0xff), 255, "as one is the top of the range")
+	test.equal(bit.rshift(rgba, 24), 128, "each channel on its own")
 end)
 
 -- A cut and a blur are pixels, and a half is a whole number of pixels to a fraction of one: four
@@ -98,8 +101,8 @@ test.it("a quad that is neither round nor spread writes noughts", function()
 	local quads = batch.new()
 
 	quads:setViewport(100, 100)
-	quads:roundQuad(0, 0, 0.5, 0.5, 1, 1, 1, 1, 1, 7, 0.5, 0.5, 1, 1, 8, nil, nil, nil, nil, 0.5)
-	quads:quad(0, 0, 0.5, 0.5, 1, 1, 1, 1, 1, 7, 0.5, 0.5, 1, 1)
+	quads:roundQuad(0, 0, 0.5, 0.5, 1, 0xffffffff, 7, batch.uv(0.5, 0.5), batch.uv(1, 1), 8, 0.5)
+	quads:quad(0, 0, 0.5, 0.5, 1, 0xffffffff, 7, batch.uv(0.5, 0.5), batch.uv(1, 1))
 
 	local instance = quads.instances[1]
 
@@ -115,7 +118,7 @@ test.it("a quad of two corners is written as the box it is", function()
 	local quads = batch.new()
 
 	quads:setViewport(100, 100)
-	quads:quad(0, 0, 0.5, 0.5, 1, 1, 1, 1, 1, 7, 0.5, 0.5, 1, 1)
+	quads:quad(0, 0, 0.5, 0.5, 1, 0xffffffff, 7, batch.uv(0.5, 0.5), batch.uv(1, 1))
 
 	local instance = quads.instances[0]
 
@@ -131,7 +134,7 @@ test.it("a quad of four corners is written as the four it is given", function()
 	local quads = batch.new()
 
 	quads:setViewport(100, 100)
-	quads:points(0.25, 0.5, 0.75, 0.25, 0.5, 0.75, -1, 1, 1, 1, 1, 1, 1, 7)
+	quads:points(0.25, 0.5, 0.75, 0.25, 0.5, 0.75, -1, 1, 1, 0xffffffff, 7)
 
 	local instance = quads.instances[0]
 

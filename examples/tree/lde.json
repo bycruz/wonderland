@@ -1,0 +1,11 @@
+{
+	"$schema": "https://raw.githubusercontent.com/lde-org/lde/master/schemas/lde.schema.json",
+	"name": "wonderland-example-tree",
+	"description": "A file tree, and how a screen of rows is laid out",
+	"authors": ["David Cruz <david@bycruz.dev>"],
+	"version": "0.1.0",
+	"dependencies": {
+		"wonderland": { "path": "../.." },
+		"hood": { "version": "0.2", "features": ["vk", "gl"] }
+	}
+}
