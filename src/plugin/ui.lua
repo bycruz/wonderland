@@ -378,7 +378,17 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 	-- glyph of the line: asked once, since asking it per glyph is a walk of the font's faces per
 	-- glyph per frame.
 	local fallback = font:picture()
-	local glyphs = assert(run.glyphs)
+
+	-- A run with nothing in it is a line that is drawn as nothing: a field with no value, a box
+	-- whose text is the empty string, which is most rows of most screens. It is asked once rather
+	-- than per glyph, so it is asked here -- where nothing is also an answer, and one there is
+	-- nothing left to do about.
+	local glyphs = run.glyphs
+
+	if glyphs == nil then
+		return
+	end
+
 	local zIndex = convertZ(z)
 
 	-- One array of glyphs and one of lines, read by index: the run was measured as structs, so

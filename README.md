@@ -69,6 +69,25 @@ end
 App:run()
 ```
 
+## Memory
+
+What a screen costs, reported by the app itself:
+
+```bash
+lde run mem.lua                    # a screen the shape of a music player, then the numbers
+MEM_HEADLESS=1 lde run mem.lua     # without a window, so no swapchain is in the numbers
+TRACKS=2000 lde run mem.lua        # a longer list, to see what a row costs
+```
+
+It prints the resident set split into what the app owns, what is driver and library code, and what
+is the window's shared memory, the proportional share of it, and the same by file -- which is where
+the surprising part usually is. On a machine with a software vulkan driver installed (lavapipe,
+which links libLLVM) a vulkan app pays fifty megabytes of llvm code pages before it has drawn
+anything, because the loader enumerates every driver when an instance is made; `VK_DRIVER_FILES`
+says which ones to load. What the library itself holds is small and countable: the frame's arrays
+are tens of kilobytes, a measured row of text is about a kilobyte, and a glyph sheet is a megabyte
+of pixels.
+
 ## Timing
 
 Everything renders as little as it possibly needs. For example, a still frame will never re-render unless your mouse moves to cause a hover event.

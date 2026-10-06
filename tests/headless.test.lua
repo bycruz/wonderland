@@ -606,6 +606,31 @@ test.skipIf(not canRender)("a slider reports where it was pressed and dragged", 
 	screen:close()
 end)
 
+-- A line with nothing in it is drawn as nothing rather than looked up: an empty field, a chevron
+-- that is not there, a body line that is blank -- a run of no glyphs is most rows of most screens.
+test.skipIf(not canRender)("draws a line with nothing in it as nothing", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = BLACK }):children({
+			text(""):style({ fg = WHITE }),
+			div():style({ width = { abs = 40 }, height = { abs = 10 }, bg = BLUE }):children(""),
+			text("x"):style({ fg = WHITE }),
+		})
+	end, { width = 60, height = 30, fontPath = assert(fontPath) })
+
+	local ok, err = pcall(function()
+		screen:draw()
+	end)
+
+	test.truthy(ok, "a screen with nothing in it is a screen that draws" .. (ok and "" or ": " .. tostring(err)))
+
+	local pixels = assert(screen:getPixels())
+	local inked = inkRuns(pixels, 60, 30)
+
+	test.truthy(#inked > 0, "and the line beside the empty ones is still drawn")
+
+	screen:close()
+end)
+
 -- A box is resized by a press on one of its edges: what is reported is how big it is asked to be,
 -- which is the size it was when the edge was grabbed plus how far the pointer has come since, held
 -- between the two sizes the app named. It is a size rather than a difference because what the box
