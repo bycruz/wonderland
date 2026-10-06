@@ -335,3 +335,34 @@ test.it("a style that says nothing about a blur says nothing rather than none", 
 	test.truthy(style.at(style.intern(sty():blur("none"))).flags & style.PRESENT.blur ~= 0,
 		"and one that named none at all does")
 end)
+
+-- A style is written once and shared, which is what makes interning worth doing: a screen of a few
+-- hundred elements has a few dozen styles, and the table they are looked up in is a few hundred
+-- wide. A style built from a value -- a width that follows a pointer, a colour that follows a clock
+-- -- is a new style every time that value is a new number, and a screen that has drawn enough of
+-- those fills the table. A lookup for something the table does not hold then has nowhere to put it,
+-- and the probe for a place never ends: the app stops with the pointer where it was, on a thread
+-- that is doing nothing but looking. This is that many of them, and it is a test that hangs rather
+-- than fails if the table is ever left unable to grow.
+test.it("holds more distinct styles than the table it looks them up in starts with", function()
+	local first = style.count()
+	local seen = {}
+
+	for index = 1, 4000 do
+		local slot = style.intern(sty():wrel(index / 10000))
+
+		test.falsy(seen[slot], "no slot is shared by two of them: " .. tostring(slot))
+		seen[slot] = index
+	end
+
+	test.equal(style.count() - first, 4000, "each of them is a style of its own")
+	test.truthy(style.count() > 256, "and there are more of them than the table started with")
+end)
+
+-- And the same style twice is the same slot however many are held: what the table is for.
+test.it("finds a style it already holds however many it holds", function()
+	local one = style.intern(sty():wrel(12345 / 100000))
+	local two = style.intern(sty():wrel(12345 / 100000))
+
+	test.equal(two, one, "which is the slot it was interned as")
+end)

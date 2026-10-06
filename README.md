@@ -126,10 +126,10 @@ App:plugin(wonderland.devtools.new())     -- f12, and the panel starts shown
 ```
 
 It shows the box of the element under the pointer, the numbers a repaint comes to -- elements,
-nodes, quads, runs, the bytes of instance data, lua's own memory, the frame's milliseconds and its
-rate -- the tree of the screen indented by depth with each node's size, and the resolved style of
-the node under the pointer: its box and place, its padding, margin and gap, its direction and
-alignment, its colours, radius, blur, shadow and texture, and whether it scrolls.
+nodes, styles, quads, runs, the bytes of instance data, lua's own memory, the frame's milliseconds
+and its rate -- the tree of the screen indented by depth with each node's size, and the resolved
+style of the node under the pointer: its box and place, its padding, margin and gap, its direction
+and alignment, its colours, radius, blur, shadow and texture, and whether it scrolls.
 
 ```lua
 div():style(BOX)
@@ -140,8 +140,13 @@ div():style(BOX)
 ```
 
 What it reads is the frame before the one it is drawn in, since a screen is solved before its frame
-is handed over. A node whose box is not the size its own call asked for is what it is looked at for:
-a box that names no height fills what holds it, and the panel is where that is visible.
+is handed over. Two numbers are what a screen is looked at for. A node whose box is not the size its
+own call asked for: a box that names no height fills what holds it, and the panel is where that is
+visible. And `styles`, which is how many styles the screen holds and is meant to sit at a few dozen:
+a style is written once and shared, so a screen that builds one from a value -- a width that follows
+a pointer, a colour that follows a clock -- makes a new one every time that value is a new number,
+and the panel is where a number that only goes up is visible. What changes every frame wants a
+`wonderland.Canvas` rather than a style.
 
 The panel is part of the screen it is over, so it is rebuilt in the frames the app's own events ask
 for and costs the app a few hundred quads a frame -- which is why the box of every element is a key

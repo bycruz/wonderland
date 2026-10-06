@@ -22,6 +22,7 @@
 local element = require("wonderland.element")
 local time = require("wonderland.time")
 local Quads = require("wonderland.util.quad_batch")
+local style = require("wonderland.style")
 
 local div, sty = element.div, element.sty
 
@@ -39,7 +40,7 @@ local ROWS = 12
 local ABOVE = 4
 
 local MARGIN = 8
-local PANEL_W = 250
+local PANEL_W = 272
 local PANEL_PAD = 7
 local PANEL_BORDER = 1
 local GAP = 1
@@ -422,7 +423,7 @@ local function statsRows(self, window)
 		string.format("%s   boxes %s", self.on and "hide " .. self.key or "show " .. self.key,
 			self.boxes and "on " .. self.boxesKey or self.boxesKey),
 		string.format("%.0f fps   %.0f ms", self.shownFps, self.shownMs),
-		string.format("elements %d   nodes %d", self.elements, self.nodes),
+		string.format("elements %d   nodes %d   styles %d", self.elements, self.nodes, style.count()),
 		string.format("quads %d   runs %d", quads, runs),
 		string.format("instances %.0f KB   lua %.0f MB", quads * Quads.INSTANCE_SIZE / 1024,
 			self.shownMemory),

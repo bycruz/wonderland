@@ -868,6 +868,10 @@ local arena = ffi.new("wl_style[?]", CAPACITY)
 local buckets = ffi.new("uint32_t[?]", BUCKETS)
 local slots = 0
 
+-- What each slot hashed to when it was interned, kept beside it so that growing the table is looking
+-- at numbers rather than hashing every style again: see `rehash`.
+local hashes = ffi.new("uint32_t[?]", CAPACITY)
+
 -- The struct a style is filled into before it is interned, or found to be there already.
 -- Asserted into its type because the language server sees `ffi.new` as plain cdata, and a
 -- stack of fields of a struct is what the check is for.
@@ -1195,6 +1199,10 @@ local function grow(count)
 	ffi.copy(bigger, arena, slots * SIZE)
 	arena = bigger
 	style.arena = arena
+
+	local moves = ffi.new("uint32_t[?]", capacity)
+	ffi.copy(moves, hashes, slots * ffi.sizeof("uint32_t"))
+	hashes = moves
 end
 
 --- More buckets, with every slot put back where it now belongs.
@@ -1206,6 +1214,11 @@ end
 --- drawn a few hundred of those has a table with no room in it at all. A lookup for something the
 --- table does not hold then has nowhere to put it, and the probe for a place is one that never ends:
 --- the app stops, the cursor stops changing, and nothing is drawn again.
+---
+--- What each slot hashes to was worked out when it was interned and is kept beside it, so growing
+--- the table is looking at the numbers rather than hashing every style over again: a style is a few
+--- hundred bytes, and a table that has to hash all of them every time it grows is a table that
+--- stutters as it fills.
 ---@param count number # How many buckets to make room for
 local function rehash(count)
 	local capacity = BUCKETS
@@ -1218,7 +1231,7 @@ local function rehash(count)
 	local mask = capacity - 1
 
 	for slot = 0, slots - 1 do
-		local at = bit.band(hashBytes(ffi.cast("const uint8_t *", arena[slot])), mask)
+		local at = bit.band(hashes[slot], mask)
 
 		while wider[at] ~= 0 do
 			at = bit.band(at + 1, mask)
@@ -1257,7 +1270,8 @@ local function intern(fields)
 	end
 
 	local mask = BUCKETS - 1
-	local at = bit.band(hashScratch(), mask)
+	local hash = hashScratch()
+	local at = bit.band(hash, mask)
 
 	while true do
 		local used = buckets[at]
@@ -1270,6 +1284,7 @@ local function intern(fields)
 			end
 
 			ffi.copy(arena[slot], scratch, SIZE)
+			hashes[slot] = hash
 			buckets[at] = slot + 1
 
 			return slot
@@ -1295,6 +1310,15 @@ style.arena = arena
 ---@return wonderland.StyleSlot
 function style.at(slot)
 	return arena[slot]
+end
+
+--- How many styles are held, which is what says whether a screen is writing them to be shared or
+--- making one a value: a screen of a few hundred elements has a few dozen, and one that has drawn a
+--- few hundred thousand has a style built from a number that changes. See `rehash` and
+--- `wonderland.devtools`, which shows this number.
+---@return number
+function style.count()
+	return slots
 end
 
 ---@param value wonderland.StyleBuilder | wonderland.Style
