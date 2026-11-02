@@ -145,14 +145,6 @@ end
 ---@field depth number
 ---@field parent Entry?
 
----@class Tree
----@field rows TreeRow[] # What the tree shows: every folder that is open and what is in it
----@field at number # Which of them is chosen, 0 for none
----@field width number # How wide the sidebar is, in pixels, as it was last dragged to
----@field offset number # And how far the rows are scrolled up inside it
----@field widthDrawn number # How wide the sidebar was when its style was last written, so that a
----                            frame that is not a resize writes nothing
-
 ---@class TreeMessage
 ---@field type string
 ---@field at number
@@ -160,9 +152,15 @@ end
 ---@field to number
 ---@field size number
 
-local App = wonderland.app("Files") --[[@as wonderland.App<Tree>]]
+---@class Tree: wonderland.App
+---@field rows TreeRow[] # What the tree shows: every folder that is open and what is in it
+---@field at number # Which of them is chosen, 0 for none
+---@field width number # How wide the sidebar is, in pixels, as it was last dragged to
+---@field offset number # And how far the rows are scrolled up inside it
+---@field widthDrawn number # How wide the sidebar was when its style was last written, so that a
+---                            frame that is not a resize writes nothing
+local App = wonderland.app("Files")
 
----@param self wonderland.App<Tree>
 function App:init()
 	self.rows = {}
 	self.at = 0
@@ -269,9 +267,6 @@ function App:most(window)
 	return math.max(0, #self.rows * ROW_STEP - (ROW_STEP - ROW_H) - paneHeight(window))
 end
 
----@param window wonderland.RenderWindow
----@return wonderland.Element
----@param self wonderland.App<Tree>
 function App:view(window)
 	-- The width the sidebar was dragged to, written into the style it is drawn with -- and only when
 	-- it is not the width the style already says.
@@ -344,9 +339,6 @@ end
 
 --- What the keyboard does with the tree: the keys a tree is walked with, and nothing else -- a key
 --- the app has no use for is no message at all, which is what leaves it to whatever else wants it.
----@param event winit.Event
----@return any?
----@param self wonderland.App<Tree>
 function App:event(event)
 	if event.name ~= "keyPress" then
 		return nil
@@ -366,8 +358,6 @@ function App:event(event)
 end
 
 ---@param message TreeMessage
----@param window wonderland.RenderWindow
----@param self wonderland.App<Tree>
 function App:update(message, window)
 	local kind = type(message) == "table" and message.type
 	---@type TreeRow[]

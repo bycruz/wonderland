@@ -1,15 +1,11 @@
 -- The app: the class an application is. The plugins a screen needs are already in it, so an
 -- app says what its screen looks like and what a message does, and nothing else.
 --
---   ---@class State
+--   ---@class MyApp: wonderland.App
 --   ---@field clicks number
---
---   ---@type State
---   local state = { clicks = 0 }
---
 --   local App = wonderland.app("Wonderland")
 --
---   function App:init() state.clicks = 0 end
+--   function App:init() self.clicks = 0 end
 --   function App:view() return div():style(SCREEN) end
 --   function App:update(message) ... end
 --
@@ -17,8 +13,8 @@
 --
 -- The calls an app may define are the ones the shell makes -- `init`, `view`, `update` and
 -- `event` -- and one it leaves out is simply not made. What the app knows about itself it
--- keeps beside it, in a table of its own: `self` is the app, and the fields an app puts on a
--- library type are fields the language server cannot check.
+-- keeps on itself, and the class the app is declared with says what those fields are: `self`
+-- is the app, in every method.
 local winit = require("winit")
 local Atlas = require("wonderland.font.atlas")
 local WindowPlugin = require("wonderland.plugin.window")
@@ -52,19 +48,19 @@ local WINDOW_CREATED = { type = "windowCreated" }
 ---@field build (fun(self: wonderland.Plugin, app: wonderland.App): any?)? # Called when it is added
 ---@field event (fun(self: wonderland.Plugin, event: winit.Event, handler: winit.EventManager): any?)?
 
---- An application. `Extra` is what the app keeps on itself, so an app that has state says
---- what it is and `self` is then typed:
+--- An application. What an app keeps on itself is declared as a class that extends this one,
+--- and the app is then a value of that class, so `self` is typed in every method:
 ---
----   ---@type wonderland.App<{ clicks: number }>
+---   ---@class MyApp: wonderland.App
+---   ---@field clicks number
 ---   local App = wonderland.app("Wonderland")
 ---
 ---   function App:init() self.clicks = 0 end
 ---
---- What an app keeps on itself is what the generic names: an app's own fields are the app's
---- own typing, and each `wonderland.app()` call is its own app, so two apps keep two of
---- everything. The four calls an app may define are fields here rather than methods, so
---- defining one is a definition of something the shell looks for.
----@class wonderland.App<Extra>: Extra
+--- An app's own fields are the app's own typing, and each `wonderland.app()` call is its own
+--- app, so two apps keep two of everything. The four calls an app may define are fields here
+--- rather than methods, so defining one is a definition of something the shell looks for.
+---@class wonderland.App
 ---@field title string
 ---@field font string? # A family name, or a ttf to draw text with: this machine's own sans otherwise
 ---@field pixelHeight number # How tall the default font is drawn, in pixels
@@ -77,7 +73,7 @@ local WINDOW_CREATED = { type = "windowCreated" }
 ---@field every fun(self: wonderland.App, seconds: number, fn: wonderland.Tick): wonderland.plugin.UI.Ticker
 ---@field present fun(self: wonderland.App, window: wonderland.RenderWindow)
 ---@field init (fun(self: wonderland.App): any?)? # Once the shell has filled the app in
----@field view (fun(self: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets?): wonderland.Element)? # What the screen looks like
+---@field view fun(self: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element # What the screen looks like
 ---@field update (fun(self: wonderland.App, message: any, window: winit.Window): wonderland.Task?)? # What a message does
 ---@field event (fun(self: wonderland.App, event: winit.Event, handler: winit.EventManager): any?)? # Events no plugin claimed
 ---@field installed boolean
@@ -94,9 +90,8 @@ App.__index = App
 
 --- An app with the plugins a screen needs, which are installed when it is run: what they are
 --- is not something an app has to think about.
----@generic Extra
 ---@param title string?
----@return wonderland.App<Extra>
+---@return wonderland.App
 function app.new(title)
 	return setmetatable({
 		title = title or "Wonderland",

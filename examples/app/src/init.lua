@@ -7,22 +7,22 @@ local BUTTON = sty():row():align("center"):justify("center"):size(200, 44):bg("#
 local TRACK = sty():row():wrel(1.0):h(20):pad(3):bg("#1b2029"):radius(10)
 local NOTES = sty():row():wrel(1.0):h(90):pad(12):bg("#1b2029"):fg("#8d97a8"):radius(10):shadow(0, 3, 8, "#00000070")
 
-local App = wonderland.app("Wonderland") --[[@as wonderland.App<{ clicks: number, volume: number, notes: string }>]]
+---@class WonderlandApp: wonderland.App
+---@field clicks number
+---@field volume number
+---@field notes string
+local App = wonderland.app("Wonderland")
 
----@param self wonderland.App<{ clicks: number, volume: number, notes: string }>
 function App:init()
 	self.clicks = 0
 	self.volume = 0.4
 	self.notes = "a field that takes\nmore than one line"
 end
 
----@param self wonderland.App<{ clicks: number, volume: number, notes: string }>
----@param window wonderland.RenderWindow
----@param assets wonderland.Assets
 function App:view(window, assets)
 	local dance = assets:gif("assets/test.gif")
 	local frame = dance:current()
-	local times = self.clicks == 1 and "time" or "times"
+	local times = self.clicks == 1 ? "time" : "times"
 
 	return div()
 		:style(SCREEN)
@@ -64,7 +64,6 @@ function App:view(window, assets)
 		)
 end
 
----@param self wonderland.App<{ clicks: number, volume: number, notes: string }>
 function App:update(message, _window)
 	if message == "pressed" then
 		self.clicks = self.clicks + 1

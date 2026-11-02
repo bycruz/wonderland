@@ -52,17 +52,17 @@ local function plugin(name, message)
 	}, taken
 end
 
-test.it("an app keeps its own state, which is what the generic names", function()
-	---@type wonderland.App<{ clicks: number }>
-	local app = wonderland.app("Wonderland") --[[@as wonderland.App<{ clicks: number }>]]
+test.it("an app keeps its own state, which is what its class names", function()
+	---@class ClicksApp: wonderland.App
+	---@field clicks number
+	local app = wonderland.app("Wonderland")
 
 	test.equal(app.title, "Wonderland")
 	test.equal(#app.plugins, 0, "nothing is installed until it is run")
 	test.falsy(app.init, "and nothing is set up until an app says so")
 
 	local seen = 0
-	app.init = function(self)
-		---@cast self wonderland.App<{ clicks: number }>
+	function app:init()
 		self.clicks = 3
 		seen = self.clicks
 	end
@@ -75,28 +75,26 @@ test.it("two apps are two apps: each has its own state, plugins and window", fun
 	-- The state an app keeps is its own, so it is read back through the app's own calls.
 	local pressed, otherPressed = nil, nil
 
-	---@type wonderland.App<{ clicks: number }>
-	local first = wonderland.app("first") --[[@as wonderland.App<{ clicks: number }>]]
+	---@class FirstApp: wonderland.App
+	---@field clicks number
+	local first = wonderland.app("first")
 
-	first.init = function(self)
-		---@cast self wonderland.App<{ clicks: number }>
+	function first:init()
 		self.clicks = 0
 	end
-	first.press = function(self)
-		---@cast self wonderland.App<{ clicks: number }>
+	function first:press()
 		self.clicks = self.clicks + 1
 		pressed = self.clicks
 	end
 
-	---@type wonderland.App<{ clicks: number }>
-	local second = wonderland.app("second") --[[@as wonderland.App<{ clicks: number }>]]
+	---@class SecondApp: wonderland.App
+	---@field clicks number
+	local second = wonderland.app("second")
 
-	second.init = function(self)
-		---@cast self wonderland.App<{ clicks: number }>
+	function second:init()
 		self.clicks = 0
 	end
-	second.press = function(self)
-		---@cast self wonderland.App<{ clicks: number }>
+	function second:press()
 		self.clicks = self.clicks + 1
 		otherPressed = self.clicks
 	end
@@ -154,10 +152,10 @@ end)
 test.it("init runs once the shell has filled the app's fields in", function()
 	local seen = {}
 
-	---@type wonderland.App<{ clicks: number }>
-	local app = wonderland.app() --[[@as wonderland.App<{ clicks: number }>]]
-	app.init = function(self)
-		---@cast self wonderland.App<{ clicks: number }>
+	---@class InitApp: wonderland.App
+	---@field clicks number
+	local app = wonderland.app()
+	function app:init()
 		seen.title = self.title
 		seen.plugins = #self.plugins
 		self.clicks = 7

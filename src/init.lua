@@ -3,17 +3,20 @@
 --   local wonderland = require("wonderland")
 --   local div, sty = wonderland.div, wonderland.sty
 --
---   wonderland.app({
---       view = function() return div():style(sty():fill()) end,
---       update = function(message) end,
---   }):run()
+--   ---@class MyApp: wonderland.App
+--   local App = wonderland.app("Wonderland")
+--
+--   function App:view() return div():style(sty():fill()) end
+--   function App:update(message) end
+--
+--   App:run()
 --
 --   wonderland.div       make an element
 --   wonderland.text      make a line of text
 --   wonderland.sty       make a style
 --   wonderland.Layout    lay a screen of elements out, with no window needed
 --   wonderland.Element   the type those builders make
---   wonderland.app(opts) an app: the window and the plugins a screen needs, installed
+--   wonderland.app(title) an app: the window and the plugins a screen needs, installed
 --   wonderland.run(app)  run one, if you would rather not call `app:run()`
 --   wonderland.headless  the same screen with no window, for tests and screenshots
 --   wonderland.devtools  what a screen is doing, drawn by the screen: see `wonderland.devtools`

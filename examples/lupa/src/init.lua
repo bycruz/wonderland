@@ -23,9 +23,14 @@ local function bar(value)
 	return div():style(sty():h(12):wrel(value):bg("#3f6fe0"):radius(6))
 end
 
-local App = wonderland.app("Wonderland + lupa") --[[@as wonderland.App<{ scene: Scene?, spin: number, glow: number, shadows: boolean, last: number }>]]
+---@class LupaApp: wonderland.App
+---@field scene Scene?
+---@field spin number
+---@field glow number
+---@field shadows boolean
+---@field last number
+local App = wonderland.app("Wonderland + lupa")
 
----@param self wonderland.App<{ scene: Scene?, spin: number, glow: number, shadows: boolean, last: number }>
 function App:init()
 	self.spin = 0.25
 	self.glow = 0.7
@@ -48,7 +53,6 @@ function App:init()
 	end)
 end
 
----@param self wonderland.App<{ scene: Scene?, spin: number, glow: number, shadows: boolean, last: number }>
 function App:view()
 	-- A texture belongs to the renderer a window brought, so the scene is made on the first frame
 	-- rather than in `init`: what it is handed is this screen's device.
@@ -97,8 +101,6 @@ function App:view()
 		})
 end
 
----@param message any
----@param self wonderland.App<{ scene: Scene?, spin: number, glow: number, shadows: boolean, last: number }>
 function App:update(message)
 	if message == "shadows" then
 		self.shadows = not self.shadows

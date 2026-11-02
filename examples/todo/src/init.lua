@@ -63,9 +63,14 @@ local EMPTY = sty():w("auto"):fg("#5c6473")
 ---@field to number
 ---@field id number
 
-local App = wonderland.app("Todos") --[[@as wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>]]
+---@class TodoApp: wonderland.App
+---@field todos Todo[]
+---@field draft string
+---@field nextId number
+---@field offset number
+---@field paneHeight number
+local App = wonderland.app("Todos")
 
----@param self wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
 function App:init()
 	self.todos = {
 		{ id = 1, text = "AAAHH تباً لكتباً لكتباً لك ✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅", done = false },
@@ -111,10 +116,6 @@ local function leftOver(todos)
 	return count == 1 and "1 left" or count .. " left"
 end
 
----@param window wonderland.RenderWindow
----@param assets wonderland.Assets
----@return wonderland.Element
----@param self wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
 function App:view(window, assets)
 	local height = extent(self, window)
 
@@ -191,8 +192,6 @@ function App:view(window, assets)
 end
 
 ---@param message TodoMessage
----@param window wonderland.RenderWindow
----@param self wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
 function App:update(message, window)
 	local kind = type(message) == "table" and message.type
 

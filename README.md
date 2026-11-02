@@ -38,8 +38,10 @@ local div, sty = wonderland.div, wonderland.sty
 local SCREEN = sty():column():align("center"):justify("center"):gap(16):bg("#12141c"):fg("#edf0f7")
 local BUTTON = sty():row():align("center"):justify("center"):size(200, 44):bg("#426bd9"):radius(10):shadow(0, 4, 10)
 
---- Use this type to explicitly type the apps state for full e2e typing
----@type wonderland.App<{ clicks: number }>
+--- Declare what the app keeps on itself as a class that extends `wonderland.App`: `self` is
+--- then typed in every method the app defines.
+---@class MyApp: wonderland.App
+---@field clicks number
 local App = wonderland.app("Wonderland")
 
 function App:init()

@@ -17,9 +17,11 @@ local TITLE = sty():fg("#f2f5fa"):text("2xl")
 local HINT = sty():fg("#7d8798"):text("sm")
 local PANEL = sty():size(900, 420):bg("#0d1018"):radius(16):shadow(0, 14, 34, "#000000b0")
 
-local App = wonderland.app("Wonderland canvas") --[[@as wonderland.App<{ effect: Effect, last: number }>]]
+---@class CanvasApp: wonderland.App
+---@field effect Effect
+---@field last number
+local App = wonderland.app("Wonderland canvas")
 
----@param self wonderland.App<{ effect: Effect, last: number }>
 function App:init()
 	self.effect = Effect.new(72)
 	self.last = time.now()
@@ -34,7 +36,6 @@ function App:init()
 	end)
 end
 
----@param self wonderland.App<{ effect: Effect, last: number }>
 function App:view()
 	return div()
 		:style(SCREEN)
@@ -51,8 +52,6 @@ function App:view()
 		})
 end
 
----@param message any
----@param self wonderland.App<{ effect: Effect, last: number }>
 function App:update(message)
 	if message == "mode" then
 		self.effect.mode = self.effect.mode % 3 + 1
