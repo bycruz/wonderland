@@ -36,6 +36,7 @@ local backend = require("wonderland.backend")
 ---@field view hood.TextureView
 ---@field bindGroup hood.BindGroup
 ---@field layers number
+---@field owned boolean?
 
 --- A picture, as the shader needs it: the texture it is in, the layer its first band is, how many
 --- layers its rows span, and the last of them.
@@ -413,7 +414,8 @@ end
 ---@param opts { owned: boolean?, format: string? }? # Whether giving it back frees it, which a texture of somebody else's is not, and what its format is called where that is known
 ---@return wonderland.Surface
 function TextureManager:wrap(texture, opts)
-	local width, height = texture.width, texture.height
+	local measured = texture --[[@as { width: number?, height: number? }]]
+	local width, height = measured.width, measured.height
 
 	assert(width ~= nil and height ~= nil, "A texture of somebody else's says how big it is")
 

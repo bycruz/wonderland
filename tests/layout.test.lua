@@ -10,7 +10,6 @@ local div, text, sty = wonderland.div, wonderland.text, wonderland.sty
 ---@param element wonderland.Element
 ---@param width number
 ---@param height number
----@return wonderland.Layout.Screen
 local function solve(element, width, height)
 	local screen = layout.new()
 	screen:fromElement(element)
@@ -160,7 +159,6 @@ test.it("a frame that came out the same is not a change", function()
 
 	---@param width number
 	---@param height number
-	---@return boolean changed
 	local function frame(width, height)
 		screen:fromElement(button)
 		screen:solve(width, height)
@@ -179,7 +177,6 @@ test.it("an element the pointer makes a different box is a change", function()
 	local screen = layout.new()
 	local button = div():style(sty():size(200, 44):bg("#426bd9")):hover(sty():bg("#ff0000"))
 
-	---@return boolean changed
 	local function frame()
 		screen:fromElement(button)
 		screen:solve(400, 300)
@@ -201,7 +198,6 @@ test.it("a box scrolled to somewhere else is a change", function()
 		div():style(sty():size(200, 400))
 	)
 
-	---@return boolean changed
 	local function frame()
 		screen:fromElement(list)
 		screen:solve(400, 300)

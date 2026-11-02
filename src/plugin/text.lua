@@ -20,7 +20,7 @@ local TYPOGRAPHY = style.PRESENT.fontFamily | style.PRESENT.fontSize | style.PRE
 
 ---@class wonderland.plugin.Text: wonderland.Plugin
 ---@field renderPlugin wonderland.plugin.Render
----@field private fonts table<number, table<number, wonderland.font.Font>> # A style's font, by what it inherits
+---@field fonts table<number, table<number, wonderland.font.Font>> # A style's font, by what it inherits
 local Text = {}
 Text.__index = Text
 
@@ -90,7 +90,6 @@ end
 ---@param inherited wonderland.font.Font?
 ---@param depth number
 ---@param limit number # The most elements the frame made, which is the most a tree can hold
----@return wonderland.Element
 local function measureInto(self, element, inherited, depth, limit)
 	if depth > limit then
 		error("The element tree holds itself: an element was measured in a frame later than the one "
@@ -132,6 +131,7 @@ local function measureInto(self, element, inherited, depth, limit)
 
 		assert(drawing,
 			"No font to draw text with: load one and make it the default, or name one in a style")
+		---@cast drawing wonderland.font.Font
 
 		-- Only the run and the font it was drawn with are attached. How big a line is
 		-- belongs to the layout, because a style is shared by every element that looks the

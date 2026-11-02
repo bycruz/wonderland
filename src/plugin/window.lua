@@ -14,6 +14,7 @@ local WindowPlugin = {}
 WindowPlugin.__index = WindowPlugin
 
 ---@param onWindowCreate unknown
+---@return wonderland.plugin.Window<unknown>
 function WindowPlugin.new(onWindowCreate)
 	local isDebug = os.getenv("DEBUG") and true or false
 
@@ -56,7 +57,8 @@ function WindowPlugin:event(event, handler)
 			handler:exit()
 		else
 			self.contexts[event.window] = nil
-			handler:close(event.window)
+			local closeWindow = handler.close --[[@as fun(self: winit.EventManager, window: winit.Window)]]
+			closeWindow(handler, event.window)
 		end
 	end
 end

@@ -79,6 +79,10 @@ MEM_HEADLESS=1 lde run mem.lua     # without a window, so no swapchain is in the
 TRACKS=2000 lde run mem.lua        # a longer list, to see what a row costs
 ```
 
+```bash
+lde run software.lua               # what a cpu renderer would cost to draw, with no gpu driver at all
+```
+
 It prints the resident set split into what the app owns, what is driver and library code, and what
 is the window's shared memory, the proportional share of it, and the same by file -- which is where
 the surprising part usually is. On a machine with a software vulkan driver installed (lavapipe,

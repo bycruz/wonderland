@@ -17,13 +17,11 @@ local Registry = require("wonderland.font.registry")
 local isWindows = ffi.os == "Windows"
 
 ---@param value number
----@return string
 local function be16(value)
 	return string.char((value >> 8) & 0xFF, value & 0xFF)
 end
 
 ---@param value number
----@return string
 local function be32(value)
 	return string.char((value >> 24) & 0xFF, (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
 end
@@ -32,7 +30,6 @@ end
 --- name, so the UTF-8 it is written as here is read out a character at a time rather than assumed
 --- to be ASCII: one of the tests is about a name that is not.
 ---@param text string
----@return string
 local function utf16(text)
 	local out, at = {}, 1
 
@@ -62,16 +59,15 @@ end
 --- A `name` table: one record per name, and the strings the records point at behind them. Every
 --- record is written for the platform it names, in the encoding that platform calls its own -- one
 --- for Windows and Unicode, nought for a Mac -- because how a name is read is decided by it.
----@param entries { id: number, text: string, platform: number? }[]
----@return string
+---@param entries { id: number, text: string?, platform: number? }[]
 local function nameTable(entries)
 	local records, strings, offset = {}, {}, 0
 
 	for _, entry in ipairs(entries) do
-		local text = utf16(entry.text)
+		local text = utf16(assert(entry.text))
 		local platform = entry.platform ?? 3
 
-		records[#records + 1] = be16(platform) .. be16(platform == 1 and 0 or 1) .. be16(0x409)
+		records[#records + 1] = be16(assert(platform)) .. be16(platform == 1 and 0 or 1) .. be16(0x409)
 			.. be16(entry.id) .. be16(#text) .. be16(offset)
 
 		strings[#strings + 1] = text
@@ -85,7 +81,6 @@ end
 --- The tables of a font file, with the table directory in front of them and every table padded to
 --- the four bytes a font starts one on.
 ---@param tables { tag: string, data: string }[]
----@return string
 local function assemble(tables)
 	local records, body, at = {}, {}, 12 + #tables * 16
 
@@ -104,7 +99,6 @@ end
 --- A font file with nothing in it but what a scan reads: what it is called, how heavy it is and
 --- whether it is slanted.
 ---@param opts { family: string, subfamily: string?, typographicFamily: string?, typographicSubfamily: string?, weight: number?, italic: boolean?, macItalic: boolean?, os2: boolean?, head: boolean?, platform: number?, padding: number? }
----@return string
 local function buildFont(opts)
 	local subfamily = opts.subfamily ?? "Regular"
 	local names = {
@@ -122,7 +116,7 @@ local function buildFont(opts)
 	if opts.os2 ~= false then
 		-- usWeightClass at four bytes in and fsSelection at sixty-two, which is where the parser
 		-- looks for them: what is between is the rest of the table, which is nothing here.
-		tables[#tables + 1] = { tag = "OS/2", data = be16(4) .. be16(500) .. be16(opts.weight ?? 400)
+		tables[#tables + 1] = { tag = "OS/2", data = be16(4) .. be16(500) .. be16(assert(opts.weight ?? 400))
 			.. string.rep("\0", 56) .. be16(opts.italic ? 1 : 0) }
 	end
 
@@ -141,7 +135,6 @@ end
 --- A collection: a header naming where each of the fonts inside it starts, which is what a `.ttc` on
 --- a machine is -- the faces of a family in one file.
 ---@param fonts string[]
----@return string
 local function buildCollection(fonts)
 	local offsets, body, at = {}, {}, 12 + #fonts * 4
 
@@ -175,7 +168,6 @@ end
 --- A directory of font files, made for one test and removed at the end of it. This is what makes
 --- these tests hermetic: the machine's own fonts are at no path any of them looks at.
 ---@param files { name: string, data: string }[]
----@return string
 local function fontsDir(files)
 	local dir = os.tmpname()
 
@@ -202,7 +194,7 @@ test.it("reads the family and the subfamily a font gives itself", function()
 	test.equal(faces[1].family, "Test Sans")
 	test.equal(faces[1].subfamily, "Bold")
 	test.equal(faces[1].index, 0, "a file that holds one font is asked for as its font nought")
-	test.includes(faces[1].path, "Some.ttf")
+	test.includes(assert(faces[1].path), "Some.ttf")
 
 	removeDir(dir)
 end)
@@ -318,7 +310,8 @@ test.it("reads a font's header and not the font", function()
 	local file = assert(io.open(dir .. "/Big.ttf", "rb"))
 	local read = 0
 	local reader = function(offset, length)
-		if file:seek("set", offset) == nil then
+		local start = offset --[[@as number]]
+		if file:seek("set", start) == nil then
 			return nil
 		end
 
@@ -501,9 +494,10 @@ test.it("looks only where it was pointed", function()
 	local faces = registry:faces()
 
 	test.equal(#faces, 1, "the platform's own font directories are not looked at when dirs are given")
-	test.truthy(faces[1].path:find(dir, 1, true) ~= nil, "the one face is the file that was written")
-	test.equal(registry:default(), faces[1].path, "and the default is a font from there")
-	test.equal(registry:path("DejaVu Sans"), faces[1].path,
+	local facePath = assert(faces[1].path)
+	test.truthy(facePath:find(dir, 1, true) ~= nil, "the one face is the file that was written")
+	test.equal(registry:default(), facePath, "and the default is a font from there")
+	test.equal(registry:path("DejaVu Sans"), facePath,
 		"so a family this machine is likely to have is answered from the directory as well")
 
 	removeDir(dir)

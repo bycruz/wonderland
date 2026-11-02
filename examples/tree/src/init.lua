@@ -125,7 +125,6 @@ local TREE_OF_FILES = {
 --- app's, and this one holds no files at all -- the rows are a tree, and a tree is what a screen
 --- built out of them looks like.
 ---@param entry Entry
----@return string[]
 local function bodyOf(entry)
 	return {
 		"-- " .. entry.name,
@@ -154,9 +153,16 @@ end
 ---@field widthDrawn number # How wide the sidebar was when its style was last written, so that a
 ---                            frame that is not a resize writes nothing
 
----@type wonderland.App<Tree>
-local App = wonderland.app("Files")
+---@class TreeMessage
+---@field type string
+---@field at number
+---@field by number
+---@field to number
+---@field size number
 
+local App = wonderland.app("Files") --[[@as wonderland.App<Tree>]]
+
+---@param self wonderland.App<Tree>
 function App:init()
 	self.rows = {}
 	self.at = 0
@@ -217,7 +223,9 @@ end
 ---@param self Tree
 ---@return Entry?
 function App:chosen()
-	local row = self.rows[self.at]
+	---@type TreeRow[]
+	local rows = self.rows
+	local row = rows[self.at]
 
 	return row and row.entry
 end
@@ -226,7 +234,6 @@ end
 --- what the rows are scrolled inside is the window's own height. It is worked out here rather than
 --- asked of the layout because what is scrolled where is state, and state is the app's.
 ---@param window wonderland.RenderWindow
----@return number
 local function paneHeight(window)
 	return window.height
 end
@@ -236,7 +243,9 @@ end
 ---@param self Tree
 ---@param window wonderland.RenderWindow
 function App:reveal(window)
-	local row = self.rows[self.at]
+	---@type TreeRow[]
+	local rows = self.rows
+	local row = rows[self.at]
 
 	if row == nil then
 		return
@@ -262,6 +271,7 @@ end
 
 ---@param window wonderland.RenderWindow
 ---@return wonderland.Element
+---@param self wonderland.App<Tree>
 function App:view(window)
 	-- The width the sidebar was dragged to, written into the style it is drawn with -- and only when
 	-- it is not the width the style already says.
@@ -271,9 +281,11 @@ function App:view(window)
 	end
 
 	local chosen = self:chosen()
-	local rows = {}
 
-	for at, row in ipairs(self.rows) do
+	---@type TreeRow[]
+	local rows = self.rows
+
+	for at, row in ipairs(rows) do
 		local entry = row.entry
 
 		rows[at] = div()
@@ -334,6 +346,7 @@ end
 --- the app has no use for is no message at all, which is what leaves it to whatever else wants it.
 ---@param event winit.Event
 ---@return any?
+---@param self wonderland.App<Tree>
 function App:event(event)
 	if event.name ~= "keyPress" then
 		return nil
@@ -352,11 +365,14 @@ function App:event(event)
 	end
 end
 
----@param message any
+---@param message TreeMessage
 ---@param window wonderland.RenderWindow
+---@param self wonderland.App<Tree>
 function App:update(message, window)
 	local kind = type(message) == "table" and message.type
-	local row = self.rows[self.at]
+	---@type TreeRow[]
+	local rows = self.rows
+	local row = rows[self.at]
 
 	if kind == "pick" then
 		-- A press takes the row it landed on and does what that row is for: a folder opens or shuts,

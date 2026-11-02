@@ -36,8 +36,8 @@ local EDGE_RIGHT, EDGE_LEFT, EDGE_TOP, EDGE_BOTTOM = wonderlandElement.EDGE_RIGH
 ---@param parentX number
 ---@param parentY number
 ---@param acceptFn? fun(element: wonderland.Element): boolean
----@return wonderland.plugin.Layout.Hit?
 local function findElementAtPosition(screen, index, x, y, parentX, parentY, acceptFn)
+	---@type wonderland.Node
 	local node = screen:node(index)
 	local absX, absY = parentX + node.x, parentY + node.y
 
@@ -51,6 +51,7 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 	-- parent's bounds.
 	for at = 0, node.childCount - 1 do
 		local child = screen.childIndices[node.firstChild + at - 1]
+		---@type wonderland.plugin.Layout.Hit?
 		local found = findElementAtPosition(screen, child, x, y, absX, absY, acceptFn)
 
 		if found and (not acceptFn or acceptFn(found.element, found.absX, found.absY, found.node)) then
@@ -65,7 +66,7 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 		-- is a question about the two together, and only a predicate that needs it is handed the
 		-- four numbers -- see `findResizeEdge`.
 		if not acceptFn or acceptFn(element, absX, absY, node) then
-			return { element = element, node = node, absX = absX, absY = absY }
+			return { element = element, node = node, absX = absX, absY = absY } --[[@as wonderland.plugin.Layout.Hit]]
 		end
 	end
 
@@ -155,8 +156,9 @@ end
 ---@field y number
 
 ---@class wonderland.plugin.Layout.Context
----@field lastPressTime any
----@field lastPressElement any
+---@field lastPressTime number?
+---@field lastPressElement wonderland.Element?
+---@field mustDraw boolean?
 ---@field window wonderland.RenderWindow
 ---@field ui wonderland.Element?
 ---@field screen wonderland.Layout.Screen? # The laid out screen
@@ -227,7 +229,6 @@ local REPEATS = {
 ---@param key string
 ---@param modifiers winit.KeyModifiers?
 ---@param typed string? # What the key types, where it types something: see `typedBy`
----@return boolean
 local function repeats(key, modifiers, typed)
 	if modifiers ~= nil and modifiers.ctrl then
 		return false
@@ -250,8 +251,16 @@ end
 ---@class wonderland.plugin.Layout<Message>: wonderland.Plugin
 ---@field clipboard winit.Clipboard? # Where a paste comes from and a copy goes, where the app has one
 ---@field textPlugin wonderland.plugin.Text
+---@field renderPlugin wonderland.plugin.Render?
 ---@field view fun(window: wonderland.RenderWindow): wonderland.Element<Message>
 ---@field contexts table<wonderland.RenderWindow, wonderland.plugin.Layout.Context>
+---@field refreshView fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow)
+---@field getCaret fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): wonderland.Element?, number?, number?, number?, number?
+---@field getFocusedId fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): string?
+---@field setFocus fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow, id: string?)
+---@field getCursorPos fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): number
+---@field size fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): number, number
+---@field key fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow, key: string, modifiers: winit.KeyModifiers?, typed: string?): any?
 ---@field keyRepeatDelay number # The wait before a held key repeats, in seconds
 ---@field keyRepeatInterval number # And the time between the repeats after it, nought for none of them
 local Layout = {}
@@ -274,6 +283,7 @@ function Layout.new(view, textPlugin, renderPlugin) ---@return wonderland.plugin
 end
 
 ---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.Layout
 function Layout:register(window)
 	self.contexts[window] = { window = window, focusedName = nil, cursorPos = 0, screen = UILayout.new() }
 	self:refreshView(window)
@@ -281,6 +291,7 @@ end
 
 ---@param window wonderland.RenderWindow
 ---@return string?
+---@param self wonderland.plugin.Layout
 function Layout:getFocusedId(window)
 	local ctx = self.contexts[window]
 	return ctx and ctx.focusedName
@@ -288,6 +299,7 @@ end
 
 ---@param window wonderland.RenderWindow
 ---@return number
+---@param self wonderland.plugin.Layout
 function Layout:getCursorPos(window)
 	local ctx = self.contexts[window]
 	return ctx and ctx.cursorPos or 0
@@ -295,6 +307,7 @@ end
 
 ---@param window wonderland.RenderWindow
 ---@param id string?
+---@param self wonderland.plugin.Layout
 function Layout:setFocus(window, id)
 	local ctx = self.contexts[window]
 	if not ctx then return end
@@ -306,6 +319,7 @@ function Layout:setFocus(window, id)
 end
 
 ---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.Layout
 function Layout:refreshView(window)
 	local ctx = self.contexts[window]
 
@@ -377,7 +391,6 @@ end
 ---@param parentY number
 ---@param right number # Where the room this node may use ends, absolute
 ---@param fontManager FontManager
----@return boolean cut
 local function cutInto(screen, index, parentX, parentY, right, fontManager)
 	local node = screen:node(index)
 	local x, y = parentX + node.x, parentY + node.y
@@ -436,6 +449,7 @@ end
 ---@param root number # The node the screen was built from
 ---@param width number # The window, which is the room the screen itself has
 ---@return boolean cut # Whether any line was, which is what wants the screen solved again
+---@param self wonderland.plugin.Layout
 function Layout:cutLines(screen, root, width)
 	local shared = self.renderPlugin and self.renderPlugin.sharedResources
 	local fontManager = shared and shared.fontManager
@@ -453,6 +467,7 @@ end
 ---@param window wonderland.RenderWindow
 ---@return number width
 ---@return number height
+---@param self wonderland.plugin.Layout
 function Layout:size(window)
 	local render = self.renderPlugin
 
@@ -463,19 +478,23 @@ function Layout:size(window)
 	return window.width, window.height
 end
 
-local function hasMouseUp(e) ---@param e wonderland.Element
+---@param e wonderland.Element
+local function hasMouseUp(e)
 	return e.onmouseup ~= 0
 end
 
-local function hasDrop(e) ---@param e wonderland.Element
+---@param e wonderland.Element
+local function hasDrop(e)
 	return e.ondrop ~= 0
 end
 
-local function hasContextMenu(e) ---@param e wonderland.Element
+---@param e wonderland.Element
+local function hasContextMenu(e)
 	return e.oncontextmenu ~= 0
 end
 
-local function hasMouseDownOrClick(e) ---@param e wonderland.Element
+---@param e wonderland.Element
+local function hasMouseDownOrClick(e)
 	return bit.band(e.flags, TEXT_INPUT) ~= 0 or bit.band(e.flags, SLIDE) ~= 0
 		or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0
 end
@@ -490,7 +509,6 @@ end
 ---@param absX number
 ---@param absY number
 ---@param node wonderland.Node
----@return boolean
 local function onResizeEdge(element, x, y, absX, absY, node)
 	local edge = element.resizeEdge
 	local grab = element.resizeGrab
@@ -512,7 +530,6 @@ end
 ---@param root number
 ---@param x number
 ---@param y number
----@return wonderland.plugin.Layout.Hit?
 local function findResizeEdge(screen, root, x, y)
 	return findElementAtPosition(screen, root, x, y, 0, 0,
 		function(element, absX, absY, node) ---@param element wonderland.Element
@@ -527,7 +544,6 @@ end
 --- one rather than one that is asked for a shape it will not know.
 ---@param window wonderland.RenderWindow
 ---@param shape string
----@return boolean
 local function hasCursor(window, shape)
 	if shape == "hand2" then
 		return true
@@ -567,7 +583,6 @@ end
 
 ---@param element wonderland.Element
 ---@param id string
----@return wonderland.Element?
 local function findElementById(element, id)
 	if wonderlandElement.nameOf(element) == id then return element end
 
@@ -575,6 +590,7 @@ local function findElementById(element, id)
 
 	while child ~= 0 do
 		local childElement = pointers[child]
+		---@type wonderland.Element?
 		local found = findElementById(childElement, id)
 
 		if found then return found end
@@ -592,7 +608,6 @@ local DOUBLE_CLICK_THRESHOLD = 0.3 -- seconds
 ---@param handler any
 ---@param by number? # How far a wheel asks the content to move
 ---@param to number? # Or where a bar dragged puts it
----@return any? message
 local function scrollMessage(handler, by, to)
 	if handler == nil then
 		return nil
@@ -612,7 +627,6 @@ end
 ---@param width number
 ---@param height number
 ---@param modifiers winit.KeyModifiers?
----@return any? message
 local function contextMessage(handler, x, y, width, height, modifiers)
 	if handler == nil then
 		return nil
@@ -630,7 +644,6 @@ end
 ---@param paths string[]
 ---@param x number
 ---@param y number
----@return any? message
 local function dropMessage(handler, paths, x, y)
 	if handler == nil then
 		return nil
@@ -649,8 +662,8 @@ end
 ---@param ctx wonderland.plugin.Layout.Context
 ---@param x number
 ---@param y number
----@return wonderland.plugin.Layout.Hit?
 local function wheelTarget(ctx, x, y)
+	---@type wonderland.plugin.Layout.Hit[]
 	local chain = {}
 
 	chainAtPosition(assert(ctx.screen), assert(ctx.root), x, y, 0, 0, 0, chain)
@@ -769,7 +782,6 @@ end
 ---@param drag wonderland.plugin.Layout.Drag
 ---@param x number
 ---@param y number
----@return number
 local function valueAt(drag, x, y)
 	if drag.edge ~= nil then
 		-- A box resized by its edge is as big as it was when it was grabbed plus what the pointer
@@ -796,7 +808,6 @@ end
 ---@param drag wonderland.plugin.Layout.Drag
 ---@param x number
 ---@param y number
----@return any? message
 local function report(drag, x, y)
 	local value = valueAt(drag, x, y)
 
@@ -877,7 +888,6 @@ end
 --- What a value typed into a field is made of: one line until a break is typed into it.
 ---@param value string
 ---@param at number # Where the caret is: from nought, before the first byte, to its length
----@return number # The byte the line the caret is on starts at
 local function lineStart(value, at)
 	local before = value:sub(1, at)
 	local break_ = before:find("\n[^\n]*$")
@@ -887,7 +897,6 @@ end
 
 ---@param value string
 ---@param at number
----@return number # And the byte that line ends at, which is the end of the value on the last one
 local function lineEnd(value, at)
 	local break_ = value:find("\n", at + 1, true)
 
@@ -897,7 +906,6 @@ end
 --- Whether a byte is part of a word: the ASCII letters, digits and underscore, and every byte of a
 --- character that is not ASCII, since a word in another language is a word.
 ---@param byte number?
----@return boolean
 local function isWordByte(byte)
 	return byte ~= nil and (byte >= 0x80 or byte == 0x5F
 		or (byte >= 0x30 and byte <= 0x39)
@@ -906,7 +914,6 @@ local function isWordByte(byte)
 end
 
 ---@param byte number?
----@return boolean
 local function isSpace(byte)
 	return byte ~= nil and (byte == 0x20 or (byte >= 0x09 and byte <= 0x0D))
 end
@@ -915,7 +922,6 @@ end
 --- words and then over the word itself, which is a run of word bytes or a run of punctuation.
 ---@param value string
 ---@param at number # How many bytes come before the caret, from nought
----@return number
 local function wordBack(value, at)
 	local back = utf8.back(value, at)
 
@@ -942,7 +948,6 @@ end
 --- to the end of the next one where it is not in a word.
 ---@param value string
 ---@param at number
----@return number
 local function wordForward(value, at)
 	local ahead, length = at, #value
 
@@ -963,7 +968,6 @@ end
 --- A character is one to four bytes, so what is refused is a key that types nothing printable rather
 --- than a key that types more than one byte.
 ---@param event winit.Event
----@return string?
 local function typedBy(event)
 	local text = event.text
 
@@ -1002,7 +1006,6 @@ end
 ---@param value string
 ---@param at number
 ---@param by number
----@return number
 local function lineAcross(value, at, by)
 	local start = lineStart(value, at)
 	local column = at - (start - 1)
@@ -1037,6 +1040,7 @@ end
 ---@return number? column # How many bytes of that line come before the caret
 ---@return number? from # The first byte of the value a selection covers, where there is one
 ---@return number? to
+---@param self wonderland.plugin.Layout
 function Layout:getCaret(window)
 	local ctx = self.contexts[window]
 
@@ -1044,7 +1048,7 @@ function Layout:getCaret(window)
 		return nil, nil, nil
 	end
 
-	local element = findElementById(ctx.ui, ctx.focusedName)
+	local element = findElementById(assert(ctx.ui), ctx.focusedName)
 
 	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
 		return nil, nil, nil
@@ -1071,6 +1075,7 @@ end
 ---@param x number
 ---@param y number
 ---@return any? message
+---@param self wonderland.plugin.Layout
 function Layout:barPress(ctx, x, y)
 	local chain = {}
 
@@ -1117,7 +1122,6 @@ end
 --- The first few lines of a string, which is what a paste into a field with lines to spare is.
 ---@param text string
 ---@param lines number
----@return string
 local function firstLines(text, lines)
 	local at, seen = 1, 1
 
@@ -1154,6 +1158,7 @@ end
 ---@param to number
 ---@param edit fun(edited: string): any?
 ---@return any? message
+---@param self wonderland.plugin.Layout
 function Layout:clipboardKey(element, ctx, key, value, cursor, from, to, edit)
 	local clipboard = self.clipboard
 
@@ -1224,11 +1229,13 @@ end
 ---@param ctx wonderland.plugin.Layout.Context
 ---@param backwards boolean?
 ---@return any? message
+---@param self wonderland.plugin.Layout
 function Layout:focusNext(ctx, backwards)
 	if ctx.ui == nil then
 		return nil
 	end
 
+	---@type wonderland.Element[]
 	local focusable = {}
 
 	collectFocusable(ctx.ui, focusable)
@@ -1271,7 +1278,6 @@ end
 ---@param value string
 ---@param line number
 ---@param column number
----@return number? at
 local function byteAt(value, line, column)
 	local start = 1
 
@@ -1300,6 +1306,7 @@ end
 ---@param column number # How many bytes of that line come before the caret
 ---@param anchorLine number? # And where the other end of a selection is, where one was made
 ---@param anchorColumn number?
+---@param self wonderland.plugin.Layout
 function Layout:setCaret(window, line, column, anchorLine, anchorColumn)
 	local ctx = self.contexts[window]
 
@@ -1307,7 +1314,7 @@ function Layout:setCaret(window, line, column, anchorLine, anchorColumn)
 		return
 	end
 
-	local element = findElementById(ctx.ui, ctx.focusedName)
+	local element = findElementById(assert(ctx.ui), ctx.focusedName)
 
 	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
 		return
@@ -1338,6 +1345,7 @@ end
 ---@param modifiers winit.KeyModifiers?
 ---@param typed string # What the key types, which is what a field takes of it and not always the key: the key itself where it types nothing of its own
 ---@return any? message
+---@param self wonderland.plugin.Layout
 function Layout:key(window, key, modifiers, typed)
 	local ctx = self.contexts[window]
 
@@ -1356,7 +1364,7 @@ function Layout:key(window, key, modifiers, typed)
 		return nil
 	end
 
-	local element = findElementById(ctx.ui, ctx.focusedName)
+	local element = findElementById(assert(ctx.ui), ctx.focusedName)
 
 	if element == nil then
 		return nil
@@ -1415,7 +1423,6 @@ function Layout:key(window, key, modifiers, typed)
 	--- What is typed lands where the caret is, over a selection where there is one: a selection is
 	--- what a person made to replace it.
 	---@param text string
-	---@return any?
 	local function typeIn(text)
 		local from, to = selected()
 
@@ -1430,7 +1437,6 @@ function Layout:key(window, key, modifiers, typed)
 	--- anchor goes with it.
 	---@param from number
 	---@param to number
-	---@return any?
 	local function cutOut(from, to)
 		ctx.anchorPos = nil
 		ctx.cursorPos = from
@@ -1548,7 +1554,8 @@ function Layout:key(window, key, modifiers, typed)
 		elseif key == "v" or key == "c" or key == "x" then
 			local from, to = selected()
 
-			return self:clipboardKey(element, ctx, key, value, cursor, from, to, edit)
+			local clipboardKey = self.clipboardKey --[[@as fun(self: wonderland.plugin.Layout, element: wonderland.Element, ctx: wonderland.plugin.Layout.Context, key: string, value: string, cursor: number, from: number, to: number, edit: fun(edited: string): unknown?): unknown?]]
+				return clipboardKey(self, element, ctx, key, value, cursor, from, to, edit)
 		end
 	elseif key == "space" then
 		return typeIn(" ")
@@ -1810,7 +1817,8 @@ function Layout:event(event)
 		-- What the key types is what it does to the field, and the key itself is what it types where it
 		-- types nothing of its own: a named key is one of those, and is handled as itself.
 		local typed = typedBy(event) or event.key
-		local message = self:key(event.window, event.key, event.modifiers, typed)
+		local keyHandler = self.key --[[@as fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow, key: string, modifiers: winit.KeyModifiers?, typed: string): unknown?]]
+		local message = keyHandler(self, event.window, event.key, event.modifiers, typed)
 
 		-- What is held, as the keyboard last said: a mouse event does not carry the modifiers, and
 		-- a menu or a range of rows is what the modifiers were asked about.

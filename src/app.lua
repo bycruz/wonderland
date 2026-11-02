@@ -69,20 +69,21 @@ local WINDOW_CREATED = { type = "windowCreated" }
 ---@field font string? # A family name, or a ttf to draw text with: this machine's own sans otherwise
 ---@field pixelHeight number # How tall the default font is drawn, in pixels
 ---@field characters string # What the default font is baked for, before anything else is packed
----@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
+---@field assets wonderland.Assets? # Pictures, decoded once and uploaded: see `wonderland.Assets`
 ---@field clipboard winit.Clipboard? # What the system's clipboard holds, where the platform has one
 ---@field plugins wonderland.Plugin[] # In the order they were added
----@field private pendingTicks { fn: wonderland.Tick, window: wonderland.RenderWindow?, cancelled: boolean? }[] # Registered before a screen was
+---@field pendingTicks { fn: wonderland.Tick, window: wonderland.RenderWindow?, cancelled: boolean? }[] # Registered before a screen was
 ---@field onTick fun(self: wonderland.App, fn: wonderland.Tick, window: wonderland.RenderWindow?): wonderland.plugin.UI.Ticker
 ---@field every fun(self: wonderland.App, seconds: number, fn: wonderland.Tick): wonderland.plugin.UI.Ticker
 ---@field present fun(self: wonderland.App, window: wonderland.RenderWindow)
 ---@field init (fun(self: wonderland.App): any?)? # Once the shell has filled the app in
----@field view (fun(self: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element)? # What the screen looks like
+---@field view (fun(self: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets?): wonderland.Element)? # What the screen looks like
 ---@field update (fun(self: wonderland.App, message: any, window: winit.Window): wonderland.Task?)? # What a message does
 ---@field event (fun(self: wonderland.App, event: winit.Event, handler: winit.EventManager): any?)? # Events no plugin claimed
----@field private installed boolean
+---@field installed boolean
 -- The plugins the shell installed, kept as typed fields rather than looked up by name. They
 -- are the shell's own: an app that wants one asks for it with `getPlugin`.
+---@field getPlugin fun(self: wonderland.App, name: string): wonderland.Plugin?
 ---@field windowPlugin wonderland.plugin.Window?
 ---@field renderPlugin wonderland.plugin.Render?
 ---@field textPlugin wonderland.plugin.Text?
@@ -113,6 +114,7 @@ end
 --- for a message after the ones the shell installed.
 ---@param plugin wonderland.Plugin
 ---@return wonderland.App
+---@param self wonderland.App
 function App:plugin(plugin)
 	self.plugins[#self.plugins + 1] = plugin
 
@@ -125,6 +127,7 @@ end
 
 ---@param name string
 ---@return wonderland.Plugin?
+---@param self wonderland.App
 function App:getPlugin(name)
 	for _, plugin in ipairs(self.plugins) do
 		if plugin.name == name then
@@ -144,6 +147,7 @@ end
 ---@param fn wonderland.Tick
 ---@param window wonderland.RenderWindow?
 ---@return wonderland.plugin.UI.Ticker
+---@param self wonderland.App
 function App:onTick(fn, window)
 	if self.uiPlugin then
 		return self.uiPlugin:onTick(fn, window)
@@ -179,6 +183,7 @@ end
 ---@param seconds number
 ---@param fn wonderland.Tick
 ---@return wonderland.plugin.UI.Ticker
+---@param self wonderland.App
 function App:every(seconds, fn)
 	return self:onTick(function(at, window)
 		fn(at, window)
@@ -191,6 +196,7 @@ end
 --- A frame now, rather than at the display's own rate: what an app that has just been given
 --- something new to show asks for. See `UI:present`.
 ---@param window wonderland.RenderWindow
+---@param self wonderland.App
 function App:present(window)
 	if self.uiPlugin then
 		self.uiPlugin:present(window)
@@ -206,17 +212,25 @@ end
 local function screenPlugins(self)
 	-- The view is handed the assets rather than reaching for them, because it is called again by
 	-- the layout and the field is only filled in when a window is made: see `App:created`.
-	self.windowPlugin = WindowPlugin.new(WINDOW_CREATED)
-	self.renderPlugin = RenderPlugin.new(self.windowPlugin)
-	self.textPlugin = TextPlugin.new(self.renderPlugin)
-	self.layoutPlugin = LayoutPlugin.new(function(w) return self:view(w, self.assets) end, self.textPlugin,
-		self.renderPlugin)
-	self.uiPlugin = UIPlugin.new(self.layoutPlugin, self.renderPlugin)
+	local windowPlugin = WindowPlugin.new(WINDOW_CREATED)
+	local renderPlugin = RenderPlugin.new(windowPlugin)
+	local textPlugin = TextPlugin.new(renderPlugin)
+	---@param w wonderland.RenderWindow
+	local function view(w)
+		local draw = assert(self.view) --[[@as fun(app: wonderland.App, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element]]
+		local assets = self.assets --[[@as wonderland.Assets]]
+		return draw(self, w, assets)
+	end
+
+	local layoutPlugin = LayoutPlugin.new(view, textPlugin, renderPlugin)
+	local uiPlugin = UIPlugin.new(layoutPlugin, renderPlugin)
+	self.windowPlugin, self.renderPlugin, self.textPlugin = windowPlugin, renderPlugin, textPlugin
+	self.layoutPlugin, self.uiPlugin = layoutPlugin, uiPlugin
 
 	-- Named as well, so an app that wants the renderer, or to replace one of these, can ask
 	-- for it by name.
-	self.windowPlugin.name, self.renderPlugin.name = "window", "render"
-	self.textPlugin.name, self.layoutPlugin.name, self.uiPlugin.name = "text", "layout", "ui"
+	windowPlugin.name, renderPlugin.name = "window", "render"
+	textPlugin.name, layoutPlugin.name, uiPlugin.name = "text", "layout", "ui"
 end
 
 --- Everything a screen needs, before the event loop starts: the plugins, and then the app's
@@ -224,6 +238,7 @@ end
 --- that wants the plugins and no loop, and for a test.
 ---@param ... wonderland.Plugin? # The plugins to run: none of them names the defaults, nil names none
 ---@return wonderland.App
+---@param self wonderland.App
 function App:setup(...)
 	if self.installed then
 		return self
@@ -275,12 +290,14 @@ end
 ---@param _window wonderland.RenderWindow
 ---@param _assets wonderland.Assets
 ---@return wonderland.Element
+---@param self wonderland.App
 function App:view(_window, _assets)
 	return require("wonderland").div()
 end
 
 --- A window being made is where the plugins attach to it: the gpu, the font, the screen.
 ---@param window winit.Window
+---@param self wonderland.App
 function App:created(window)
 	window:setTitle(self.title)
 
@@ -322,9 +339,11 @@ end
 --- whatever none of them claimed, the app.
 ---@param event winit.Event
 ---@param handler winit.EventManager
----@return any
+---@return unknown?
+---@param self wonderland.App
 function App:dispatch(event, handler)
-	handler:setMode("wait")
+	local setMode = handler.setMode --[[@as fun(self: winit.EventManager, mode: winit.EventLoopMode)]]
+	setMode(handler, "wait")
 
 	for _, plugin in ipairs(self.plugins) do
 		if plugin.event then
@@ -348,6 +367,7 @@ end
 ---@param message any
 ---@param window winit.Window
 ---@return wonderland.Task?
+---@param self wonderland.App
 function App:handle(message, window)
 	if type(message) == "table" and message.type == "windowCreated" then
 		self:created(window)
@@ -366,6 +386,7 @@ end
 --- Called with no plugins it is the screen's own; with `nil` it is none of them, which is how
 --- an app that wires its own screen, or has no window at all, says so.
 ---@param ... wonderland.Plugin?
+---@param self wonderland.App
 function App:run(...)
 	self:setup(...)
 
@@ -401,6 +422,11 @@ function app.run(self)
 	local flowed = false
 
 	eventLoop:run(function(event, handler)
+		---@cast event winit.Event
+		---@cast handler winit.EventManager
+		---@type winit.Window
+		local eventWindow = event.window
+		---@cast eventWindow winit.Window
 		-- A frame is a screen, and a screen is built once for it: what an event does is what the
 		-- app does with the message it came to, and what it leaves behind is the frame the loop
 		-- draws next. See `App:handle`, which is where that frame is asked for.
@@ -411,7 +437,7 @@ function app.run(self)
 		end
 
 		if message then
-			local task = self:handle(message, event.window)
+			local task = (self.handle --[[@as fun(self: wonderland.App, message: any, window: winit.Window): wonderland.Task?]])(self, message, eventWindow)
 
 			if task then
 				if task.type == "createWindow" then
@@ -420,7 +446,8 @@ function app.run(self)
 					if task.kind then w.kind = task.kind end
 					eventLoop:register(w)
 				elseif task.type == "closeWindow" and event.window then
-					handler:close(event.window)
+					local closeWindow = handler.close --[[@as fun(self: winit.EventManager, window: winit.Window)]]
+					closeWindow(handler, event.window)
 				end
 			end
 		end
@@ -433,6 +460,7 @@ function app.run(self)
 			local owes = false
 
 			for _, window in pairs(eventLoop.windows) do
+				---@cast window winit.Window
 				if self.uiPlugin then
 					-- A repeated key is a key: what it edited is the app's, so the message that comes
 					-- of it goes to the app the way an event's does, and the frame that shows what it
@@ -441,7 +469,8 @@ function app.run(self)
 					local repeated = self.uiPlugin:tick(window, handler)
 
 					if repeated then
-						self:handle(repeated, window)
+						local handle = self.handle --[[@as fun(self: wonderland.App, message: any, window: winit.Window): wonderland.Task?]]
+						handle(self, repeated, window)
 					end
 				end
 
@@ -460,7 +489,8 @@ function app.run(self)
 			-- what a wheel turned hard was made to stop doing. A frame that is owed is the same
 			-- thing by another route, and it is what a screen that asked for one while the loop was
 			-- about to wait is waiting for.
-			handler:setMode((flowed or owes) and "poll" or "wait")
+			local setMode = handler.setMode --[[@as fun(self: winit.EventManager, mode: winit.EventLoopMode)]]
+			setMode(handler, (flowed or owes) and "poll" or "wait")
 			flowed = false
 		end
 	end)

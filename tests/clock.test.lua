@@ -31,7 +31,6 @@ end)
 
 -- The tick is what a screen with no event behind it does, so what it is given here is the least it
 -- can be asked with: a context for a window, which is what says it is a screen at all.
----@return wonderland.plugin.UI, table, winit.EventManager, { waited: number? }
 local function aTickingScreen()
 	local window = {}
 
@@ -47,7 +46,10 @@ local function aTickingScreen()
 	}
 	---@type any
 	local renderPlugin = {}
-	local ui = UI.new(layoutPlugin, renderPlugin)
+	---@cast renderPlugin wonderland.plugin.Render
+	---@cast layoutPlugin wonderland.plugin.Layout<unknown>
+	local makeUI = UI.new --[[@as fun(layout: any, render: any): wonderland.plugin.UI]]
+	local ui = makeUI(layoutPlugin, renderPlugin)
 	local waits = {}
 
 	local handler = {
@@ -61,7 +63,7 @@ local function aTickingScreen()
 end
 
 ---@param ui wonderland.plugin.UI
----@param window winit.Window
+---@param window wonderland.RenderWindow
 ---@param handler winit.EventManager
 local function tick(ui, window, handler)
 	ui:tick(window, handler)
@@ -168,6 +170,7 @@ test.it("takes the window it is for from the first it is asked about", function(
 	ui.layoutPlugin.contexts[other] = { window = other }
 
 	tick(ui, window, handler)
+	---@cast other winit.Window
 	tick(ui, other, handler)
 
 	test.equal(#windows, 1, "a callback is for one window, and it is the one it was first asked about")
@@ -215,7 +218,9 @@ test.it("registers an app's own work, which is what a screen is then asked about
 	assert(ui).layoutPlugin.contexts[window] = { window = window }
 
 	local waits = {}
-	assert(ui):tick(window, { setTimeout = function(_, seconds) waits.waited = seconds end })
+	local handler = { setTimeout = function(_, seconds) waits.waited = seconds end }
+	---@cast handler winit.EventManager
+	assert(ui):tick(window, handler)
 
 	test.equal(calls, 1, "which asks it on its own clock")
 	test.equal(window.shouldRedraw, true, "and asks for the frame its work is drawn in")

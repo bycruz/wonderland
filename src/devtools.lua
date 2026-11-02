@@ -58,7 +58,6 @@ local MEMORY_STEP = 2
 -- of what a style says: a style shared by two of them is a style that puts both of them in one
 -- place, and a builder written again every frame is a table a frame. These are moved by the frame
 -- that draws them -- see `place` -- and a style that has not moved is a style interned as it is.
----@return wonderland.StyleBuilder
 local function panelStyle()
 	return sty():column():gap(GAP):pad(PANEL_PAD):radius(5):bg("#0b0d12fa"):fg("#c3cbdb")
 		:border(PANEL_BORDER, "#2c3444"):z(1000)
@@ -74,7 +73,6 @@ local INSPECT = panelStyle()
 local TITLE = sty():font("monospace"):text(12):weight("bold"):fg("#7fd4ff"):h(ROW_H)
 local LINE = sty():font("monospace"):text(12):h(ROW_H)
 local PICKED = sty():bg("#1d3a52"):fg("#eaf2ff"):radius(3):h(ROW_H)
-local DIM = sty():fg("#7c8699"):h(ROW_H)
 local BOUNDS = sty():fill():offset(0, 0):z(900)
 local FULL = sty():fill():row():align("start"):justify("start")
 
@@ -104,6 +102,19 @@ local DEPTH_COLOURS = {
 ---@class wonderland.Devtools: wonderland.Plugin
 ---@field name string
 ---@field on boolean
+---@field new fun(opts: wonderland.Devtools.Options?): wonderland.Devtools
+---@field renderPlugin wonderland.plugin.Render?
+---@field layoutPlugin wonderland.plugin.Layout?
+---@field uiPlugin wonderland.plugin.UI?
+---@field framedAt number?
+---@field app wonderland.App?
+---@field buildMs number?
+---@field quads number?
+---@field runs number?
+---@field shownFps number?
+---@field shownMs number?
+---@field shownMemory number?
+---@field framedUi wonderland.Element?
 ---@field key string
 ---@field boxesKey string # Which key draws a box around every node rather than the one pointed at
 ---@field boxes boolean # Whether every box is being drawn, which is what a big screen pays for
@@ -115,7 +126,7 @@ local DEPTH_COLOURS = {
 ---@field picked number? # The node the pointer is over, which is what is being shown of it
 ---@field rows wonderland.Devtools.Node[] # The walk, as the rows this frame drew it from
 ---@field wrapper number? # The element the panel's own box is, which the app's root is told from
----@field wrapped fun(window: wonderland.RenderWindow): wonderland.Element? # What the layout builds its screen with, once it is the panel's
+---@field wrapped fun(window: wonderland.RenderWindow): wonderland.Element # What the layout builds its screen with, once it is the panel's
 local Devtools = {}
 Devtools.__index = Devtools
 
@@ -143,7 +154,6 @@ end
 ---@param g number
 ---@param b number
 ---@param a number
----@return string
 local function hex(r, g, b, a)
 	if a == 0 then
 		return "none"
@@ -168,7 +178,6 @@ end
 
 --- How one value of a three way setting reads: what a row is aligned by, and which way a box stacks.
 ---@param value number
----@return string
 local function placed(value)
 	return value == 1 and "center" or (value == 2 and "end" or "start")
 end
@@ -176,7 +185,6 @@ end
 --- What a node is, as the one line a row of the tree has room for: the name it was given, else the
 --- line it draws, else what it is made of.
 ---@param node wonderland.Node
----@return string
 local function labelOf(node)
 	local made = node.element ~= 0 and element.at(node.element) or nil
 
@@ -352,7 +360,6 @@ end
 ---@param style wonderland.StyleBuilder
 ---@param rows string[]
 ---@param picked number? # Which row is the one being pointed at, where one of them is
----@return wonderland.Element
 local function panel(style, rows, picked)
 	---@type wonderland.Element[]
 	local lines = {}
@@ -366,7 +373,6 @@ end
 
 --- What a list of rows comes to on screen, which is what the panel under it is placed by.
 ---@param rows string[]
----@return number
 local function panelHeight(rows)
 	-- The border is inside the box the row heights are added to, so it is a part of the height that
 	-- is not a row: a panel without it here is a panel whose last row is two pixels into its edge.
@@ -384,7 +390,6 @@ end
 ---@param shown number? # What it was shown as, where it has been shown at all
 ---@param value number # What it is now
 ---@param step number # How far it has to move to be worth showing again
----@return number
 local function steady(shown, value, step)
 	if shown == nil or math.abs(value - shown) >= step then
 		return value
@@ -408,7 +413,6 @@ end
 --- says it again when it is not -- which is what an app that repaints on every pointer event needs.
 ---@param self wonderland.Devtools
 ---@param window wonderland.RenderWindow
----@return string[]
 local function statsRows(self, window)
 	local render = self.renderPlugin and self.renderPlugin:getContext(window) or nil
 	local quads = render and render.quads or 0
@@ -434,7 +438,6 @@ end
 --- came out of the cascade rather than the one the app wrote, which is what the two are told apart
 --- by when a box is not the size its own call says it is.
 ---@param self wonderland.Devtools
----@return string[]
 local function styleRows(self)
 	local found = nil
 
@@ -679,7 +682,7 @@ function Devtools:resolve()
 		-- they are made from here on, and a node made after this is one of theirs.
 		self.elements = element.count()
 
-		local box = self:overlay(window, built)
+		local box = assert(self:overlay(window, built))
 
 		self.buildMs = (time.now() - started) * 1000
 
@@ -702,7 +705,8 @@ function Devtools:resolve()
 
 		---@param this wonderland.plugin.UI
 		---@param window wonderland.RenderWindow
-		ui.frame = function(this, window)
+		local uiFrame = ui --[[@as { frame: fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow) }]]
+		uiFrame.frame = function(this, window)
 			local started = time.now()
 
 			frame(this, window)

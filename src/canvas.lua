@@ -18,10 +18,10 @@
 -- One canvas is handed to every draw of every frame and written into again, so nothing here
 -- allocates and what a caller keeps is its own state: this frame's spectrum is the app's, and so is
 -- the history of the last ones.
-local ffi = require("ffi")
 local Quads = require("wonderland.util.quad_batch")
 
 --- The colours a canvas knows by name. What a caller writes as a hex string is anything at all.
+---@type table<string, number[]>
 local NAMED = {
 	black = { 0, 0, 0 },
 	white = { 1, 1, 1 },
@@ -36,7 +36,6 @@ local NAMED = {
 --- channels. What none of those is is white, which is what a canvas draws where it was given
 --- something it cannot read rather than drawing nothing.
 ---@param colour string|wonderland.Color
----@return number # The four bytes of it, which is what a quad takes
 local function colourOf(colour)
 	if type(colour) == "table" then
 		return Quads.colour(colour.r or colour[1] or 0, colour.g or colour[2] or 0, colour.b or colour[3] or 0,
@@ -56,7 +55,6 @@ local function colourOf(colour)
 			local step = #hex <= 3 and 1 or 2
 
 			---@param index number
-			---@return number
 			local function part(index)
 				local byte = tonumber(hex:sub(index * step + 1, index * step + step), 16) or 0
 
@@ -73,7 +71,6 @@ end
 --- Where a point is in the frame's own coordinates: what the frame's vertices are written in.
 ---@param pos number
 ---@param screenSize number
----@return number
 local function toNDC(pos, screenSize)
 	return (pos / (screenSize * 0.5)) - 1.0
 end
@@ -105,7 +102,6 @@ end
 --- out of it as a shape of up to seven corners, which is what is drawn as the fan of them.
 ---@param clip wonderland.plugin.UI.Clip
 ---@param points number[] # The corners, a pair of numbers each, in the order they go round
----@return number[] inside # The corners that are, which is nothing where none of it is
 local function clipPoints(clip, points)
 	local inside = points
 
@@ -142,6 +138,11 @@ local function clipPoints(clip, points)
 	---@param value number # Where the clip's edge is
 	---@return fun(x1: number, y1: number, x2: number, y2: number): number, number
 	local function crossing(axis, value)
+		---@param x1 number
+		---@param y1 number
+		---@param x2 number
+		---@param y2 number
+		---@return number, number
 		return function(x1, y1, x2, y2)
 			local from, to = axis == 1 and x1 or y1, axis == 1 and x2 or y2
 			local at = (value - from) / (to - from)
@@ -171,7 +172,6 @@ end
 ---@param self wonderland.Canvas
 ---@param points number[] # The corners, from the canvas's corner
 ---@param colour number # The four bytes of it, as `colourOf` answers with
----@return wonderland.Canvas
 local function fan(self, points, colour)
 	local store = self.store
 	local clip = store.clip
@@ -235,6 +235,7 @@ end
 ---@class wonderland.Canvas
 ---@field width number # How wide the room it was given is, in pixels
 ---@field height number # And how tall
+---@field store wonderland.Canvas.Store
 local Canvas = {}
 Canvas.__index = Canvas
 
@@ -370,7 +371,6 @@ function Canvas:line(x1, y1, x2, y2, thickness, colour)
 		return self
 	end
 
-	local store = self.store
 	local half = thickness / 2
 	-- Either side of the line, which is its direction turned a quarter turn.
 	local nx, ny = -dy / length * half, dx / length * half

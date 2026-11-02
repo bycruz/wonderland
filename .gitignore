@@ -1,3 +1,5 @@
 target/
 lde.lock
 wonderland-example-*
+
+.lye

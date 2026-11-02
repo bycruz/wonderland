@@ -49,7 +49,14 @@ ffi.cdef [[
 
 -- What state an element is in. A hover or press style is used in place of the base one,
 -- so this is what the layout reads to pick which style it is.
-element.HOVERED, element.PRESSED, element.FOCUSED, element.TEXT_INPUT = 1, 2, 4, 8
+---@type integer
+element.HOVERED = 1
+---@type integer
+element.PRESSED = 2
+---@type integer
+element.FOCUSED = 4
+---@type integer
+element.TEXT_INPUT = 8
 element.SCROLLS = 16
 
 --- A field that takes more than one line: what it is typed into is one string with breaks in
@@ -81,7 +88,14 @@ element.RESIZE = 512
 --- The edges a box can be resized by, which is the name an app uses said as the number the
 --- element keeps: which way the pointer moves is which way the box grows, so dragging the left
 --- edge to the left and the right edge to the right both make it wider.
-element.EDGE_RIGHT, element.EDGE_LEFT, element.EDGE_TOP, element.EDGE_BOTTOM = 0, 1, 2, 3
+---@type integer
+element.EDGE_RIGHT = 0
+---@type integer
+element.EDGE_LEFT = 1
+---@type integer
+element.EDGE_TOP = 2
+---@type integer
+element.EDGE_BOTTOM = 3
 
 --- One element, as the arena holds it. The language server cannot see an ffi.cdef, so the
 --- fields are spelled out here: it is the only way to get them checked. The ones that
@@ -129,6 +143,7 @@ element.EDGE_RIGHT, element.EDGE_LEFT, element.EDGE_TOP, element.EDGE_BOTTOM = 0
 ---@field active fun(self: wonderland.Element, value: wonderland.StyleBuilder | wonderland.Style): wonderland.Element
 ---@field focus fun(self: wonderland.Element, value: wonderland.StyleBuilder | wonderland.Style): wonderland.Element
 ---@field children fun(self: wonderland.Element, ...: wonderland.IntoElement | wonderland.IntoElement[]): wonderland.Element
+---@field canvas fun(self: wonderland.Element, draw: fun(canvas: wonderland.Canvas)): wonderland.Element
 ---@field named fun(self: wonderland.Element, name: string): wonderland.Element
 ---@field data fun(self: wonderland.Element, data: any): wonderland.Element
 ---@field input fun(self: wonderland.Element, opts: wonderland.InputOpts<any>): wonderland.Element
@@ -184,6 +199,7 @@ local SHIFT, MASK = 9, BLOCK - 1
 local SIZE = assert(ffi.sizeof("wl_element"))
 
 local blocks = {}
+---@type table<number, wonderland.Element>
 local pointers = {} -- the elements of this frame, by index, which is what a node holds
 local count = 0
 local frame = 1
@@ -317,7 +333,6 @@ function element.text(value)
 end
 
 ---@param value wonderland.IntoElement
----@return wonderland.Element
 local function intoElement(value)
 	local kind = type(value)
 
@@ -356,7 +371,6 @@ end
 --- the first turn to the last: a value that is nothing on one turn and an element on the next is a
 --- loop the recorder gives up on -- see `link`.
 ---@param self wonderland.Element
----@return number
 local function lastChild(self)
 	local index = self.childFirst
 
@@ -379,7 +393,6 @@ end
 ---@param parent wonderland.Element
 ---@param after number # The index of the child it follows, nought for the first
 ---@param child wonderland.Element
----@return number # The index of the child, so the next one knows what to follow
 local function link(parent, after, child)
 	if after == 0 then
 		parent.childFirst = child.index
@@ -400,6 +413,7 @@ end
 --- that should look the same, and the same style written twice is interned once.
 ---@param value wonderland.StyleBuilder | wonderland.Style
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:style(value)
 	check(self)
 	self.baseStyle = style.intern(value)
@@ -413,6 +427,7 @@ end
 --- names a font does not re-measure the line.
 ---@param value wonderland.StyleBuilder | wonderland.Style
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:hover(value)
 	check(self)
 	self.hoverStyle = style.intern(value)
@@ -423,6 +438,7 @@ end
 --- Used instead of the base style while the pointer is held down on the element.
 ---@param value wonderland.StyleBuilder | wonderland.Style
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:active(value)
 	check(self)
 	self.activeStyle = style.intern(value)
@@ -432,6 +448,7 @@ end
 
 ---@param value wonderland.StyleBuilder | wonderland.Style
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:focus(value)
 	check(self)
 	self.focusStyle = style.intern(value)
@@ -443,6 +460,7 @@ end
 --- table of elements is taken apart, so a list built in a loop can be passed as one.
 ---@param ... wonderland.IntoElement | wonderland.IntoElement[]
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:children(...)
 	check(self)
 
@@ -465,6 +483,7 @@ end
 
 ---@param name string
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:named(name)
 	check(self)
 	self.name = pushString(name)
@@ -475,6 +494,7 @@ end
 --- Anything the element wants to carry: the message a click sends, a row's own data.
 ---@param value any
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:data(value)
 	check(self)
 	dataCount = dataCount + 1
@@ -487,6 +507,7 @@ end
 ---@generic T
 ---@param message T
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onMouseMove(message)
 	check(self)
 	self.onmousemove = pushCallback(message)
@@ -497,6 +518,7 @@ end
 ---@generic T
 ---@param message T
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onClick(message)
 	check(self)
 	self.onclick = pushCallback(message)
@@ -507,6 +529,7 @@ end
 ---@generic T
 ---@param cons fun(x: number, y: number, elementWidth: number, elementHeight: number): T
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onMouseDown(cons)
 	check(self)
 	self.onmousedown = pushCallback(cons)
@@ -517,6 +540,7 @@ end
 ---@generic T
 ---@param message T
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onMouseUp(message)
 	check(self)
 	self.onmouseup = pushCallback(message)
@@ -527,6 +551,7 @@ end
 ---@generic T
 ---@param message T
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onDoubleClick(message)
 	check(self)
 	self.ondblclick = pushCallback(message)
@@ -551,6 +576,7 @@ end
 --- work out about it wants.
 ---@param cons wonderland.ScrollHandler
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onScroll(cons)
 	check(self)
 	self.onscroll = pushCallback(cons)
@@ -567,6 +593,7 @@ end
 --- the caret keeps it.
 ---@param cons wonderland.ContextMenuHandler
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onContextMenu(cons)
 	check(self)
 	self.oncontextmenu = pushCallback(cons)
@@ -587,6 +614,7 @@ end
 --- paths when no element claimed it.
 ---@param cons wonderland.DropHandler
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:onDrop(cons)
 	check(self)
 	self.ondrop = pushCallback(cons)
@@ -609,6 +637,7 @@ end
 --- picture an app's shader drew, which is what a texture of its own is shown by.
 ---@param draw fun(canvas: wonderland.Canvas)
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:canvas(draw)
 	check(self)
 	self.oncanvas = pushCallback(draw)
@@ -623,6 +652,7 @@ end
 --- is under it, so the two are one call.
 ---@param offset number
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:scroll(offset)
 	check(self)
 	self.flags = bit.bor(self.flags, element.SCROLLS)
@@ -651,6 +681,7 @@ end
 ---@generic T
 ---@param opts wonderland.InputOpts<T>
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:input(opts)
 	check(self)
 	self.flags = bit.bor(self.flags, element.TEXT_INPUT)
@@ -696,6 +727,7 @@ end
 ---@generic T
 ---@param opts wonderland.SliderOpts<T>
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:slider(opts)
 	check(self)
 	self.flags = bit.bor(self.flags, element.SLIDE)
@@ -714,6 +746,7 @@ end
 ---@field onchange fun(size: number): T
 
 --- What edges are called, as the numbers an element keeps them as.
+---@type table<string, integer>
 local EDGES = {
 	right = element.EDGE_RIGHT,
 	left = element.EDGE_LEFT,
@@ -743,6 +776,7 @@ local EDGES = {
 ---@generic T
 ---@param opts wonderland.ResizeOpts<T>
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:resize(opts)
 	check(self)
 	local edge = EDGES[opts.edge]
@@ -764,6 +798,7 @@ end
 --- nub itself, so the nub's ends are the ends of the slider. Anywhere but inside a slider it is a
 --- flag nothing reads, and the element stays where the layout stacked it.
 ---@return wonderland.Element
+---@param self wonderland.Element
 function methods:thumb()
 	check(self)
 	self.flags = bit.bor(self.flags, element.THUMB)

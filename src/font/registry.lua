@@ -50,7 +50,6 @@ end
 --- A family name with its spaces taken out, which is how the name of a font file is written and so
 --- how a caller that read one asks for it: "NotoSans" for "Noto Sans".
 ---@param family string
----@return string
 local function foldSpaces(family)
 	return (family:gsub("%s+", ""))
 end
@@ -89,15 +88,17 @@ end
 --- filesystem happened to mention first.
 ---@param a wonderland.font.Face
 ---@param b wonderland.font.Face
----@return boolean
 local function inOrder(a, b)
-	local left, right = a.family:lower(), b.family:lower()
+	local left, right = assert(a.family):lower(), assert(b.family):lower()
 
 	if left ~= right then return left < right end
-	if a.weight ~= b.weight then return a.weight < b.weight end
-	if a.italic ~= b.italic then return not a.italic end
-	if a.subfamily ~= b.subfamily then return a.subfamily < b.subfamily end
-	if a.path ~= b.path then return a.path < b.path end
+	local aw, bw = a.weight or 400, b.weight or 400
+	if aw ~= bw then return aw < bw end
+	if (a.italic or false) ~= (b.italic or false) then return not a.italic end
+	local asub, bsub = a.subfamily or "", b.subfamily or ""
+	if asub ~= bsub then return asub < bsub end
+	local ap, bp = a.path or "", b.path or ""
+	if ap ~= bp then return ap < bp end
 
 	return a.index < b.index
 end
@@ -144,6 +145,7 @@ local SCRIPTS = {
 
 -- The names a stylesheet writes where a family would go. They name a kind of font rather than a
 -- font, and which file they come to is the machine's answer.
+---@type table<string, string>
 local GENERIC = {
 	["sans-serif"] = "sans", ["system-ui"] = "sans", ["ui-sans-serif"] = "sans",
 	serif = "serif", ["ui-serif"] = "serif",
@@ -152,15 +154,15 @@ local GENERIC = {
 
 
 ---@class Registry
----@field private dirs string[] # Where fonts are looked for
----@field private isPlatform boolean # Whether those are this machine's own directories
----@field private index wonderland.font.Face[]? # What the last scan found, in order
----@field private familyList string[] # The distinct families in it
----@field private byFamily table<string, wonderland.font.Face[]> # By family, case folded
----@field private byName table<string, wonderland.font.Face[]> # And by it with the spaces out
----@field private memo table<string, wonderland.font.Lookup> # What a lookup came to, by its tuple
----@field private scriptMemo table<string, wonderland.font.Lookup> # And what a script came to, by its language
----@field private defaultLookup wonderland.font.Lookup? # And what the default came to
+---@field dirs string[] # Where fonts are looked for
+---@field isPlatform boolean # Whether those are this machine's own directories
+---@field index wonderland.font.Face[]? # What the last scan found, in order
+---@field familyList string[] # The distinct families in it
+---@field byFamily table<string, wonderland.font.Face[]> # By family, case folded
+---@field byName table<string, wonderland.font.Face[]> # And by it with the spaces out
+---@field memo table<string, wonderland.font.Lookup> # What a lookup came to, by its tuple
+---@field scriptMemo table<string, wonderland.font.Lookup> # And what a script came to, by its language
+---@field defaultLookup wonderland.font.Lookup? # And what the default came to
 local Registry = {}
 Registry.__index = Registry
 
@@ -183,7 +185,11 @@ function Registry:faces()
 
 	if known ~= nil then return known end
 
-	local faces, families, seen = {}, {}, {}
+	---@type wonderland.font.Face[]
+	local faces = {}
+	---@type string[]
+	local families = {}
+	local seen = {}
 
 	for _, dir in ipairs(self.dirs) do
 		if seen[dir] == nil then
@@ -201,9 +207,10 @@ function Registry:faces()
 	self.memo = {}
 
 	for _, face in ipairs(faces) do
-		local folded = face.family:lower()
+		local folded = assert(face.family):lower()
 
-		if families[#families] ~= face.family then families[#families + 1] = face.family end
+		local family = assert(face.family)
+		if families[#families] ~= family then families[#families + 1] = family end
 
 		addFace(self.byFamily, folded, face)
 		addFace(self.byName, foldSpaces(folded), face)
@@ -347,8 +354,8 @@ end
 ---@return string? path
 ---@return number? index
 function Registry:path(family, opts)
-	local weight = opts?.weight ?? 400
-	local isItalic = opts?.italic ?? false
+	local weight = tonumber(opts?.weight) or 400
+	local isItalic = opts?.italic == true
 	local key = family .. "\0" .. weight .. (isItalic ? "\1" : "\0")
 	local known = self.memo[key]
 
@@ -361,7 +368,7 @@ function Registry:path(family, opts)
 	if face ~= nil then
 		path, index = face.path, face.index
 	elseif generic ~= nil then
-		path, index = self:generic(generic, weight, isItalic)
+		path, index = self:generic(assert(generic), weight, isItalic)
 	end
 
 	if path == nil then path, index = self:default() end

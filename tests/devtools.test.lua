@@ -48,7 +48,6 @@ local canRender = fontPath ~= nil and gpuErr == nil
 
 -- A screen of the app's own: a column of two rows, one of them named, so that a row of the panel's
 -- tree has something to be labelled with.
----@return fun(): wonderland.Element
 local function anApp()
 	return function()
 		return div():style(sty():fill():column():gap(4):bg("#12141c")):children({
@@ -135,7 +134,7 @@ test.skipIf(not canRender)("shows the style of the box the pointer is over", fun
 	screen:draw()
 
 	local picked = assert(tool.picked)
-	local node = screen.plugins.layout.contexts[screen.window].screen:node(picked)
+	local node = assert(screen.plugins.layout.contexts[screen.window].screen):node(picked)
 
 	test.equal(node.width, 60, "the box under the pointer is the one shown")
 	test.equal(node.height, 20)
@@ -232,11 +231,15 @@ test.skipIf(not canRender)("asks for no frame of its own as the pointer moves", 
 	local present = ui.present
 	local asked = 0
 
-	ui.present = function(this, window)
+	---@param this wonderland.plugin.UI
+	---@param window wonderland.RenderWindow
+	local function presents(this, window)
 		asked = asked + 1
 
 		present(this, window)
 	end
+
+	ui.present = presents
 
 	for at = 0, 20 do
 		screen:event({ name = "mouseMove", window = screen.window, x = 10 + at * 4, y = 34 })
@@ -257,7 +260,6 @@ end)
 -- for: it is drawn in every frame the app draws, so its quads are the app's quads. What a screen of
 -- a few hundred elements is drawn as is what says whether it is a panel that can be left on.
 test.skipIf(not canRender)("costs the screen a bounded number of quads", function()
-	---@return fun(): wonderland.Element
 	local function aList()
 		return function()
 			local rows = {}

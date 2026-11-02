@@ -26,7 +26,6 @@ end
 
 --- A window nothing is drawn in: these tests are about what a message does, not about what it
 --- is drawn into.
----@return winit.Window
 local function aWindow()
 	local window = {}
 
@@ -46,6 +45,7 @@ local function plugin(name, message)
 		name = name,
 		build = function(_, app) taken.app = app end,
 		event = function(_, event)
+			---@cast event winit.Event
 			taken.event = event.name
 			return message
 		end,
@@ -54,7 +54,7 @@ end
 
 test.it("an app keeps its own state, which is what the generic names", function()
 	---@type wonderland.App<{ clicks: number }>
-	local app = wonderland.app("Wonderland")
+	local app = wonderland.app("Wonderland") --[[@as wonderland.App<{ clicks: number }>]]
 
 	test.equal(app.title, "Wonderland")
 	test.equal(#app.plugins, 0, "nothing is installed until it is run")
@@ -62,6 +62,7 @@ test.it("an app keeps its own state, which is what the generic names", function(
 
 	local seen = 0
 	app.init = function(self)
+		---@cast self wonderland.App<{ clicks: number }>
 		self.clicks = 3
 		seen = self.clicks
 	end
@@ -75,19 +76,27 @@ test.it("two apps are two apps: each has its own state, plugins and window", fun
 	local pressed, otherPressed = nil, nil
 
 	---@type wonderland.App<{ clicks: number }>
-	local first = wonderland.app("first")
+	local first = wonderland.app("first") --[[@as wonderland.App<{ clicks: number }>]]
 
-	first.init = function(self) self.clicks = 0 end
+	first.init = function(self)
+		---@cast self wonderland.App<{ clicks: number }>
+		self.clicks = 0
+	end
 	first.press = function(self)
+		---@cast self wonderland.App<{ clicks: number }>
 		self.clicks = self.clicks + 1
 		pressed = self.clicks
 	end
 
 	---@type wonderland.App<{ clicks: number }>
-	local second = wonderland.app("second")
+	local second = wonderland.app("second") --[[@as wonderland.App<{ clicks: number }>]]
 
-	second.init = function(self) self.clicks = 0 end
+	second.init = function(self)
+		---@cast self wonderland.App<{ clicks: number }>
+		self.clicks = 0
+	end
 	second.press = function(self)
+		---@cast self wonderland.App<{ clicks: number }>
 		self.clicks = self.clicks + 1
 		otherPressed = self.clicks
 	end
@@ -146,8 +155,9 @@ test.it("init runs once the shell has filled the app's fields in", function()
 	local seen = {}
 
 	---@type wonderland.App<{ clicks: number }>
-	local app = wonderland.app()
+	local app = wonderland.app() --[[@as wonderland.App<{ clicks: number }>]]
 	app.init = function(self)
+		---@cast self wonderland.App<{ clicks: number }>
 		seen.title = self.title
 		seen.plugins = #self.plugins
 		self.clicks = 7
@@ -179,6 +189,7 @@ test.it("the app's own event is handed what the plugins did not claim", function
 	local asked, seen = {}, {}
 
 	app.event = function(_, event)
+		---@cast event winit.Event
 		seen[#seen + 1] = event.name
 		return "mine"
 	end
@@ -186,6 +197,7 @@ test.it("the app's own event is handed what the plugins did not claim", function
 	app:setup({
 		name = "keys",
 		event = function(_, event)
+			---@cast event winit.Event
 			asked[#asked + 1] = event.name
 
 			if event.name == "keyPress" then

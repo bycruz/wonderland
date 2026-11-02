@@ -20,6 +20,7 @@ local scan = {}
 ---@field path string
 ---@field family string
 ---@field subfamily string
+---@field metrics fun(self: wonderland.font.Face, pixelHeight: number): number, number
 ---@field weight number # As CSS counts it: 100 to 900
 ---@field italic boolean
 ---@field index number # Which face of the file, nought for a file that holds one
@@ -81,7 +82,6 @@ local FONT_FILES = { [".ttf"] = true, [".otf"] = true, [".ttc"] = true, [".otc"]
 --- The names in a directory, or nothing where the path is not one. A walk asks this to tell a
 --- directory from a file, so a tree of fonts is walked without asking the filesystem twice.
 ---@param path string
----@return string[]?
 local function listDir(path)
 	if isWindows then
 		local data = ffi.new("struct wl_find_data")
@@ -124,9 +124,9 @@ end
 
 --- Where each platform keeps fonts, the system's own and the user's. What a registry is handed when
 --- the caller did not say where to look.
----@return string[]
 local function platformDirs()
-	local home = os.getenv("HOME") ?? ""
+	---@type string
+	local home = os.getenv("HOME") or ""
 
 	-- A font a user installed without being an administrator goes to a directory of theirs rather
 	-- than into the system's.
@@ -145,9 +145,10 @@ local function platformDirs()
 			home .. "/Library/Fonts" }
 	end
 
-	local data = os.getenv("XDG_DATA_HOME")
+	---@type string
+	local data = os.getenv("XDG_DATA_HOME") or (home .. "/.local/share/fonts")
 	local dirs = { "/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/X11/fonts",
-		data ?? (home .. "/.local/share/fonts"), home .. "/.fonts" }
+		data, home .. "/.fonts" }
 
 	-- A sandboxed app -- a flatpak, a snap -- sees the machine's filesystem under /run/host and not
 	-- at the root, so the machine's own fonts are at none of the paths above.
@@ -202,7 +203,8 @@ end
 ---@return wonderland.font.Reader
 local function readerOf(file)
 	return function(offset, length)
-		if file:seek("set", offset) == nil then return nil end
+		local start = offset --[[@as number]]
+		if file:seek("set", start) == nil then return nil end
 
 		return file:read(length)
 	end

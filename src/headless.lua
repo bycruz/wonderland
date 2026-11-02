@@ -34,12 +34,10 @@ local headless = {}
 
 --- A clipboard for a screen with no window: what a copy is put in and a paste comes out of, which
 --- is all a test of either needs. A screen with no window has no system to ask.
----@return winit.Clipboard
 local function memoryClipboard()
 	local held = nil
 
-	---@type any
-	return {
+	local clipboard = {
 		setText = function(_, text)
 			held = text
 		end,
@@ -50,6 +48,8 @@ local function memoryClipboard()
 			held = nil
 		end,
 	}
+
+	return clipboard --[[@as winit.Clipboard]]
 end
 
 ---@class wonderland.Headless.Options
@@ -65,11 +65,19 @@ end
 ---@field assets wonderland.Assets # Pictures, decoded once and uploaded: see `wonderland.Assets`
 ---@field window wonderland.RenderWindow # The stand-in the plugins lay out against
 ---@field clipboard winit.Clipboard # What a copy is put in and a paste comes out of, in memory
----@field plugins { window: wonderland.plugin.Window<any>, render: wonderland.plugin.Render, text: wonderland.plugin.Text, layout: wonderland.plugin.Layout<any>, ui: wonderland.plugin.UI }
+---@field plugins { window: wonderland.plugin.Window<unknown>, render: wonderland.plugin.Render, text: wonderland.plugin.Text, layout: wonderland.plugin.Layout<unknown>, ui: wonderland.plugin.UI }
 ---@field order wonderland.Plugin[] # The plugins, in the order an event goes down them
 ---@field handler winit.EventManager # What an event is handed with, which a screen with no loop does nothing with
 ---@field view fun(self: wonderland.Headless, window: wonderland.RenderWindow, assets: wonderland.Assets): wonderland.Element
 ---@field onMessage fun(message: any)?
+---@field draw fun(self: wonderland.Headless)
+---@field getPixels fun(self: wonderland.Headless): string?, string?
+---@field save fun(self: wonderland.Headless, path: string): boolean?, string?
+---@field event fun(self: wonderland.Headless, event: unknown): unknown?
+---@field click fun(self: wonderland.Headless, x: number, y: number): unknown?
+---@field drag fun(self: wonderland.Headless, fromX: number, fromY: number, toX: number, toY: number): unknown?
+---@field getPlugin fun(self: wonderland.Headless, name: string): wonderland.Plugin?
+---@field close fun(self: wonderland.Headless)
 local Headless = {}
 Headless.__index = Headless
 
@@ -87,40 +95,50 @@ function headless.new(view, opts)
 		plugins = {},
 	}, Headless)
 
-	self.plugins.window = WindowPlugin.new({ type = "onWindowCreate" })
-	self.plugins.render = RenderPlugin.new(self.plugins.window)
-	self.plugins.text = TextPlugin.new(self.plugins.render)
+	local windowPlugin = WindowPlugin.new({ type = "onWindowCreate" })
+	self.plugins.window = windowPlugin
+	local renderPlugin = RenderPlugin.new(windowPlugin)
+	self.plugins.render = renderPlugin
+	self.plugins.text = TextPlugin.new(renderPlugin)
 
 	-- The view is called as an app's is -- as a method of what it draws -- rather than as the
 	-- function it was handed, so that a thing wired over a screen is wired over an app the same
 	-- way: see `wonderland.devtools`, which wraps whichever of the two it was built on.
 	local drawn = view
 
+	---@param window wonderland.RenderWindow
+	---@param assets wonderland.Assets
 	self.view = function(_, window, assets)
 		return drawn(window, assets)
 	end
 
-	self.plugins.layout = LayoutPlugin.new(function(window)
+	local layoutPlugin = LayoutPlugin.new(function(window)
 		return self:view(window, self.assets)
-	end, self.plugins.text, self.plugins.render)
-	self.plugins.ui = UIPlugin.new(self.plugins.layout, self.plugins.render)
+	end, self.plugins.text, renderPlugin)
+	self.plugins.layout = layoutPlugin
+	self.plugins.ui = UIPlugin.new(layoutPlugin, renderPlugin)
 
 	-- Named as the shell names them, because what is wired here is the same screen: a panel over a
 	-- screen asks for the layout, or the renderer, by the name an app asks for it by.
 	self.plugins.window.name, self.plugins.render.name = "window", "render"
 	self.plugins.text.name, self.plugins.layout.name, self.plugins.ui.name = "text", "layout", "ui"
 
+	---@cast self wonderland.Headless
+
 	-- The same order the window shell asks the plugins in: an event goes down them, and the
 	-- first message is the one the app hears, so a screen without a window behaves like one
 	-- with. The layout is asked before the ui because it is the layout that knows where the
 	-- pointer is, and a pointer that moved may be what a repaint is for.
-	self.order = {
+	local order = {
 		self.plugins.window,
 		self.plugins.render,
 		self.plugins.text,
 		self.plugins.layout,
 		self.plugins.ui,
 	}
+
+	---@cast order wonderland.Plugin[]
+	self.order = order
 
 	-- The window is only a size and a redraw flag: everything else a window offers is
 	-- about being on screen, which this one is not. The plugins key their contexts on
@@ -194,7 +212,7 @@ end
 --- Hands an event to the screen the way the window loop would, and passes whatever
 --- message comes back to onMessage.
 ---@param event winit.Event
----@return any? message
+---@return unknown? message
 function Headless:event(event)
 	local message
 

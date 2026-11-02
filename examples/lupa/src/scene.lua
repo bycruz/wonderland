@@ -13,6 +13,9 @@ local Draw = require("lupa.draw")
 ---@field surface wonderland.Surface # What the element shows
 ---@field spin number # How fast the scene turns, in turns a second
 ---@field glow number # How strong the warm light beside it is, 0 to 1
+---@field phase number # How far the scene has turned, in radians
+---@field draw lupa.Draw
+---@field light { ambient: number[], lights: { dir?: { x: number, y: number, z: number }, pos?: { x: number, y: number, z: number }, radius?: number, color: number[], shadows?: boolean }[] }
 local Scene = {}
 Scene.__index = Scene
 
@@ -32,10 +35,13 @@ function Scene.new(render, width, height)
 		this:render()
 	end })
 
-	this.draw = Draw.new(nil, {
+	---@type lupa.DrawOptions
+	local options = {
 		device = render:getDevice(),
-		target = this.surface,
-	})
+		target = this.surface --[[@as lupa.Target]],
+	}
+
+	this.draw = Draw.new(nil, options)
 
 	-- safety: the lights are read rather than kept by lupa, so one table is built here and changed
 	-- in place as a slider moves

@@ -67,7 +67,7 @@ end
 local function u32(data, at)
 	local a, b, c, d = data:byte(at, at + 3)
 
-	if d == nil then
+	if a == nil or b == nil or c == nil or d == nil then
 		return 0
 	end
 
@@ -76,7 +76,6 @@ end
 
 --- A code point as the bytes UTF-8 writes it in.
 ---@param code number
----@return string
 local function utf8(code)
 	if code < 0x80 then
 		return string.char(code)
@@ -99,7 +98,6 @@ end
 --- low one -- and a high one with nothing after it is a name that has been cut in half, which is
 --- left as the character it says it is rather than dropped.
 ---@param data string
----@return string
 local function utf16beToUtf8(data)
 	local out, at = {}, 1
 
@@ -244,7 +242,7 @@ function sfnt.names(reader, offset)
 
 	-- Every offset in a font counts from the start of that font, which is the start of the file for
 	-- a file that holds one font and the first byte of the font inside a collection for a `.ttc`.
-	local table = reader(offset + nameAt, nameLength)
+	local table = reader(assert(offset) + nameAt, assert(nameLength))
 
 	if table == nil or #table < 6 then
 		return nil

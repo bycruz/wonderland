@@ -91,7 +91,6 @@ end
 
 ---@param codepoints number[]
 ---@param advance number
----@return wonderland.font.Face
 local function aFaceOf(codepoints, advance)
 	local set = {}
 
@@ -165,7 +164,6 @@ end)
 --- The font this machine draws with, built the way the font manager builds one: the machine's own
 --- sans and the faces the registry asks for after it.
 ---@param pixelHeight number
----@return wonderland.font.Font?
 local function machineFont(pixelHeight)
 	local paths = Registry.new():fallbacks("sans-serif")
 
@@ -215,7 +213,7 @@ local function draws(font, char)
 	return false
 end
 
-local drawsArabic = arabicFont ~= nil and draws(arabicFont, "\u{645}")
+local drawsArabic = arabicFont ~= nil and draws(assert(arabicFont), "\u{645}")
 
 test.it("reads one character of a string, and where the next one starts", function()
 	local codepoint, after = utf8.decode("a", 1)
@@ -300,13 +298,13 @@ end)
 
 test.it("measures a line as one run of glyphs", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41, 0x42, 0x43 }, 8), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 	local run = font:getRun("ABC")
 
 	test.equal(run.count, 3, "one glyph a character")
 	test.equal(run.width, 24, "as wide as the advances put together")
 	test.equal(run.height, 16, "and one line tall")
-	test.equal(run.lines[0].count, 3)
+	test.equal(assert(run.lines)[0].count, 3)
 
 	for index = 0, run.count - 1 do
 		local glyph = assert(run.glyphs)[index]
@@ -322,7 +320,7 @@ test.it("measures a line with the face that draws each of its characters", funct
 	local font = Font.new(primary, {
 		spec = { pixelHeight = 16 },
 		fallbacks = { { "a file that is not read yet", 0 } },
-		load = function()
+		load = function(_, _)
 			loaded = loaded + 1
 
 			return aFaceOf({ 0x2603 }, 5)
@@ -345,7 +343,7 @@ end)
 test.it("draws a character no face has with the face the font is named by", function()
 	local font = Font.new(Atlas.new(aFaceOf({ 0x41 }, 8), 16), {
 		spec = { pixelHeight = 16 },
-		load = function()
+		load = function(_, _)
 			return nil
 		end,
 	})
@@ -358,7 +356,7 @@ end)
 
 test.it("cuts a line to a width, with an ellipsis where it was cut", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41, 0x2026 }, 8), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 
 	local run = font:getRun("AAAA", 24)
 
@@ -369,7 +367,7 @@ end)
 
 test.it("leaves a line that fits as it is", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41, 0x2026 }, 8), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 
 	local run = font:getRun("AAA", 24)
 
@@ -379,7 +377,7 @@ end)
 
 test.it("keeps a line by the width it was cut to as well", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41, 0x2026 }, 8), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 
 	local wide = font:getRun("AAAAAAA", 40)
 	local narrow = font:getRun("AAAAAAA", 24)
@@ -392,14 +390,14 @@ end)
 
 test.it("measures a paragraph as lines of one run", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41 }, 8), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 	local paragraph = font:getRun("AA\nA")
 
 	test.equal(paragraph.lineCount, 2, "a break makes a second line")
 	test.equal(paragraph.count, 3, "and is not a glyph itself")
 	test.equal(paragraph.width, 16, "so it is as wide as its widest line")
-	test.equal(paragraph.lines[0].count, 2)
-	test.equal(paragraph.lines[1].count, 1, "and the second holds what came after the break")
+	test.equal(assert(paragraph.lines)[0].count, 2)
+	test.equal(assert(paragraph.lines)[1].count, 1, "and the second holds what came after the break")
 	test.equal(assert(paragraph.glyphs)[2].y - assert(paragraph.glyphs)[0].y, 16, "a line lower")
 	test.equal(font:getRun("").lineCount, 1, "and a line of nothing is still a line")
 end)
@@ -410,9 +408,9 @@ test.it("draws a line in the order it is shaped in, and keeps the byte of every 
 	aShapedReader(face, mirrored)
 
 	local atlas = Atlas.new(assert(reader.open("a face of this test's own")), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 	local run = font:getRun("abcd")
-	local line = run.lines[0]
+	local line = assert(run.lines)[0]
 
 	test.equal(run.count, 4, "one glyph a character")
 	test.equal(line.rtl, 1, "a line that reads right to left says so")
@@ -462,6 +460,7 @@ test.it("shapes each piece of a line with the face that draws it", function()
 	-- Each piece is one shaper's line, so the second is placed after the first rather than shaped
 	-- together with it.
 	local glyphs = assert(run.glyphs)
+	---@cast glyphs wonderland.font.PlacedGlyph[]
 
 	test.equal(glyphs[0].cluster, 1, "the first piece is drawn the way it reads, in its own face")
 	test.equal(glyphs[1].cluster, 0)
@@ -469,7 +468,7 @@ test.it("shapes each piece of a line with the face that draws it", function()
 	test.equal(glyphs[3].cluster, 2)
 	test.equal(glyphs[2].pen, 16, "placed where the first piece left the pen")
 	test.equal(glyphs[2].advance, 5, "and moved by the advance of the face that draws it")
-	test.equal(run.lines[0].rtl, 1, "a line most of which reads right to left reads right to left")
+	test.equal(assert(run.lines)[0].rtl, 1, "a line most of which reads right to left reads right to left")
 end)
 
 test.it("cuts a line that reads right to left at its end, which is its left", function()
@@ -478,10 +477,12 @@ test.it("cuts a line that reads right to left at its end, which is its left", fu
 	aShapedReader(face, mirrored)
 
 	local atlas = Atlas.new(assert(reader.open("a face of this test's own")), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 	local run = font:getRun("abcd", 24)
-	local line = run.lines[0]
+	local line = assert(run.lines)[0]
+	---@cast line wonderland.font.Line
 	local glyphs = assert(run.glyphs)
+	---@cast glyphs wonderland.font.PlacedGlyph[]
 
 	test.equal(run.count, 3, "the last two characters and an ellipsis")
 	test.equal(run.width, 24, "which is the width it was cut to and no more")
@@ -496,7 +497,7 @@ end)
 
 test.it("keeps a screen's worth of lines and drops the oldest", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41 }, 8), 16)
-	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function() end })
+	local font = Font.new(atlas, { spec = { pixelHeight = 16 }, load = function(_, _) return nil end })
 
 	for index = 1, 300 do
 		font:getRun(string.format("line %d", index))
@@ -589,8 +590,10 @@ end)
 test.skipIf(not drawsArabic)("draws a line of arabic as the letters it is written with", function()
 	local font = assert(arabicFont)
 	local run = font:getRun("\u{645}\u{631}\u{62D}\u{628}\u{627}")
-	local line = run.lines[0]
+	local line = assert(run.lines)[0]
+	---@cast line wonderland.font.Line
 	local glyphs = assert(run.glyphs)
+	---@cast glyphs wonderland.font.PlacedGlyph[]
 
 	test.equal(line.rtl, 1, "a line of arabic reads right to left")
 	test.equal(glyphs[line.first].cluster, 8, "and is drawn from its last letter, which is the leftmost")
@@ -621,9 +624,12 @@ test.skipIf(not drawsArabic)("draws a line of arabic as the letters it is writte
 	-- glyphs a font named: a run keeps ink and not glyph numbers, and two forms of one letter can come
 	-- to the same ink and the same advance. What a run has to get right is the order and the bytes.
 	local pair = font:getRun("\u{645}\u{645}")
-	local pairLine = pair.lines[0]
+	local pairLine = assert(pair.lines)[0]
+	---@cast pairLine wonderland.font.Line
+	local pairGlyphs = assert(pair.glyphs)
+	---@cast pairGlyphs wonderland.font.PlacedGlyph[]
 
 	test.equal(pair.count, 2, "two letters of a word are two glyphs")
-	test.equal(assert(pair.glyphs)[pairLine.first].cluster, 2, "drawn from the second of them first")
-	test.equal(assert(pair.glyphs)[pairLine.first + 1].cluster, 0, "and the first of them last")
+	test.equal(pairGlyphs[pairLine.first].cluster, 2, "drawn from the second of them first")
+	test.equal(pairGlyphs[pairLine.first + 1].cluster, 0, "and the first of them last")
 end)

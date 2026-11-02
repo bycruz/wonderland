@@ -56,9 +56,16 @@ local EMPTY = sty():w("auto"):fg("#5c6473")
 ---@field text string
 ---@field done boolean
 
----@type wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
-local App = wonderland.app("Todos")
+---@class TodoMessage
+---@field type string
+---@field value string
+---@field by number
+---@field to number
+---@field id number
 
+local App = wonderland.app("Todos") --[[@as wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>]]
+
+---@param self wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
 function App:init()
 	self.todos = {
 		{ id = 1, text = "AAAHH تباً لكتباً لكتباً لك ✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅✅", done = false },
@@ -73,7 +80,6 @@ end
 
 --- The height of the pane, and how far the list can scroll inside it.
 ---@param window wonderland.RenderWindow
----@return number, number
 local function extent(self, window)
 	local height = math.max(ROW_STEP, window.height - CHROME)
 	local content = #self.todos * ROW_STEP - (ROW_STEP - 36)
@@ -81,6 +87,7 @@ local function extent(self, window)
 	return height, math.max(0, content - height)
 end
 
+---@param todos Todo[]
 ---@param id number
 ---@return Todo?, number?
 local function find(todos, id)
@@ -91,7 +98,7 @@ local function find(todos, id)
 	end
 end
 
----@return string
+---@param todos Todo[]
 local function leftOver(todos)
 	local count = 0
 
@@ -105,8 +112,10 @@ local function leftOver(todos)
 end
 
 ---@param window wonderland.RenderWindow
+---@param assets wonderland.Assets
 ---@return wonderland.Element
-function App:view(window)
+---@param self wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
+function App:view(window, assets)
 	local height = extent(self, window)
 
 	if self.paneHeight ~= height then
@@ -119,7 +128,10 @@ function App:view(window)
 
 	-- One row per todo. A row is a box with a handler on it, so clicking anywhere on it that is
 	-- not the x ticks it off: the deepest element with a handler is the one that gets it.
-	for _, todo in ipairs(self.todos) do
+	---@type Todo[]
+	local todos = self.todos
+
+	for _, todo in ipairs(todos) do
 		local row = div()
 			:style(ROW)
 			:hover(sty():bright(1.25))
@@ -178,8 +190,9 @@ function App:view(window)
 	)
 end
 
----@param message any
+---@param message TodoMessage
 ---@param window wonderland.RenderWindow
+---@param self wonderland.App<{ todos: Todo[], draft: string, nextId: number, offset: number, paneHeight: number }>
 function App:update(message, window)
 	local kind = type(message) == "table" and message.type
 

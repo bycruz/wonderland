@@ -71,12 +71,18 @@ local style = {}
 -- How a size is read: pixels, a share of what the parent has, or whatever is left over.
 -- A style that names no size is a share of one, which is what makes a box fill what it
 -- was given without saying so.
-style.ABS, style.REL, style.AUTO = 1, 2, 3
+---@type integer
+style.ABS = 1
+---@type integer
+style.REL = 2
+---@type integer
+style.AUTO = 3
 
 -- What a style named, one bit each. A style that is used *instead of* another -- an element's
 -- hover or active style -- only changes the fields it names; everything else is what the style
 -- it stood in for says. Without this a hover style would have to say everything again, size and
 -- padding included, and one that only named a background would take the whole screen.
+---@type table<string, integer>
 local P = {
 	width = 1 << 0,
 	height = 1 << 1,
@@ -250,7 +256,6 @@ local PAINT = 1 << 21
 
 --- One table carries both, and that is what an element holds.
 ---@class wonderland.Style: wonderland.VisualStyle, wonderland.LayoutStyle
-local Style = {}
 
 --- What the calls are made on, and what it fills in. The calls are declared here as
 --- fields because that is the only way a language server sees them: they are not on the
@@ -280,7 +285,7 @@ local Style = {}
 ---@field offset fun(self: wonderland.StyleBuilder, x: number, y: number): wonderland.StyleBuilder
 ---@field bg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
 ---@field fg fun(self: wonderland.StyleBuilder, color: string | wonderland.Color): wonderland.StyleBuilder
----@field font fun(self: wonderland.StyleBuilder, name: string | Font, opts: { weight: number | string, italic: boolean }?): wonderland.StyleBuilder
+---@field font fun(self: wonderland.StyleBuilder, name: string | Font, opts: { weight: number | string?, italic: boolean? }?): wonderland.StyleBuilder
 ---@field weight fun(self: wonderland.StyleBuilder, value: number | string?): wonderland.StyleBuilder
 ---@field italic fun(self: wonderland.StyleBuilder, value: boolean?): wonderland.StyleBuilder
 ---@field text fun(self: wonderland.StyleBuilder, value: string | number): wonderland.StyleBuilder
@@ -296,6 +301,7 @@ methods.__index = methods
 
 -- Asked for a colour by name, these are handed out as they are, so naming one costs
 -- nothing and two styles that name the same one share it.
+---@type table<string, wonderland.Color>
 local NAMED = {
 	white = { r = 1.0, g = 1.0, b = 1.0, a = 1.0 },
 	black = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 },
@@ -310,9 +316,9 @@ local NAMED = {
 
 --- A colour is a name, `#rrggbb`, `#rrggbbaa`, or the four channels themselves.
 ---@param value string | wonderland.Color
----@return wonderland.Color
 local function toColor(value)
 	if type(value) ~= "string" then
+		---@cast value wonderland.Color
 		return value
 	end
 
@@ -357,13 +363,11 @@ end
 -- The clamp is what keeps a colour that is not a fraction of one -- nought to one is what a caller
 -- hands over -- from wrapping round to the far end of the byte it is in.
 ---@param value number
----@return number
 local function toByte(value)
 	return math.min(255, math.max(0, math.floor(value * 255 + 0.5)))
 end
 
 ---@param value number
----@return number
 local function toUnit(value)
 	return math.min(65535, math.max(0, math.floor(value * 65535 + 0.5)))
 end
@@ -407,6 +411,7 @@ end
 
 ---@param value ScaleUnitInput
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:w(value)
 	self.values.width = value
 	self.version = self.version + 1
@@ -415,6 +420,7 @@ end
 
 ---@param value ScaleUnitInput
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:h(value)
 	self.values.height = value
 	self.version = self.version + 1
@@ -424,6 +430,7 @@ end
 --- A share of the space the parent has, rather than pixels.
 ---@param fraction number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:wrel(fraction)
 	self.values.width = { rel = fraction }
 	self.version = self.version + 1
@@ -432,6 +439,7 @@ end
 
 ---@param fraction number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:hrel(fraction)
 	self.values.height = { rel = fraction }
 	self.version = self.version + 1
@@ -441,6 +449,7 @@ end
 ---@param width ScaleUnitInput
 ---@param height ScaleUnitInput
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:size(width, height)
 	self.values.width = width
 	self.values.height = height
@@ -450,6 +459,7 @@ end
 
 --- Take all of the space there is, which is the usual thing for a screen.
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:fill()
 	self.values.width = { rel = 1.0 }
 	self.values.height = { rel = 1.0 }
@@ -459,6 +469,7 @@ end
 
 ---@param value Direction
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:flex(value)
 	self.values.direction = value
 	self.version = self.version + 1
@@ -466,6 +477,7 @@ function methods:flex(value)
 end
 
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:row()
 	self.values.direction = "row"
 	self.version = self.version + 1
@@ -473,6 +485,7 @@ function methods:row()
 end
 
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:column()
 	self.values.direction = "column"
 	self.version = self.version + 1
@@ -481,6 +494,7 @@ end
 
 ---@param value number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:gap(value)
 	self.values.gap = value
 	self.version = self.version + 1
@@ -490,6 +504,7 @@ end
 --- Across the axis the children are laid out on.
 ---@param value Alignment
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:align(value)
 	self.values.align = value
 	self.version = self.version + 1
@@ -499,6 +514,7 @@ end
 --- Along the axis the children are laid out on.
 ---@param value Justify
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:justify(value)
 	self.values.justify = value
 	self.version = self.version + 1
@@ -511,6 +527,7 @@ end
 ---@param third number?
 ---@param fourth number?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:pad(all, second, third, fourth)
 	self.values.padding = toSides(all, second, third, fourth)
 	self.version = self.version + 1
@@ -522,6 +539,7 @@ end
 ---@param third number?
 ---@param fourth number?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:margin(all, second, third, fourth)
 	self.values.margin = toSides(all, second, third, fourth)
 	self.version = self.version + 1
@@ -533,6 +551,7 @@ end
 ---@param width number
 ---@param color string | wonderland.Color
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:border(width, color)
 	local line = { width = width, style = "solid", color = toColor(color) }
 
@@ -543,6 +562,7 @@ end
 
 ---@param value number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:z(value)
 	self.values.zIndex = value
 	self.version = self.version + 1
@@ -551,6 +571,7 @@ end
 
 --- Laid out, but not drawn.
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:hidden()
 	self.values.visibility = "none"
 	self.version = self.version + 1
@@ -562,6 +583,7 @@ end
 ---@param x number
 ---@param y number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:offset(x, y)
 	self.values.position = "relative"
 	self.values.left = x
@@ -572,6 +594,7 @@ end
 
 ---@param color string | wonderland.Color
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:bg(color)
 	self.values.bg = toColor(color)
 	self.version = self.version + 1
@@ -580,6 +603,7 @@ end
 
 ---@param color string | wonderland.Color
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:fg(color)
 	self.values.fg = toColor(color)
 	self.version = self.version + 1
@@ -592,6 +616,7 @@ end
 --- be kept in step with the first.
 ---@param value number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:bright(value)
 	self.values.bright = value
 	self.version = self.version + 1
@@ -604,6 +629,7 @@ end
 --- geometry, so a round box is one quad and its edge is as smooth as the rest of the screen.
 ---@param value number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:radius(value)
 	self.values.radius = value
 	self.version = self.version + 1
@@ -633,6 +659,7 @@ end
 --- large blur leaves of text in a stylesheet too, but it does not run into the letters beside it.
 ---@param value number | string?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:blur(value)
 	self.values.blur = toBlur(value)
 	self.version = self.version + 1
@@ -648,6 +675,7 @@ end
 ---@param blur number
 ---@param color string | wonderland.Color?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:shadow(x, y, blur, color)
 	self.values.shadow = { x = x, y = y, blur = blur, color = toColor(color or "#00000066") }
 	self.version = self.version + 1
@@ -663,6 +691,7 @@ end
 ---@param least number # The least height a thumb of it is, in pixels
 ---@param color string | wonderland.Color
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:bar(width, least, color)
 	self.values.bar = { width = width, least = least, color = toColor(color) }
 	self.version = self.version + 1
@@ -729,8 +758,9 @@ end
 --- also calls of their own -- `:weight` and `:italic` -- for a style that says nothing about a
 --- family: a line made bold in the family it was already in is the common case.
 ---@param name string | Font
----@param opts { weight: number | string, italic: boolean }?
+---@param opts { weight: number | string?, italic: boolean? }?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:font(name, opts)
 	if type(name) == "number" then
 		self.values.font = name
@@ -767,6 +797,7 @@ end
 --- family and the size: naming it makes a line heavier without saying which family it is in.
 ---@param value number | string?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:weight(value)
 	self.values.fontWeight = toWeight(value)
 	self.version = self.version + 1
@@ -779,6 +810,7 @@ end
 --- element inside a slanted one is set upright again.
 ---@param value boolean?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:italic(value)
 	self.values.fontItalic = value ?? true
 	self.version = self.version + 1
@@ -792,6 +824,7 @@ end
 ---   sty():text(22)
 ---@param value string | number
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:text(value)
 	local size = value
 
@@ -811,6 +844,7 @@ end
 --- What it is cut to is the width the box came out, so it is the layout's answer rather than the
 --- style's -- see `wonderland.plugin.Layout`, which measures the line again for a box it fills.
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:ellipsis()
 	self.values.ellipsis = true
 	self.version = self.version + 1
@@ -826,19 +860,23 @@ end
 ---@param texture Texture|wonderland.Surface
 ---@param uv wonderland.UV?
 ---@return wonderland.StyleBuilder
+---@param self wonderland.StyleBuilder
 function methods:image(texture, uv)
+	local imageId = texture --[[@as Texture]]
 	if type(texture) == "table" then
-		texture = assert(texture.slot, ":image takes a picture by id or a surface: a texture of "
+		local surface = texture --[[@as wonderland.Surface]]
+		imageId = assert(surface.slot, ":image takes a picture by id or a surface: a texture of "
 			.. "somebody else's is wrapped before it is shown, with `render:texture`")
 	end
 
-	self.values.bgImage = texture
+	self.values.bgImage = imageId
 	self.values.bgImageUV = uv
 	self.version = self.version + 1
 	return self
 end
 
 -- So that a style can say what it is in a debugger.
+---@param self wonderland.StyleBuilder
 methods.__tostring = function(self)
 	local values = self.values
 
@@ -912,19 +950,17 @@ local scratchBytes = ffi.cast("const uint8_t *", scratch)
 --- Lua string key would be one more thing to throw away every repaint. It is written as
 --- shifts and adds because a 32 bit multiply is not exact in a double.
 ---@param bytes ffi.cdata* # const uint8_t *, one style
----@return number
 local function hashBytes(bytes)
 	local hash = 2166136261
 
 	for index = 0, SIZE - 1 do
-		hash = bit.bxor(hash, bytes[index])
-		hash = bit.tobit(bit.lshift(hash, 5) - hash)
+		hash = tonumber(bit.bxor(hash, tonumber(bytes[index]) or 0)) or hash
+		hash = tonumber(bit.tobit(bit.lshift(tonumber(hash) or 0, 5) - hash)) or hash
 	end
 
-	return hash
+	return tonumber(hash) or 0
 end
 
----@return number
 local function hashScratch()
 	return hashBytes(scratchBytes)
 end
@@ -933,24 +969,25 @@ end
 ---@return number, number
 local function unitOf(value)
 	if value == "auto" then
-		return style.AUTO, 0
+		return assert(style.AUTO), 0
 	end
 
 	if type(value) == "number" then
-		return style.ABS, value
+		return assert(style.ABS), value
 	end
 
 	if type(value) == "table" then
+		---@cast value { abs: number?, rel: number? }
 		if value.abs then
-			return style.ABS, value.abs
+			return assert(style.ABS), value.abs
 		end
 
 		if value.rel then
-			return style.REL, value.rel
+			return assert(style.REL), value.rel
 		end
 	end
 
-	return style.ABS, 0
+	return assert(style.ABS), 0
 end
 
 --- Fills the scratch struct from a style's fields. It is written into rather than read

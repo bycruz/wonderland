@@ -1,5 +1,4 @@
 local bit = require("bit")
-local ffi = require("ffi")
 local Canvas = require("wonderland.canvas")
 local QuadBatch = require("wonderland.util.quad_batch")
 local style = require("wonderland.style")
@@ -33,15 +32,23 @@ local now = time.now
 ---@field window wonderland.RenderWindow? # The one it is for, taken from the first it is asked about
 ---@field due number? # When it is next asked, on the ui's clock
 ---@field cancelled boolean?
----@field cancel fun(self: wonderland.plugin.UI.Ticker) # Done with it, before its next turn
----@field present fun(self: wonderland.plugin.UI.Ticker) # A frame asked for now, for what it just did
----@field private ui wonderland.plugin.UI
+---@field cancel fun() # Done with it, before its next turn
+---@field present fun() # A frame asked for now, for what it just did
+---@field ui wonderland.plugin.UI?
 
 ---@class wonderland.plugin.UI: wonderland.Plugin
 ---@field layoutPlugin wonderland.plugin.Layout
 ---@field renderPlugin wonderland.plugin.Render
 ---@field batch wonderland.QuadBatch
 ---@field tickers wonderland.plugin.UI.Ticker[] # What the app asked to be called back on
+---@field frame (fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow))?
+---@field present fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow)
+---@field requestRedraw fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)
+---@field frame fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow)
+---@field refreshView fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow)
+---@field toggle fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context)
+---@field tick fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, handler: winit.EventManager): any?
+---@field caretFor fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow): any
 ---@field frameInterval number # The least time between frames, in seconds: see `UI:requestRedraw`
 ---@field caretBlink number # How long a caret is drawn for and how long it is not, nought for one that stays
 local UI = {}
@@ -70,6 +77,7 @@ local FRAME_INTERVAL = 1 / 60
 
 ---@param layoutPlugin wonderland.plugin.Layout
 ---@param renderPlugin wonderland.plugin.Render
+---@return wonderland.plugin.UI
 function UI.new(layoutPlugin, renderPlugin)
 	return setmetatable({
 		layoutPlugin = layoutPlugin,
@@ -93,6 +101,7 @@ end
 ---@param fn wonderland.Tick
 ---@param window wonderland.RenderWindow?
 ---@return wonderland.plugin.UI.Ticker
+---@param self wonderland.plugin.UI
 function UI:onTick(fn, window)
 	local ui = self
 	---@type wonderland.plugin.UI.Ticker
@@ -121,6 +130,7 @@ end
 --- draws into, a picture a decoder wrote -- and a frame that came out the same as the last one is
 --- one that is skipped only where nothing outside the screen changed.
 ---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.UI
 function UI:present(window)
 	local ctx = self.layoutPlugin.contexts[window]
 
@@ -128,7 +138,8 @@ function UI:present(window)
 		ctx.mustDraw = true
 	end
 
-	self:requestRedraw(window, true)
+	local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+	requestRedraw(self, window, true)
 end
 
 -- Where a coordinate of a frame is in the frame's own numbers, which is what the gpu is given.
@@ -141,16 +152,8 @@ end
 local frameScaleX, frameScaleY = 1, 1
 
 ---@param pos number
----@return number
-local function toNDCX(pos)
-	return pos * frameScaleX - 1.0
-end
 
 ---@param pos number
----@return number
-local function toNDCY(pos)
-	return 1.0 - pos * frameScaleY
-end
 
 --- Converts a z-index to an NDC z-value
 ---@param z number?
@@ -332,6 +335,12 @@ end
 ---@param windowWidth number
 ---@param windowHeight number
 ---@param blur number? # How far the line is spread, in pixels, which is the blur of the box it is on
+---@param batch wonderland.QuadBatch
+---@param clip wonderland.plugin.UI.Clip
+---@param r number
+---@param g number
+---@param b number
+---@param a number
 local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowWidth, windowHeight, blur)
 	if bw <= 0 or bh <= 0 then
 		return
@@ -443,6 +452,20 @@ end
 
 --- Where the caret is, as the pen it sits at, given the byte of the line it is at.
 ---
+---@param run wonderland.font.Run
+---@param index number
+local function lineAt(run, index)
+	local lines = assert(run.lines)
+	return assert(lines[index])
+end
+
+---@param a number?
+---@param b number
+local function earliest(a, b)
+	if a == nil then return b end
+	return math.min(a, b)
+end
+
 --- A glyph is not a character, so the byte is looked up among the glyphs and what is answered is the
 --- pen that glyph was placed at. A line that reads right to left runs the other way: the caret for a
 --- byte is at the far edge of the glyphs that byte came from.
@@ -454,7 +477,7 @@ end
 local function caretPen(run, line, byte)
 	local lineStep = run.height / run.lineCount
 	local glyphs = run.glyphs
-	local glyphLine = run.lines[line] ---@type wonderland.font.Line
+	local glyphLine = lineAt(run, line)
 
 	if glyphs == nil or glyphLine == nil or glyphLine.count <= 0 then
 		return 0, lineStep
@@ -506,7 +529,6 @@ end
 --- and so where the caret beside them goes and where a click on them lands.
 ---@param node wonderland.Node
 ---@param line wonderland.font.Line?
----@return number # From the left edge of the box
 local function lineOffset(node, line)
 	if line == nil or node.run == 0 then
 		return 0
@@ -562,13 +584,14 @@ end
 ---@param windowWidth number
 ---@param windowHeight number
 local function selectionQuads(batch, clip, caret, element, node, x, y, z, fontManager, windowWidth, windowHeight)
-	local value = strings[caret.value]
+	local stored = strings[caret.value]
 	local from, to = caret.from, caret.to
 
-	if value == nil or from == nil or to == nil or from >= to then
+	if stored == nil or from == nil or to == nil or from >= to then
 		return
 	end
 
+	local value = stored --[[@as string]]
 	local run = fieldRun(element, node, value, fontManager)
 	local lineStep = run.height / run.lineCount
 	local zIndex = convertZ(z)
@@ -582,7 +605,7 @@ local function selectionQuads(batch, clip, caret, element, node, x, y, z, fontMa
 		local whole = from <= lineFrom and to > lineTo
 
 		if first < last or whole then
-			local glyphLine = run.lines[line] ---@type wonderland.font.Line
+			local glyphLine = lineAt(run, line)
 			local offset = lineOffset(node, glyphLine)
 			-- Both pens are taken into locals first: a call in the last argument of `math.min` is a
 			-- call that hands over *all* of what it returns, and `caretPen` answers with the pen and
@@ -645,11 +668,11 @@ end
 ---@param clip wonderland.plugin.UI.Clip
 ---@param fontManager FontManager
 local function placeCaret(caret, element, node, x, y, z, clip, fontManager)
-	local value = strings[caret.value]
+	local value = assert(strings[caret.value]) --[[@as string]]
 	local run = fieldRun(element, node, value, fontManager)
 	local pen, lineStep = caretPen(run, caret.line, caret.column)
 	local height = lineStep - CARET_INSET * 2
-	local line = run.lines[caret.line] ---@type wonderland.font.Line
+	local line = lineAt(run, caret.line)
 
 	-- A line that is given more room than it needs sits where it says in it, which is where it is
 	-- drawn: the caret goes with it, and a line with no room of its own starts at nought.
@@ -718,7 +741,7 @@ local function caretAtPoint(run, node, x, y, pointX, pointY)
 		line = run.lineCount - 1
 	end
 
-	local glyphLine = run.lines[line] ---@type wonderland.font.Line
+	local glyphLine = lineAt(run, line)
 	local glyphs = run.glyphs
 
 	if glyphLine == nil or glyphs == nil or glyphLine.count <= 0 then
@@ -768,8 +791,8 @@ local function addCaretQuad(batch, caret, windowWidth, windowHeight)
 		return
 	end
 
-	clippedQuad(batch, caret.clip, caret.left, caret.top, caret.right, caret.bottom,
-		convertZ(caret.z), QuadBatch.rgba(caret.r, caret.g, caret.b, caret.a), 0, nil, nil)
+	clippedQuad(batch, assert(caret.clip), assert(caret.left), assert(caret.top), assert(caret.right), assert(caret.bottom),
+		convertZ(caret.z), QuadBatch.rgba(assert(caret.r), assert(caret.g), assert(caret.b), assert(caret.a)), 0, nil, nil)
 end
 
 --- Walks the laid out screen, which is an array of nodes: a walk is an index and an
@@ -966,6 +989,7 @@ end
 --- is still to come, and the event after this one asks again.
 ---@param window wonderland.RenderWindow
 ---@param forced boolean? # Whether the frame is the window's own, which is not held back
+---@param self wonderland.plugin.UI
 function UI:requestRedraw(window, forced)
 	local ctx = self.layoutPlugin.contexts[window]
 	local at = now()
@@ -1008,6 +1032,7 @@ end
 --- added, and it is the layout that says where the pointer is.
 ---@param event winit.Event
 ---@param _handler winit.EventManager
+---@param self wonderland.plugin.UI
 function UI:event(event, _handler)
 	local name = event.name
 
@@ -1023,7 +1048,8 @@ function UI:event(event, _handler)
 			end
 		end
 
-		self:requestRedraw(event.window, name == "resize")
+		local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+		requestRedraw(self, event.window, name == "resize")
 	end
 end
 
@@ -1034,7 +1060,6 @@ end
 ---@param ctx wonderland.plugin.Layout.Context
 ---@param window wonderland.RenderWindow
 ---@param layoutPlugin wonderland.plugin.Layout
----@return string?
 local function caretKey(ctx, window, layoutPlugin)
 	local element, line, column, from, to = layoutPlugin:getCaret(window)
 
@@ -1042,7 +1067,7 @@ local function caretKey(ctx, window, layoutPlugin)
 		return nil
 	end
 
-	return table.concat({ tostring(ctx.focusedName), line, column, from or "", to or "" }, ":")
+	return table.concat({ tostring(ctx.focusedName), assert(line), assert(column), from or "", to or "" }, ":")
 end
 
 --- The caret as this frame has it: which field it is for, where in it, and what is selected in it,
@@ -1050,6 +1075,7 @@ end
 --- measuring it is what the caret's own place and the highlight are worked out from.
 ---@param window wonderland.RenderWindow
 ---@return wonderland.plugin.UI.Caret?
+---@param self wonderland.plugin.UI
 function UI:caretFor(window)
 	local element, line, column, from, to = self.layoutPlugin:getCaret(window)
 
@@ -1076,6 +1102,7 @@ end
 --- it holds: where in a field a click is is a question about the text in it, and a field with none
 --- has no answer to it.
 ---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.UI
 function UI:caretClick(window)
 	local ctx = self.layoutPlugin.contexts[window]
 	local click = ctx and ctx.caretClick
@@ -1088,7 +1115,7 @@ function UI:caretClick(window)
 	-- one left behind would be put against a frame built later than the one it landed in.
 	ctx.caretClick = nil
 
-	local element = self.layoutPlugin:getCaret(window)
+	local element = self.layoutPlugin:getCaret(window) --[[@as wonderland.Element]]
 
 	if element == nil then
 		return
@@ -1126,6 +1153,7 @@ end
 --- belongs to is not built again for it: see `UI:frame`.
 ---@param ctx wonderland.plugin.Layout.Context
 ---@return boolean blinked # Whether the caret came or went, which is a frame's worth of change
+---@param self wonderland.plugin.UI
 function UI:blink(ctx)
 	if ctx.focusedName == nil then
 		return false
@@ -1179,6 +1207,7 @@ end
 ---@param window wonderland.RenderWindow
 ---@param handler winit.EventManager
 ---@return any? message # What a key that was due to repeat came to, if one was due
+---@param self wonderland.plugin.UI
 function UI:tick(window, handler)
 	local ctx = self.layoutPlugin.contexts[window]
 
@@ -1199,7 +1228,7 @@ function UI:tick(window, handler)
 		end
 
 		if at >= ctx.repeatAt then
-			message = layout:key(window, ctx.repeatKey, ctx.repeatMods, ctx.repeatTyped or ctx.repeatKey)
+			message = layout:key(window, assert(ctx.repeatKey), ctx.repeatMods, ctx.repeatTyped or assert(ctx.repeatKey))
 			ctx.repeatAt = at + layout.keyRepeatInterval
 
 			-- A frame of its own, for the same reason a blink is one: a repeat held back for coming
@@ -1211,7 +1240,8 @@ function UI:tick(window, handler)
 			-- nothing, and a frame of the whole screen for nothing is the cost of a hold paid at the
 			-- rate of a hold rather than the rate of what it does.
 			if message ~= nil then
-				self:requestRedraw(window, true)
+				local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+				requestRedraw(self, window, true)
 			end
 		end
 
@@ -1229,7 +1259,8 @@ function UI:tick(window, handler)
 			-- What is due is a frame, and it is the caret's own clock that has kept it rather than the
 			-- frame's: the frame's time is what holds a frame back, so it is not asked through it. The
 			-- caret's coming or going is `UI:blink`, which the frame that comes of this runs.
-			self:requestRedraw(window, true)
+			local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+			requestRedraw(self, window, true)
 			blink = at + self.caretBlink
 		end
 
@@ -1252,7 +1283,7 @@ function UI:tick(window, handler)
 		local frames = assets:due()
 
 		if frames ~= nil then
-			due = due ~= nil and math.min(due, frames) or frames
+			due = earliest(due, frames)
 		end
 	end
 
@@ -1293,9 +1324,9 @@ function UI:tick(window, handler)
 					-- the loop rather than the clock, and the loop is given no wait at all: it
 					-- comes round as fast as it can, which is what decoding a burst of frames out
 					-- of a file is.
-					due = due ~= nil and math.min(due, at) or at
+					due = earliest(due, at)
 				else
-					due = due ~= nil and math.min(due, nextAt) or nextAt
+					due = earliest(due, nextAt)
 				end
 			end
 		elseif not ticker.cancelled then
@@ -1318,14 +1349,16 @@ function UI:tick(window, handler)
 		local ready = (ctx.framedAt or 0) + self.frameInterval
 
 		if at >= ready then
-			self:requestRedraw(window, true)
+			local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+			requestRedraw(self, window, true)
 		else
-			due = due ~= nil and math.min(due, ready) or ready
+			due = earliest(due, ready)
 		end
 	end
 
 	if due ~= nil then
-		handler:setTimeout(due - at)
+		local setTimeout = handler.setTimeout --[[@as fun(self: winit.EventManager, seconds: number)]]
+		setTimeout(handler, due - at)
 	end
 
 	return message
@@ -1341,6 +1374,7 @@ end
 ---@param window wonderland.RenderWindow
 ---@param ctx wonderland.plugin.Layout.Context
 ---@param key string? # The caret as this frame draws it, for the next one to tell it changed
+---@param self wonderland.plugin.UI
 function UI:walk(window, ctx, key)
 	local fontManager = assert(self.renderPlugin.sharedResources).fontManager
 	local batch = self.batch
@@ -1382,6 +1416,7 @@ end
 --- measured, solved or walked. It is the whole of what a blink costs.
 ---@param window wonderland.RenderWindow
 ---@param ctx wonderland.plugin.Layout.Context
+---@param self wonderland.plugin.UI
 function UI:toggle(window, ctx)
 	local caret = ctx.caret
 
@@ -1421,6 +1456,7 @@ end
 --- surface the gpu is not ready to draw into yet. And so is one a screen *presented*, because what
 --- it is for is a frame whose new thing is not in the quads at all: see `UI:present`.
 ---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.UI
 function UI:frame(window)
 	local ctx = self.layoutPlugin.contexts[window]
 
@@ -1487,7 +1523,8 @@ function UI:frame(window)
 	-- the solve that came out the same is the same one it is built from.
 	if built or (mustDraw and ctx.uploaded) then
 		built = true
-		self:walk(window, ctx, key)
+		local walk = self.walk --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context, key: string?)]]
+		walk(self, window, ctx, key)
 	end
 
 	-- The caret coming or going is one quad of the frame the gpu already has -- which is a frame
@@ -1513,6 +1550,7 @@ end
 --- frame and not in the solve, so a screen with a canvas or a texture of somebody else's on it is
 --- one whose frame is not the one the last solve drew.
 ---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.UI
 function UI:refreshView(window)
 	-- A click in a field is placed from the frame that was on screen when the pointer went down, so
 	-- it is placed before this repaint builds the next one: see `UI:caretClick`.
@@ -1525,20 +1563,31 @@ function UI:refreshView(window)
 		return
 	end
 
+	---@cast ctx wonderland.plugin.Layout.Context
 	ctx.owed = false
 
 	local key = caretKey(ctx, window, self.layoutPlugin)
 	-- What the frame is asked for by, which is what the gpu does not already have: the screen that
 	-- came out, the first frame of a window, and the caret that moved in a screen that did not.
-	local wanted = assert(ctx.screen).changed or not ctx.uploaded or key ~= ctx.frameKey
+	local changed = assert(ctx.screen).changed
+	local frameKey = ctx.frameKey
+	local sameKey
+	if key == nil then
+		sameKey = frameKey == nil
+	else
+		sameKey = key == frameKey
+	end
+	local wanted = changed or not ctx.uploaded or not sameKey
 
 	-- Built whatever the solve came out to: what an element draws into a frame of its own -- the
 	-- shapes of a canvas, a texture another renderer has just filled -- reads the app's state, and a
 	-- solve that came out the same is not a frame that has nothing new in it.
-	self:walk(window, ctx, key)
+	local walk = self.walk --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context, key: string?)]]
+	walk(self, window, ctx, key)
 
 	if wanted then
-		self:requestRedraw(window)
+		local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+		requestRedraw(self, window)
 	end
 end
 

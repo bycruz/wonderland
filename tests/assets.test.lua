@@ -41,7 +41,6 @@ local canUpload = gpuErr == nil
 
 --- A screen to upload pictures through. What is drawn in it is nothing: these tests are about
 --- what a picture is, and a device is all one needs.
----@return wonderland.Headless
 local function aScreen()
 	return wonderland.headless.new(function() return div() end, { width = 8, height = 8 })
 end
@@ -54,7 +53,6 @@ end
 ---@param channels number
 ---@param color number[]
 ---@param extension string
----@return string path
 local function written(width, height, channels, color, extension)
 	local path = os.tmpname() .. "." .. extension
 	local picture = image.new(width, height, channels)
@@ -70,7 +68,6 @@ end
 ---@param width number
 ---@param height number
 ---@param level number
----@return image.Image
 local function decoded(width, height, level)
 	local pixels = ffi.new("uint8_t[?]", width * height * 4)
 
@@ -79,12 +76,10 @@ local function decoded(width, height, level)
 		pixels[at * 4 + 3] = 255
 	end
 
-	---@type any
-	return { width = width, height = height, channels = 4, pixels = pixels }
+	return { width = width, height = height, channels = 4, pixels = pixels } --[[@as image.Image]]
 end
 
 ---@param screen wonderland.Headless
----@return TextureManager
 local function texturesOf(screen)
 	return assert(screen.plugins.render.sharedResources).textureManager
 end
@@ -93,7 +88,6 @@ end
 --- tenths added to it once: what a delay comes to is compared near enough to read.
 ---@param actual number?
 ---@param expected number
----@return boolean
 local function nearTime(actual, expected)
 	return actual ~= nil and math.abs(actual - expected) < 1e-9
 end
@@ -176,7 +170,7 @@ test.skipIf(not canUpload)("says what it could not read, naming the file", funct
 	file:write("this is not a png, whatever it says")
 	file:close()
 
-	local ok, err = pcall(function() screen.assets:image(path) end)
+	local ok = pcall(function() screen.assets:image(path) end)
 	test.falsy(ok, "a file nothing can decode is refused")
 
 	local missing, missingErr = pcall(function() screen.assets:image(path .. ".gone") end)
@@ -219,7 +213,7 @@ test.skipIf(not canUpload)("reads a gif a frame at a time, and comes back with t
 	test.equal(dance.width, 4, "the size of the file is the size of its frames")
 	test.equal(dance.height, 4)
 	test.equal(dance.index, 1, "it starts on its first frame")
-	test.equal(dance:current().delay, 0.1, "which the file says is a tenth of a second")
+	test.equal(assert(dance:current()).delay, 0.1, "which the file says is a tenth of a second")
 
 	screen:close()
 end)
@@ -255,7 +249,7 @@ test.skipIf(not canUpload)("holds the frames of an animation in the layers they 
 	-- Every frame of the file that the clock has reached is drawn by an id of its own, and the
 	-- ones after the first few name a layer that a frame before them did: what is held is the
 	-- layers, not a layer a frame.
-	test.equal(manager.slots[dance:current().texture].base, 0,
+	test.equal(manager.slots[assert(dance:current()).texture].base, 0,
 		"the frame the file came back with is the first layer")
 
 	local layers = {}
@@ -276,7 +270,7 @@ test.skipIf(not canUpload)("holds the frames of an animation in the layers they 
 	test.equal(layers[4], 1)
 
 	test.equal(manager.textureCount, before + 1, "and the whole animation is one texture of layers")
-	test.equal(manager.textures[manager.slots[dance:current().texture].texture].layers, 4)
+	test.equal(manager.textures[manager.slots[assert(dance:current()).texture].texture].layers, 4)
 
 	screen:close()
 end)
@@ -292,7 +286,7 @@ test.skipIf(not canUpload)("plays a gif by the delays its frames came with", fun
 
 	test.falsy(assets:advance(start), "the first look at a gif starts its clock and nothing else")
 	test.equal(dance.index, 1)
-	test.equal(dance:current().delay, 0.1, "and the frame it is on is the one the file started with")
+	test.equal(assert(dance:current()).delay, 0.1, "and the frame it is on is the one the file started with")
 	test.truthy(nearTime(assets:due(), start + 0.1), "the first frame is due a tenth of a second later")
 
 	test.falsy(assets:advance(start + 0.05), "half a frame in, it is still the first one")
@@ -306,7 +300,7 @@ test.skipIf(not canUpload)("plays a gif by the delays its frames came with", fun
 
 	test.truthy(assets:advance(assert(assets:due())))
 	test.equal(dance.index, 3)
-	test.equal(dance:current().delay, 0.2, "the third frame is shown for two tenths")
+	test.equal(assert(dance:current()).delay, 0.2, "the third frame is shown for two tenths")
 	test.truthy(nearTime(assets:due(), start + 0.4), "which is when the next one is due")
 
 	test.falsy(assets:advance(start + 0.3), "which is not over yet")

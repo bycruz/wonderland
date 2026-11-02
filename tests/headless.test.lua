@@ -2,6 +2,12 @@
 -- offscreen and the pixels it produced are asserted.
 local ffi = require("ffi")
 local test = require("lde-test")
+
+---@class HeadlessMessage
+---@field type string
+---@field value string
+---@field size number
+---@field by number
 local image = require("image")
 local wonderland = require("wonderland")
 local Atlas = require("wonderland.font.atlas")
@@ -88,12 +94,11 @@ local BLUE = { r = 0.0, g = 0.0, b = 1.0, a = 1.0 }
 ---@param width number
 ---@param x number
 ---@param y number
----@return number r, number g, number b, number a
 local function pixelAt(pixels, width, x, y)
 	local first = (y * width + x) * 4 + 1
 	local r, g, b, a = pixels:byte(first, first + 3)
 
-	return r, g, b, a
+	return tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0, tonumber(a) or 0
 end
 
 ---@class InkRun
@@ -104,9 +109,10 @@ end
 ---@param pixels string
 ---@param width number
 ---@param height number
----@return InkRun[] runs
 local function inkRuns(pixels, width, height)
+	---@type InkRun[]
 	local runs = {}
+	---@type InkRun?
 	local current = nil
 
 	for x = 0, width - 1 do
@@ -123,6 +129,7 @@ local function inkRuns(pixels, width, height)
 			if current then
 				current.last = x
 			else
+				---@type InkRun
 				current = { first = x, last = x }
 			end
 		elseif current then
@@ -157,7 +164,7 @@ local function renderText(width, height, value, align)
 	end, { width = width, height = height, fontPath = assert(fontPath) })
 
 	screen:draw()
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	return pixels, width
@@ -169,7 +176,7 @@ test.skipIf(not canRender)("draws the background it was asked for", function()
 	end, { width = 4, height = 4, fontPath = assert(fontPath) })
 
 	screen:draw()
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	local r, g, b, a = pixelAt(pixels, 4, 2, 2)
@@ -250,7 +257,7 @@ test.skipIf(not canRender)("draws a screen bigger than the buffers it started wi
 	local ctx = assert(screen.plugins.render:getContext(screen.window))
 	test.greater(ctx.quads, 4096, "the frame is past what the buffers start with")
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	local runs = inkRuns(pixels, 400, 6200)
@@ -299,7 +306,7 @@ test.skipIf(not canRender)("a repaint that comes out the same is not built again
 	test.greater(quads, 0, "the first frame is always built")
 
 	ui:refreshView(screen.window)
-	test.falsy(ctx.screen.changed, "the second came out the same")
+	test.falsy(assert(ctx.screen).changed, "the second came out the same")
 	test.equal(ui.batch.quads, quads, "so nothing was built")
 
 	screen:close()
@@ -319,13 +326,13 @@ test.skipIf(not canRender)("a line that changed is noticed even at the same widt
 	local ctx = assert(screen.plugins.layout.contexts[screen.window])
 
 	screen:draw()
-	local before = ctx.screen:node(1).width
+	local before = assert(ctx.screen):node(1).width
 
 	value = "21"
 	ui:refreshView(screen.window)
 
-	test.equal(ctx.screen:node(1).width, before, "the two lines are the same width")
-	test.truthy(ctx.screen.changed, "and still a change")
+	test.equal(assert(ctx.screen):node(1).width, before, "the two lines are the same width")
+	test.truthy(assert(ctx.screen).changed, "and still a change")
 
 	screen:close()
 end)
@@ -366,15 +373,13 @@ end)
 
 -- The colour a box is drawn in, at a point in it, so what the pointer does to it can be read.
 ---@param screen wonderland.Headless
----@return number, number, number, number
 local function centrePixel(screen)
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 
 	return pixelAt(pixels, 200, 100, 60)
 end
 
 --- A screen with one button in it, which is what the pointer tests point at.
----@return wonderland.Headless
 local function withButton()
 	return wonderland.headless.new(function()
 		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 } }):children(
@@ -468,7 +473,7 @@ test.skipIf(not canRender)("a box that scrolls draws only what is inside it", fu
 
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	local r, _, b = pixelAt(pixels, 200, 100, 25)
 	test.equal(r, 255, "the row scrolled up shows the part of it that is left")
 	test.equal(b, 0)
@@ -507,12 +512,11 @@ test.skipIf(not canRender)("a box scrolled past its start draws as if it were at
 	end, { width = 200, height = 100, fontPath = assert(fontPath) })
 
 	---@param at number
-	---@return number bar
 	local function barOf(at)
 		offset = at
 		screen:draw()
 
-		return pixelAt(assert(screen:getPixels()), 200, 196, 5)
+		return pixelAt(assert((screen:getPixels())), 200, 196, 5)
 	end
 
 	local above, atStart = barOf(-500), barOf(0)
@@ -532,7 +536,7 @@ test.skipIf(not canRender)("draws a box with round corners", function()
 
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	test.equal(select(1, pixelAt(pixels, 40, 20, 20)), 255, "the middle of the box is the box")
@@ -623,7 +627,7 @@ test.skipIf(not canRender)("draws a line with nothing in it as nothing", functio
 
 	test.truthy(ok, "a screen with nothing in it is a screen that draws" .. (ok and "" or ": " .. tostring(err)))
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	local inked = inkRuns(pixels, 60, 30)
 
 	test.truthy(#inked > 0, "and the line beside the empty ones is still drawn")
@@ -807,11 +811,10 @@ test.skipIf(not canRender)("puts a slider's nub where the value is", function()
 		)
 	end, { width = 100, height = 10, fontPath = assert(fontPath) })
 
-	---@return number # The first column the nub of the frame is drawn at
 	local function nubLeft()
 		screen:draw()
 
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 
 		for x = 0, 99 do
 			if select(1, pixelAt(pixels, 100, x, 5)) == 255 then
@@ -907,7 +910,7 @@ test.skipIf(not canRender)("draws the first frame a loop asks for", function()
 	screen.window.frameAsked = true
 	screen.plugins.ui:frame(screen.window)
 
-	local r, g = pixelAt(assert(screen:getPixels()), 20, 10, 10)
+	local r, g = pixelAt(assert((screen:getPixels())), 20, 10, 10)
 
 	test.equal(r, 255, "the first frame of a window is drawn")
 	test.equal(g, 0)
@@ -937,11 +940,10 @@ test.skipIf(not canRender)("draws a caret where the typing is", function()
 
 	-- The caret is the only ink in the field, so anything of the field's own colour is it.
 	---@param row number
-	---@return number # Where it starts, or nought less where there is none on that row
 	local function caretLeft(row)
 		screen.plugins.ui:frame(screen.window)
 
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 
 		for x = 0, 99 do
 			local r, g, b = pixelAt(pixels, 100, x, row)
@@ -1013,7 +1015,7 @@ test.skipIf(not canRender)("draws a caret beside the text a field draws, whereve
 	local function rows(find)
 		screen.plugins.ui:frame(screen.window)
 
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		local first, last = nil, nil
 
 		for y = 0, 39 do
@@ -1060,16 +1062,21 @@ test.skipIf(not canRender)("asks the loop for the time a blinking caret is due",
 
 	local ui = screen.plugins.ui
 	local ctx = assert(screen.plugins.layout.contexts[screen.window])
-	local asked, seconds = 0, nil
+	local asked = 0
+	---@type number?
+	local seconds = nil
 
 	-- Only the deadline is looked at: what a screen asks a loop for is when to come back, and this
 	-- is a loop that does nothing else.
 	---@diagnostic disable-next-line: missing-fields
 	local handler = {
+		---@param value number
 		setTimeout = function(_, value)
+			---@cast value number
 			asked, seconds = asked + 1, value
 		end,
 	}
+	---@cast handler winit.EventManager
 
 	ui.caretBlink = 0.5
 	screen:click(50, 15)
@@ -1162,6 +1169,8 @@ test.skipIf(not canRender)("a blink is one quad and no screen is built for it", 
 	local refreshes = 0
 	local refresh = layout.refreshView
 
+	---@param plugin wonderland.plugin.Layout
+	---@param window wonderland.RenderWindow
 	layout.refreshView = function(plugin, window)
 		refreshes = refreshes + 1
 
@@ -1233,7 +1242,7 @@ test.skipIf(not canRender)("types into a field that takes more than one line", f
 	--- A key, and the frame the app would draw to take the message it produced.
 	---@param key string
 	---@param ctrl boolean? # Whether the key was held with control
-	local function press(key, ctrl)
+	local function pressCtrl(key, ctrl)
 		screen:event({
 			name = "keyPress",
 			window = screen.window,
@@ -1242,33 +1251,34 @@ test.skipIf(not canRender)("types into a field that takes more than one line", f
 		})
 		screen:draw()
 	end
+	---@cast pressCtrl fun(key: string, ctrl: boolean?)
 
 	screen:draw()
 	screen:click(50, 30)
 
-	press("a")
-	press("b")
-	press("return")
-	press("c")
+	pressCtrl("a")
+	pressCtrl("b")
+	pressCtrl("return")
+	pressCtrl("c")
 
 	test.equal(draft, "ab\nc", "return breaks the line rather than sending what is in it")
 
 	-- Up keeps how far into its line the caret was, counted from the start of it: it was at the
 	-- end of a line of one character, which is one byte in, so it lands one byte into the line
 	-- above, which is after the "a".
-	press("up")
-	press("X")
+	pressCtrl("up")
+	pressCtrl("X")
 	test.equal(draft, "aXb\nc", "and the caret moves between lines")
 
-	press("end")
-	press("Y")
+	pressCtrl("end")
+	pressCtrl("Y")
 	test.equal(draft, "aXbY\nc", "end goes to the end of the line the caret is on")
 
-	press("home")
-	press("Z")
+	pressCtrl("home")
+	pressCtrl("Z")
 	test.equal(draft, "ZaXbY\nc", "and home to its start")
 
-	press("return", true)
+	pressCtrl("return", true)
 	test.equal(sent[#sent].type, "sent", "control with return is what sends it")
 	test.equal(sent[#sent].value, "ZaXbY\nc", "with the whole paragraph")
 
@@ -1297,7 +1307,7 @@ test.skipIf(not canRender)("draws a shadow behind the box", function()
 
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	-- The box is where it was put, and the side the shadow was not moved towards has nothing
@@ -1339,7 +1349,7 @@ test.skipIf(not canRender)("a shadow with no blur has a hard edge", function()
 
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	test.truthy(select(1, pixelAt(pixels, 60, 30, 34)) < 90, "the band under the box is the shadow")
@@ -1366,7 +1376,7 @@ test.skipIf(not canRender)("a rounded box cut by a pane keeps only the corners i
 
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	-- The first box is scrolled 30 up, so its own top is above the pane and the pane cuts it: at
@@ -1415,7 +1425,7 @@ test.skipIf(not canRender)("draws the part of a picture a cut pane shows, not a 
 
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	local r, _, b = pixelAt(pixels, 20, 5, 0)
@@ -1446,6 +1456,8 @@ test.skipIf(not canRender)("a frame that comes out the same is not drawn", funct
 	local drawn = 0
 	local draw = screen.plugins.render.draw
 
+	---@param plugin wonderland.plugin.Render
+	---@param ctx wonderland.plugin.Render.Context
 	screen.plugins.render.draw = function(plugin, ctx)
 		drawn = drawn + 1
 		return draw(plugin, ctx)
@@ -1569,17 +1581,17 @@ test.skipIf(not canRender)("holds a paragraph to the lines it was given", functi
 	local ctx = assert(layout.contexts[screen.window])
 
 	--- The field as the last solve left it, which is what a box that grows is measured by.
-	---@return wonderland.Node
 	local function field()
-		return assert(assert(ctx.screen):child(assert(ctx.root), 1))
+		return assert(assert(ctx.screen):child(assert(ctx.root), 1)) --[[@as wonderland.Node]]
 	end
 
 	--- A key, and the frame the app would draw to take the message it produced.
 	---@param key string
-	local function press(key)
+	local function pressPlain(key)
 		screen:event({ name = "keyPress", window = screen.window, key = key, modifiers = {} })
 		screen:draw()
 	end
+	---@cast pressPlain fun(key: string)
 
 	screen:draw()
 	screen:click(60, 3)
@@ -1588,17 +1600,17 @@ test.skipIf(not canRender)("holds a paragraph to the lines it was given", functi
 
 	test.greater(oneLine, 6, "the box is as tall as what is typed into it rather than as its style says")
 
-	press("return")
-	press("t")
-	press("w")
-	press("o")
+	pressPlain("return")
+	pressPlain("t")
+	pressPlain("w")
+	pressPlain("o")
 
 	test.equal(draft, "one\ntwo", "a break makes a second line")
 	test.equal(field().height, oneLine * 2, "and the box is as tall as the two of them")
 
 	-- Two lines is what it holds, so a break at the end of the last of them is a key that does
 	-- nothing rather than a line that is drawn past the box it was given.
-	press("return")
+	pressPlain("return")
 	test.equal(draft, "one\ntwo", "while a break past the last line it holds is not taken")
 	test.equal(field().height, oneLine * 2, "and the box does not grow for one either")
 
@@ -1636,14 +1648,19 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	local ui = screen.plugins.ui
 	local layout = screen.plugins.layout
 	local ctx = assert(layout.contexts[screen.window])
-	local asked, seconds = 0, nil
+	local asked = 0
+	---@type number?
+	local seconds = nil
 
 	---@diagnostic disable-next-line: missing-fields
 	local handler = {
+		---@param value2 number
 		setTimeout = function(_, value2)
+			---@cast value2 number
 			asked, seconds = asked + 1, value2
 		end,
 	}
+	---@cast handler winit.EventManager
 
 	--- A key, as the keyboard sends one.
 	---@param name string
@@ -1651,7 +1668,7 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	---@param repeated boolean? # Whether the keyboard said this press was one of its own repeats
 	---@param modifiers table? # And what was held with it
 	---@return any?
-	local function key(name, pressed, repeated, modifiers)
+	local function keyRepeat(name, pressed, repeated, modifiers)
 		local message = screen:event({
 			name = name,
 			window = screen.window,
@@ -1666,11 +1683,11 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 
 		return message
 	end
+	---@cast keyRepeat fun(name: string, pressed: string, repeated: boolean?, modifiers: table?): HeadlessMessage?
 
 	--- A tick of the loop, with what is due made due: the clock is the loop's, and what the screen
 	--- does with it is what is being checked -- so the wait is forced rather than sat through.
 	---@param due boolean?
-	---@return any? message
 	local function tick(due)
 		if due then
 			ctx.repeatAt = 0
@@ -1684,6 +1701,7 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 
 		return message
 	end
+	---@cast tick fun(due: boolean?): HeadlessMessage?
 
 	-- The caret is a clock of its own, and this is a test about the other one. Frames are not held
 	-- back either: what is being asked about is what asks for one, not how often one may go out --
@@ -1693,7 +1711,7 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 
 	screen:click(50, 15)
 
-	key("keyPress", "backspace")
+	keyRepeat("keyPress", "backspace")
 	test.equal(value, "ab", "the key itself takes the character before the caret")
 	test.equal(ctx.repeatKey, "backspace", "and a key that does something again and again is held down")
 
@@ -1714,14 +1732,14 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	local due = ctx.repeatAt
 
 	screen.window.shouldRedraw = false
-	key("keyPress", "backspace", true)
+	keyRepeat("keyPress", "backspace", true)
 	test.equal(value, "a", "a press the keyboard says is its own repeat is not taken as a key")
 	test.falsy(screen.window.shouldRedraw, "so it asks for no frame of its own")
 	test.equal(ctx.repeatAt, due, "and the repeat the clock has next is not moved by it")
 
 	-- A release the keyboard says is one of its own repeats is not a key coming up: the key is still
 	-- held, and the hold goes on through it.
-	key("keyRelease", "backspace", true)
+	keyRepeat("keyRelease", "backspace", true)
 	test.equal(ctx.repeatKey, "backspace", "a release the keyboard says is its own repeat does not let go")
 
 	ctx.repeatAt = 0
@@ -1735,7 +1753,7 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	screen.window.shouldRedraw = false
 	ctx.repeatAt = 0
 
-	key("keyRelease", "backspace")
+	keyRepeat("keyRelease", "backspace")
 	test.falsy(ctx.repeatKey, "a key that is let go of is not held down any more")
 	test.falsy(tick(true), "and nothing repeats after it")
 	test.falsy(screen.window.shouldRedraw, "so no frame is asked for either")
@@ -1743,11 +1761,11 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	-- A key pressed again is a key of its own, whatever the clock was doing: it does what it does at
 	-- once rather than waiting out the wait a hold begins with, and the wait starts again from it.
 	-- Typed into an empty field, so that what the press does is plain.
-	key("keyPress", "i")
+	keyRepeat("keyPress", "i")
 	test.equal(value, "i", "a letter typed is a letter in the field")
 
 	screen.window.shouldRedraw = false
-	test.equal(assert(key("keyPress", "backspace")).type, "typed",
+	test.equal(assert(keyRepeat("keyPress", "backspace")).type, "typed",
 		"and a backspace pressed again is a key of its own")
 	test.equal(value, "", "which took the character it was pressed to take")
 	test.truthy(screen.window.shouldRedraw, "and asked for the frame that shows it")
@@ -1755,7 +1773,7 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 
 	-- Holding a key that types types it, by the same clock and at the same rate: a letter held down
 	-- is letters at a fixed rate rather than a burst whenever the keyboard feels like one.
-	key("keyPress", "x")
+	keyRepeat("keyPress", "x")
 	test.equal(ctx.repeatKey, "x", "a letter is held down like anything else")
 	test.equal(value, "x", "which is the letter the press typed")
 
@@ -1764,28 +1782,28 @@ test.skipIf(not canRender)("repeats a held key at a rate of its own", function()
 	test.equal(value, "xx", "one letter a repeat, at the rate it was given")
 
 	ctx.repeatAt = 0
-	key("keyPress", "x", true)
+	keyRepeat("keyPress", "x", true)
 	test.equal(value, "xx", "while the keyboard's own repeat of it types nothing")
 
 	-- A key that happens once is not one of those: return sends what is in the field rather than
 	-- filling it in, and a chord with control is a command.
-	key("keyRelease", "x")
-	key("keyPress", "f5")
-	key("keyPress", "return")
-	key("keyPress", "a", nil, { ctrl = true })
+	keyRepeat("keyRelease", "x")
+	keyRepeat("keyPress", "f5")
+	keyRepeat("keyPress", "return")
+	keyRepeat("keyPress", "a", nil, { ctrl = true })
 	test.falsy(ctx.repeatKey, "and none of those is repeated by the library")
 
 	-- Which selected the whole of what the field held, so a key that walks the caret is what puts it
 	-- back to being one: the tests of a selection are further down.
-	key("keyPress", "right")
+	keyRepeat("keyPress", "right")
 
 	-- With the library's repeat turned off, the keyboard's own is what a held key does: it is the
 	-- presses that do the work, and there is nothing to say any of them is a repeat.
 	layout.keyRepeatInterval = 0
 
-	key("keyPress", "backspace")
+	keyRepeat("keyPress", "backspace")
 	test.equal(value, "x", "which takes a character")
-	key("keyPress", "backspace", true)
+	keyRepeat("keyPress", "backspace", true)
 	test.equal(value, "", "and the keyboard's own repeat of it takes the next")
 
 	screen:close()
@@ -1818,6 +1836,7 @@ test.skipIf(not canRender)("types what a key types, and repeats that while it is
 
 	---@diagnostic disable-next-line: missing-fields
 	local handler = { setTimeout = function() end }
+	---@cast handler winit.EventManager
 
 	--- A key, as the keyboard sends one: what it is, what it types, and what was held with it.
 	---@param name string
@@ -1826,7 +1845,7 @@ test.skipIf(not canRender)("types what a key types, and repeats that while it is
 	---@param modifiers table?
 	---@param repeated boolean?
 	---@return any?
-	local function key(name, pressed, typed, modifiers, repeated)
+	local function keyTyped(name, pressed, typed, modifiers, repeated)
 		local message = screen:event({
 			name = name,
 			window = screen.window,
@@ -1842,8 +1861,8 @@ test.skipIf(not canRender)("types what a key types, and repeats that while it is
 
 		return message
 	end
+	---@cast keyTyped fun(name: string, pressed: string, typed: string?, modifiers: table?, repeated: boolean?): HeadlessMessage?
 
-	---@return any? message
 	local function beat()
 		ctx.repeatAt = 0
 
@@ -1855,19 +1874,20 @@ test.skipIf(not canRender)("types what a key types, and repeats that while it is
 
 		return message
 	end
+	---@cast beat fun(): HeadlessMessage?
 
 	ui.caretBlink = 0
 	screen:click(50, 15)
 
 	-- Shift and 1: the key is 1, and what it types is "!".
-	key("keyPress", "1", "!", { shift = true })
+	keyTyped("keyPress", "1", "!", { shift = true })
 	test.equal(value, "!", "a key types what the keyboard made of it rather than the key itself")
 	test.equal(ctx.repeatKey, "1", "and what is held down is the key, which is what it is named")
 	test.equal(ctx.repeatTyped, "!", "with what it types kept as what it repeats")
 
 	-- The keyboard repeating the key is that key over and over, which is nothing: the clock is what
 	-- is repeating it, and what it repeats is what the press typed.
-	key("keyPress", "1", "!", { shift = true }, true)
+	keyTyped("keyPress", "1", "!", { shift = true }, true)
 	test.equal(value, "!", "a press the keyboard says is its own repeat types nothing")
 
 	test.equal(assert(beat()).type, "typed", "and the clock repeats the key it holds")
@@ -1875,13 +1895,13 @@ test.skipIf(not canRender)("types what a key types, and repeats that while it is
 
 	-- The release is named after the key, and a shift that changed what it types does not change
 	-- that: a hold that could not be matched to its own release would never be let go of.
-	key("keyRelease", "1")
+	keyTyped("keyRelease", "1")
 
 	test.falsy(ctx.repeatKey, "a release of the key let go of lets the hold go")
 	test.falsy(beat(), "and the clock takes nothing after it")
 
 	-- And a 1 of its own, with no shift, types 1.
-	key("keyPress", "1", "1")
+	keyTyped("keyPress", "1", "1")
 	test.equal(value, "!!1", "a key pressed again types what the keyboard makes of it now")
 
 	screen:close()
@@ -1924,7 +1944,6 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	local run = assert(fontManager:getDefault()):getRun(value)
 
 	---@param line number
-	---@param column number
 	---@return number
 	local function pen(line, column)
 		local line_ = run.lines[line]
@@ -1942,7 +1961,6 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 
 	--- A click, and the byte of the value the caret came to be at.
 	---@param x number
-	---@param y number
 	---@return number
 	local function clickAt(x, y)
 		screen:click(x, y)
@@ -1963,7 +1981,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	-- And the caret is drawn where that is: the click above was at a boundary of the first line.
 	clickAt(PAD + pen(0, 2) - 1, 5)
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	local caretX = nil
 
 	for x = 0, 199 do
@@ -1989,10 +2007,11 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	---@param key string
 	---@param modifiers table?
 	---@param typed string?
-	local function press(key, modifiers, typed)
+	local function pressModified(key, modifiers, typed)
 		screen:event({ name = "keyPress", window = screen.window, key = key, text = typed,
 			modifiers = modifiers or {} })
 	end
+	---@cast pressModified fun(key: string, modifiers: table?, typed: string?)
 
 	--- The bytes of the value the field has selected.
 	---@return number? from
@@ -2025,16 +2044,16 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 
 	value = "one two three"
 	screen:draw()
-	press("home")
+	pressModified("home")
 
 	test.equal(layout:getCursorPos(screen.window), 0, "a value untied of its breaks is one line")
 	test.equal(selected(), nil, "with nothing selected")
 
 	-- Shift and an arrow key is a selection: the caret moves and the other end of it stays where it
 	-- was, which is what every editor there is does with it.
-	press("right", { shift = true })
-	press("right", { shift = true })
-	press("right", { shift = true })
+	pressModified("right", { shift = true })
+	pressModified("right", { shift = true })
+	pressModified("right", { shift = true })
 
 	local from, to = selected()
 
@@ -2043,25 +2062,25 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	test.equal(layout:getCursorPos(screen.window), 3, "with the caret at the end of what is selected")
 
 	-- An arrow key on its own is not part of a selection: it puts the caret and lets it go.
-	press("left")
+	pressModified("left")
 
 	test.equal(selected(), nil, "an arrow key on its own is no selection")
 	test.equal(layout:getCursorPos(screen.window), 2, "and the caret is where it walked to")
 
 	-- What is typed lands where the caret is and takes the selection with it.
-	press("right", { shift = true })
-	press("t", {}, "t")
+	pressModified("right", { shift = true })
+	pressModified("t", {}, "t")
 
 	test.equal(value, "ont two three", "a key typed over a selection replaces it")
 	test.equal(selected(), nil, "and there is nothing selected afterwards")
 
 	-- Control and a is the whole of what the field holds.
-	press("a", { ctrl = true })
+	pressModified("a", { ctrl = true })
 
 	test.equal(select(1, selected()), 0, "control and a selects from the start of the value")
 	test.equal(layout:getCursorPos(screen.window), #value, "to the caret at the end of it")
 
-	press("backspace")
+	pressModified("backspace")
 
 	test.equal(value, "", "and a backspace over a selection takes the whole of it")
 
@@ -2069,51 +2088,51 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	-- words grows and shrinks a word at a time.
 	value = "one two three"
 	screen:draw()
-	press("home")
-	press("right", { ctrl = true, shift = true })
+	pressModified("home")
+	pressModified("right", { ctrl = true, shift = true })
 
 	test.equal(select(2, selected()), 3, "control and shift and right selects the word the caret is in")
 
-	press("right", { ctrl = true, shift = true })
+	pressModified("right", { ctrl = true, shift = true })
 
 	test.equal(select(2, selected()), 7, "and the one after it, with the space between them")
 
-	press("left", { ctrl = true, shift = true })
+	pressModified("left", { ctrl = true, shift = true })
 
 	test.equal(select(2, selected()), 3, "and control and shift and left takes that one back off")
 
-	press("right", { ctrl = true })
+	pressModified("right", { ctrl = true })
 
 	test.equal(selected(), nil, "control and right on its own is no selection")
 	test.equal(layout:getCursorPos(screen.window), 7, "and walks the caret to the end of the word it lands in")
 
 	-- Control and w is the word before the caret, which is what it is in every editor there is.
-	press("w", { ctrl = true })
+	pressModified("w", { ctrl = true })
 
 	test.equal(value, "one three", "control and w takes the word before the caret away")
 	test.equal(layout:getCursorPos(screen.window), 3, "and leaves the caret where it was taken from")
 
-	press("a", { ctrl = true })
-	press("w", { ctrl = true })
+	pressModified("a", { ctrl = true })
+	pressModified("w", { ctrl = true })
 
 	test.equal(value, "", "and a selection is what it takes away where there is one")
 
 	-- What is copied is the selection, and what is pasted replaces one.
 	value = "one two three"
 	screen:draw()
-	press("home")
-	press("right", { ctrl = true, shift = true })
-	press("c", { ctrl = true })
+	pressModified("home")
+	pressModified("right", { ctrl = true, shift = true })
+	pressModified("c", { ctrl = true })
 
 	test.equal(screen.clipboard:getText(), "one", "control and c copies what is selected")
 
-	press("a", { ctrl = true })
-	press("v", { ctrl = true })
+	pressModified("a", { ctrl = true })
+	pressModified("v", { ctrl = true })
 
 	test.equal(value, "one", "and a paste lands over the selection rather than beside it")
 
-	press("a", { ctrl = true })
-	press("x", { ctrl = true })
+	pressModified("a", { ctrl = true })
+	pressModified("x", { ctrl = true })
 
 	test.equal(screen.clipboard:getText(), "one", "control and x copies the selection as well as control and c")
 	test.equal(value, "", "and takes the selection out of the field")
@@ -2133,7 +2152,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	---@return number blue
 	---@return number ink
 	local function shades()
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		local blue, ink, count = 0, 0, 0
 
 		for y = 0, 59 do
@@ -2161,17 +2180,17 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	-- Where the highlight starts is where the selection starts and not where the line does: a
 	-- highlight that began a line's height into the text, or at the line's start whatever the
 	-- selection is, is a blue box over characters nobody selected.
-	press("home")
-	press("right")
-	press("right")
-	press("right")
-	press("right", { shift = true })
-	press("right", { shift = true })
-	press("right", { shift = true })
-	press("right", { shift = true })
+	pressModified("home")
+	pressModified("right")
+	pressModified("right")
+	pressModified("right")
+	pressModified("right", { shift = true })
+	pressModified("right", { shift = true })
+	pressModified("right", { shift = true })
+	pressModified("right", { shift = true })
 	screen:draw()
 
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	local starts = nil
 
 	for x = 0, 199 do
@@ -2210,7 +2229,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 		string.format("is highlighted from the byte it starts at and not from the line's start: %s against %d",
 			tostring(starts), PAD + penOf(3)))
 
-	press("right")
+	pressModified("right")
 	screen:draw()
 
 	screen:drag(origin + 1, 10, origin + ahead(5), 10)
@@ -2227,7 +2246,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	-- it takes: what a line takes in advance carries on past its last letter and over the space after
 	-- it, and a highlight drawn to there is a blue box with nothing in it.
 	value = "hello   \nworld"
-	press("right")
+	pressModified("right")
 	screen:draw()
 
 	--- The rightmost column of a band of rows that has a colour on it.
@@ -2235,7 +2254,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	---@param pick fun(r: number, g: number, b: number): boolean
 	---@return number
 	local function rightmost(bottom, pick)
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		local last = -1
 
 		for x = 0, 199 do
@@ -2253,7 +2272,6 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	end
 
 	---@param r number
-	---@param g number
 	---@param b number
 	---@return boolean
 	local function grey(r, _g, b)
@@ -2261,7 +2279,6 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	end
 
 	---@param r number
-	---@param g number
 	---@param b number
 	---@return boolean
 	local function blueish(r, _g, b)
@@ -2272,7 +2289,7 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 
 	test.greater(inked, 20, "the field draws the first line of the value in its own colour")
 
-	press("a", { ctrl = true })
+	pressModified("a", { ctrl = true })
 	screen:draw()
 
 	local highlighted = rightmost(10, blueish)
@@ -2316,7 +2333,7 @@ test.skipIf(not canRender or not drawsArabic)("draws a line of arabic, and count
 	---@return number first
 	---@return number last
 	local function ink(row)
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		local first, last = nil, nil
 
 		for x = 0, 199 do
@@ -2333,11 +2350,10 @@ test.skipIf(not canRender or not drawsArabic)("draws a line of arabic, and count
 
 	-- The only white thing in a field whose text is grey.
 	---@param row number
-	---@return number
 	local function caret(row)
 		ui:frame(screen.window)
 
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 
 		for x = 0, 199 do
 			local r, g, b = pixelAt(pixels, 200, x, row)
@@ -2362,7 +2378,6 @@ test.skipIf(not canRender or not drawsArabic)("draws a line of arabic, and count
 
 	--- A click, and the byte of the value the caret came to be at.
 	---@param x number
-	---@return number
 	local function clickAt(x)
 		screen:click(x, 10)
 
@@ -2381,29 +2396,30 @@ test.skipIf(not canRender or not drawsArabic)("draws a line of arabic, and count
 	--- letter it sits on and types an arabic one.
 	---@param key string
 	---@param typed string?
-	local function press(key, typed)
+	local function pressArabic(key, typed)
 		screen:event({ name = "keyPress", window = screen.window, key = key, text = typed, modifiers = {} })
 	end
+	---@cast pressArabic fun(key: string, typed: string?)
 
 	clickAt(last - 1)
 
-	press("b", "\u{628}")
+	pressArabic("b", "\u{628}")
 
 	test.equal(value, "\u{628}" .. "\u{645}\u{631}\u{62D}\u{628}\u{627}",
 		"what is typed is the whole character, both its bytes")
 	test.equal(layout:getCursorPos(screen.window), 2, "and the caret is past all of it")
 
-	press("backspace")
+	pressArabic("backspace")
 
 	test.equal(value, "\u{645}\u{631}\u{62D}\u{628}\u{627}",
 		"and a backspace takes a character away rather than a byte of one")
 	test.equal(layout:getCursorPos(screen.window), 0, "with the caret where the character was")
 
-	press("right")
+	pressArabic("right")
 	test.equal(layout:getCursorPos(screen.window), 2, "a caret walks a character at a time")
-	press("right")
+	pressArabic("right")
 	test.equal(layout:getCursorPos(screen.window), 4)
-	press("left")
+	pressArabic("left")
 	test.equal(layout:getCursorPos(screen.window), 2)
 
 	screen:close()
@@ -2529,10 +2545,9 @@ test.skipIf(not canRender)("draws the shapes of a canvas, and a texture an app d
 	-- a screen that has only just been made has not drawn one.
 	screen:draw()
 
-	pixels = assert(screen:getPixels())
+	pixels = assert((screen:getPixels()))
 
 	---@param x number
-	---@param y number
 	---@return number r
 	---@return number g
 	---@return number b
@@ -2596,7 +2611,7 @@ test.skipIf(not canRender)("draws the shapes of a canvas, and a texture an app d
 
 	drawn = false
 	screen:draw()
-	pixels = assert(screen:getPixels())
+	pixels = assert((screen:getPixels()))
 
 	local nr, ng, nb = at(8, 40)
 
@@ -2643,7 +2658,7 @@ test.skipIf(not canRender)("draws pictures of any size, each with the picture it
 	end, { width = 660, height = 360, fontPath = assert(fontPath) })
 
 	screen:draw()
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	local ctx = assert(screen.plugins.render:getContext(screen.window))
 	screen:close()
 
@@ -2698,11 +2713,10 @@ test.skipIf(not canRender)("draws a picture larger than one upload is, in bands"
 	end, { width = side, height = side, fontPath = assert(fontPath) })
 
 	screen:draw()
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	---@param row number
-	---@return number
 	local function shadeAt(row)
 		return (pixelAt(pixels, side, 40, row))
 	end
@@ -2729,7 +2743,7 @@ test.skipIf(not canRender)("draws a picture where the box it was given is, the r
 	end, { width = 3, height = 3, fontPath = assert(fontPath) })
 
 	screen:draw()
-	local pixels = assert(screen:getPixels())
+	local pixels = assert((screen:getPixels()))
 	screen:close()
 
 	local r, g, b, a = pixelAt(pixels, 3, 0, 0)
@@ -2792,7 +2806,7 @@ test.skipIf(not canRender)("draws a picture in the colour of the box it is on", 
 		end, { width = 2, height = 2, fontPath = assert(fontPath) })
 
 		screen:draw()
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		screen:close()
 
 		return pixelAt(pixels, 2, at, at)
@@ -2831,7 +2845,7 @@ test.skipIf(not canRender)("spreads a blurred box past its own edge", function()
 		end, { width = 40, height = 16, fontPath = assert(fontPath) })
 
 		screen:draw()
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		screen:close()
 
 		return pixels
@@ -2876,7 +2890,7 @@ test.skipIf(not canRender)("spreads a blurred picture past its box", function()
 		end, { width = 40, height = 16, fontPath = assert(fontPath) })
 
 		screen:draw()
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		screen:close()
 
 		return pixels
@@ -2884,7 +2898,6 @@ test.skipIf(not canRender)("spreads a blurred picture past its box", function()
 
 	---@param pixels string
 	---@param x number
-	---@return number r
 	local function across(pixels, x)
 		-- The top half of the picture, which is the red and green quarters of the file it came from:
 		-- the red channel is what says where the picture is drawn.
@@ -2910,7 +2923,6 @@ test.skipIf(not canRender)("softens the text inside a blurred box", function()
 	local VALUE = "lil"
 
 	---@param blur number?
-	---@return number peak, number columns
 	local function drawn(blur)
 		local style = { width = { abs = 40 }, height = { abs = 16 }, direction = "column",
 			justify = "center", align = "center", fg = WHITE, fontSize = 14, blur = blur }
@@ -2920,7 +2932,7 @@ test.skipIf(not canRender)("softens the text inside a blurred box", function()
 		end, { width = 40, height = 16, fontPath = assert(fontPath) })
 
 		screen:draw()
-		local pixels = assert(screen:getPixels())
+		local pixels = assert((screen:getPixels()))
 		screen:close()
 
 		local peak, columns = 0, 0
@@ -2964,14 +2976,13 @@ test.skipIf(not canRender)("draws the frame of a gif the clock is on", function(
 	end, { width = 4, height = 4, fontPath = assert(fontPath) })
 
 	--- The colour of the pixel the first frame's picture covers.
-	---@return number r, number g, number b, number a
 	local function drawn()
 		screen:draw()
 
-		return pixelAt(assert(screen:getPixels()), 4, 1, 1)
+		return pixelAt(assert((screen:getPixels())), 4, 1, 1)
 	end
 
-	local r, g, b = drawn()
+	local r, g = drawn()
 	test.equal(r, 255, "the first frame of the gif is red")
 	test.equal(g, 0)
 
@@ -3015,17 +3026,23 @@ test.skipIf(not canRender)("asks the loop for the time the next frame of a gif i
 
 	screen:draw()
 
+	---@type number?
 	local waited = nil
 	local handler = {
 		setMode = function() end,
-		setTimeout = function(_, seconds) waited = seconds end,
+		---@param seconds number
+		setTimeout = function(_, seconds)
+			---@cast seconds number
+			waited = seconds
+		end,
 		close = function() end,
 		exit = function() end,
 	}
+	---@cast handler winit.EventManager
 
 	-- What the ui reads is the wall clock, and a gif that started before the beginning of it is one
 	-- whose next frame is due now: the frame it is on was started a very long time ago.
-	---@cast dance wonderland.Gif
+	---@cast dance wonderland.Stream
 	dance.at = 0
 
 	local was = dance.index
@@ -3045,7 +3062,7 @@ test.skipIf(not canRender)("asks the loop for the time the next frame of a gif i
 	ctx.owed = false
 	waited = nil
 
-	---@cast dance wonderland.Gif
+	---@cast dance wonderland.Stream
 	dance.at = wonderland.time.now()
 
 	screen.plugins.ui:tick(screen.window, handler)

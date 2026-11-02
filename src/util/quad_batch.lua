@@ -106,32 +106,41 @@ local QUAD_INDICES = ffi.new("uint16_t[6]", 0, 1, 2, 0, 2, 3)
 --- float is normalized, so that a whole number of bytes arrives in the shader as the fraction of
 --- one it is -- a colour of 255 as 1.0, a colour of 0 as 0.0 -- which is what keeps the shaders the
 --- same as they were before any of it was packed.
+---@type wonderland.QuadBatch.Attribute[]
 local CORNER_ATTRIBUTES = {
-	{ type = "f32", size = 2, name = "x" },       -- where this corner of the unit square is
-	{ type = "f32", size = 2, name = "scaleX" },  -- and how many pixels a coordinate of it is worth
+	{ type = "f32", size = 2, offset = 0, name = "x" },       -- where this corner of the unit square is
+	{ type = "f32", size = 2, offset = 0, name = "scaleX" },  -- and how many pixels a coordinate of it is worth
 }
 
+---@class wonderland.QuadBatch.Attribute
+---@field type string
+---@field size number
+---@field name string?
+---@field normalized boolean?
+---@field offset number
+
+---@type wonderland.QuadBatch.Attribute[]
 local INSTANCE_ATTRIBUTES = {
-	{ type = "f32", size = 4, name = "c0x" },     -- the quad's four corners, top left round
-	{ type = "f32", size = 4, name = "c2x" },
-	{ type = "f32", size = 4, name = "centreX" }, -- the middle of the box, and the arcs inside it
-	{ type = "u16", size = 4, name = "u0", normalized = true },
-	{ type = "f16", size = 3, name = "radius" },
-	{ type = "u8", size = 4, name = "rgba", normalized = true },
-	{ type = "f32", size = 1, name = "texture" },
-	{ type = "f32", size = 1, name = "z" },
-	{ type = "u8", size = 1, name = "own", normalized = true },
+	{ type = "f32", size = 4, offset = 0, name = "c0x" },     -- the quad's four corners, top left round
+	{ type = "f32", size = 4, offset = 0, name = "c2x" },
+	{ type = "f32", size = 4, offset = 0, name = "centreX" }, -- the middle of the box, and the arcs inside it
+	{ type = "u16", size = 4, offset = 0, name = "u0", normalized = true },
+	{ type = "f16", size = 3, offset = 0, name = "radius" },
+	{ type = "u8", size = 4, offset = 0, name = "rgba", normalized = true },
+	{ type = "f32", size = 1, offset = 0, name = "texture" },
+	{ type = "f32", size = 1, offset = 0, name = "z" },
+	{ type = "u8", size = 1, offset = 0, name = "own", normalized = true },
 }
 
 -- Where each of them is, as the descriptor wants it: worked out from the structs at load, so that
 -- a field added to one is a field the other knows about.
 for _, attribute in ipairs(CORNER_ATTRIBUTES) do
-	attribute.offset = ffi.offsetof("wl_corner", attribute.name)
+	attribute.offset = ffi.offsetof("wl_corner", assert(attribute.name))
 	attribute.name = nil
 end
 
 for _, attribute in ipairs(INSTANCE_ATTRIBUTES) do
-	attribute.offset = ffi.offsetof("wl_instance", attribute.name)
+	attribute.offset = ffi.offsetof("wl_instance", assert(attribute.name))
 	attribute.name = nil
 end
 
@@ -193,6 +202,7 @@ local DEFAULT_CAPACITY = 1024
 ---@field runCount number # How many runs this frame has
 ---@field quads number # How many are in it
 ---@field capacity number # How many fit before it grows
+---@field texture number? # The texture a run is drawn from
 ---@field scaleX number # How many pixels one of a quad's x coordinates is worth
 ---@field scaleY number # and one of its y coordinates, which is what keeps a corner round
 local QuadBatch = {}
@@ -325,7 +335,6 @@ end
 -- that is not one -- nought to one is what a style hands over -- from wrapping round to the far end
 -- of the byte it is in.
 ---@param value number
----@return number
 local function toByte(value)
 	return math.min(255, math.max(0, math.floor(value * 255 + 0.5)))
 end
@@ -337,7 +346,6 @@ local sameBits = ffi.new("union { float f; uint32_t u; }")
 ---@cast sameBits wonderland.ffi.sameBits
 
 ---@param value number
----@return number
 local function toHalf(value)
 	if not (value > 0) then
 		return 0
@@ -365,7 +373,6 @@ end
 
 -- A fraction of a picture as the whole number of 65535ths a vertex keeps it in.
 ---@param value number
----@return number
 local function toUnit(value)
 	return math.min(65535, math.max(0, math.floor(value * 65535 + 0.5)))
 end
@@ -714,6 +721,7 @@ function QuadBatch:instanceBytes()
 end
 
 batch.RUN_NUMBERS = RUN_NUMBERS
-batch.RUN_TEXTURE, batch.RUN_FIRST = RUN_TEXTURE, RUN_FIRST
+batch.RUN_TEXTURE = RUN_TEXTURE
+batch.RUN_FIRST = RUN_FIRST
 
 return batch

@@ -37,9 +37,9 @@ local DEFAULT_WEIGHT = 400
 -- What fonts a machine has is a question about the machine, not about an app: what one scan finds
 -- is kept here and shared by every manager in the process, so that two windows -- or a test that
 -- makes a screen an assertion -- do not read the same thousand font files over again.
+---@type Registry?
 local shared = nil
 
----@return Registry
 local function registryOf()
 	if shared == nil then
 		shared = Registry.new()
@@ -75,8 +75,8 @@ end
 ---@field fonts wonderland.font.Font[] # By the number an element holds, from one
 ---@field defaultFont wonderland.font.Font?
 ---@field defaultSpec wonderland.FontSpec? # What it was resolved from, for a style to change one part of
----@field private byKey table<string, wonderland.font.Font> # A spec, resolved once
----@field private faces table<string, wonderland.font.Face | false> # Files read, by where they are
+---@field byKey table<string, wonderland.font.Font> # A spec, resolved once
+---@field faces table<string, wonderland.font.Face | false> # Files read, by where they are
 local FontManager = {}
 FontManager.__index = FontManager
 
@@ -112,7 +112,6 @@ function FontManager.new(textureManager, registry)
 end
 
 ---@param spec wonderland.FontSpec
----@return string
 local function keyOf(spec)
 	return string.format("%s\0%g\0%d\0%d\0%s", spec.family or "", spec.pixelHeight or DEFAULT_PIXEL_HEIGHT,
 		spec.weight or DEFAULT_WEIGHT, spec.italic and 1 or 0, spec.characters or "")
@@ -189,7 +188,10 @@ function FontManager:resolve(spec)
 	local fallbacks = {}
 	local seen = { [path] = true }
 
-	for _, fallback in ipairs(self.registry:fallbacks(spec.family or "sans-serif")) do
+	---@type string[]
+	local fallbackPaths = self.registry:fallbacks(spec.family or "sans-serif")
+
+	for _, fallback in ipairs(fallbackPaths) do
 		if not seen[fallback] then
 			seen[fallback] = true
 			fallbacks[#fallbacks + 1] = { fallback, 0 }
@@ -202,13 +204,15 @@ function FontManager:resolve(spec)
 	})
 
 	local manager = self
-	local font = Font.new(primary, {
+	---@type { spec: wonderland.FontSpec?, load: fun(path: string, index: number?): wonderland.font.Face?, fallbacks: (string|number)[][]? }
+	local fontOpts = {
 		spec = spec,
 		fallbacks = fallbacks,
 		load = function(fallbackPath, fallbackIndex)
-			return manager:face(fallbackPath, fallbackIndex)
+			return manager:face(assert(fallbackPath), fallbackIndex)
 		end,
-	})
+	}
+	local font = Font.new(primary, fontOpts)
 
 	font.id = #self.fonts + 1
 	self.fonts[font.id] = font
@@ -262,7 +266,7 @@ end
 ---@param spec wonderland.FontSpec | wonderland.font.Font
 function FontManager:setDefault(spec)
 	if spec.id ~= nil and spec.atlases ~= nil then
-		local font = spec
+		local font = spec --[[@as wonderland.font.Font]]
 		self.defaultFont, self.defaultSpec = font, font.spec
 
 		return

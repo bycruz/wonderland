@@ -13,7 +13,6 @@
 local build = require("lde-build")
 
 local isWindows = jit.os == "Windows"
-local isMsvc = build.target:find("msvc") ~= nil
 local sep = string.sub(package.config, 1, 1)
 
 -- hood's OpenGL backend compiles GLSL itself, so it takes the source text, while
@@ -24,7 +23,6 @@ local isVulkan = os.getenv("OPENGL") == nil
 --- Whether a tool is on PATH. lde runs a build's shell commands with cmd.exe on windows
 --- and sh everywhere else, which is what the two spellings of "is it there" are for.
 ---@param tool string
----@return boolean
 local function has(tool)
 	local command = isWindows and ("where " .. tool) or ("command -v " .. tool)
 	local quiet = isWindows and " >NUL 2>NUL" or " >/dev/null 2>&1"
@@ -80,7 +78,6 @@ local escapes = {
 --- Escapes quotes, backslashes and control characters so that both GLSL source and
 --- binary SPIR-V survive as a Lua string literal.
 ---@param data string
----@return string
 local function toLuaLiteral(data)
 	return (data:gsub("[%z\1-\31\\\"]", function(char)
 		return escapes[char:byte()] or string.format("\\%03d", char:byte())
@@ -117,7 +114,10 @@ embedShader("main.frag", "frag")
 
 -- Anything under assets becomes a module of the same name, for fonts and icons a
 -- caller wants embedded.
-for _, file in ipairs(build:scan("assets")) do
+---@type string[]
+local assetFiles = build:scan("assets")
+
+for _, file in ipairs(assetFiles) do
 	local content = build:read(file)
 	build:write((file:gsub("%.[^%.]+$", "")) .. ".lua", 'return "' .. toLuaLiteral(content) .. '"')
 end

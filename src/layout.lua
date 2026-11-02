@@ -174,7 +174,6 @@ local RECORD_SIZE = assert(ffi.sizeof("wl_record"))
 --- that lands between pixels is uneven. Sizes are left alone: they are shares of the
 --- space, and rounding them would take the rounding error out of the layout.
 ---@param value number
----@return number
 local function snap(value)
 	return math.floor(value + 0.5)
 end
@@ -279,11 +278,11 @@ local layout = {}
 ---@field capacity number
 ---@field runs wonderland.font.Run[] # And the measured line each text node draws
 ---@field changed boolean # Whether this frame is different from the one the gpu has
----@field private lastRecords ffi.cdata* # What the frame the gpu was last given was built from
----@field private lastCount number
----@field private lastChildren number
----@field private lastWidth number # And the window it was solved in, which every box follows
----@field private lastHeight number
+---@field lastRecords ffi.cdata* # What the frame the gpu was last given was built from
+---@field lastCount number
+---@field lastChildren number
+---@field lastWidth number # And the window it was solved in, which every box follows
+---@field lastHeight number
 ---@field root number # 1 based index of the root
 local Screen = {}
 Screen.__index = Screen
@@ -502,9 +501,9 @@ function Screen:add(element, bright, blur)
 	local flags = element.flags
 	local over = 0
 
-	if bit.band(flags, PRESSED) ~= 0 and element.activeStyle ~= 0 then
+	if bit.band(flags, assert(PRESSED)) ~= 0 and element.activeStyle ~= 0 then
 		over = element.activeStyle
-	elseif bit.band(flags, HOVERED) ~= 0 and element.hoverStyle ~= 0 then
+	elseif bit.band(flags, assert(HOVERED)) ~= 0 and element.hoverStyle ~= 0 then
 		over = element.hoverStyle
 	end
 
@@ -592,13 +591,14 @@ function Screen:add(element, bright, blur)
 	-- multiplying two blurs together, so it is taken whole rather than carried like a brightness.
 	local spread = nil
 
-	if worn and bit.band(worn.flags, PRESENT.blur) ~= 0 then
+	if worn and bit.band(worn.flags, assert(PRESENT.blur)) ~= 0 then
 		spread = worn.blur
-	elseif bit.band(given.flags, PRESENT.blur) ~= 0 then
+	elseif bit.band(given.flags, assert(PRESENT.blur)) ~= 0 then
 		spread = given.blur
 	end
 
-	node.blur = spread ?? (blur or 0)
+	local chosenBlur = spread or blur
+	node.blur = chosenBlur or 0
 
 	-- Brightness is not a field of the frame's own: it is applied to the colours the node ends up
 	-- with, whichever style said it, over and above what the elements above it said -- a brightness
@@ -633,11 +633,11 @@ local function sizeToRun(screen, node, index, run)
 	screen.records[index - 1].runId = run.id
 
 	if bit.band(node.styleFlags, WIDTH) == 0 then
-		node.widthUnit, node.wantWidth = ABS, run.width
+		node.widthUnit, node.wantWidth = assert(ABS), assert(run.width)
 	end
 
 	if bit.band(node.styleFlags, HEIGHT) == 0 then
-		node.heightUnit, node.wantHeight = ABS, run.height
+		node.heightUnit, node.wantHeight = assert(ABS), assert(run.height)
 	end
 end
 
@@ -748,7 +748,7 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 		if overrideIsRow then
 			node.widthUnit, node.wantWidth = ABS, mainOverride
 		else
-			node.heightUnit, node.wantHeight = ABS, mainOverride
+			node.heightUnit, node.wantHeight = assert(ABS), assert(mainOverride)
 		end
 
 	end
@@ -1002,7 +1002,6 @@ end
 ---@param parentX number
 ---@param parentY number
 ---@param pressed boolean
----@return boolean marked
 local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	local node = screen.nodes[index - 1]
 	local absX, absY = parentX + node.x, parentY + node.y

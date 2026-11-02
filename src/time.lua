@@ -62,7 +62,6 @@ local CLOCK_IDS = {
 local time = {}
 
 ---@param id number
----@return fun(): number?
 local function clockGettime(id)
 	local stamp = ffi.new("struct wl_timespec")
 	---@cast stamp wonderland.time.Timespec
@@ -82,7 +81,6 @@ local function clockGettime(id)
 	end
 end
 
----@return fun(): number?
 local function performanceCounter()
 	local kernel32 = ffi.load("kernel32")
 	local count, frequency = ffi.new("long long[1]"), ffi.new("long long[1]")
@@ -100,7 +98,7 @@ local function performanceCounter()
 	end
 end
 
----@return fun(): number?
+---@return (fun(): number)?
 local function wallClock()
 	if ffi.os == "Windows" then
 		local kernel32 = ffi.load("kernel32")

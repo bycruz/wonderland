@@ -76,12 +76,21 @@ end
 
 local canRender = fontPath ~= nil and gpuErr == nil
 
+---@class InteractionMessage
+---@field type string
+---@field by number
+---@field to number
+---@field x number
+---@field y number
+---@field paths string[]
+---@field value string
+---@field shift boolean
+
 local WIDTH, HEIGHT = 200, 140
 
 --- A screen of the view, drawn once so that a press has boxes to land on.
 ---@param view fun(): wonderland.Element
----@param onMessage fun(message: any)?
----@return wonderland.Headless
+---@param onMessage fun(message: InteractionMessage)?
 local function aScreen(view, onMessage)
 	local screen = wonderland.headless.new(view, {
 		width = WIDTH,
@@ -98,36 +107,10 @@ end
 --- An event into the screen, with the window it happened in filled in: what a loop hands over.
 ---@param screen wonderland.Headless
 ---@param event winit.Event
----@return any? message
 local function send(screen, event)
 	event.window = screen.window
 
-	return screen:event(event)
-end
-
---- The rows of a band that have ink on them.
----@param pixels string
----@param top number
----@param bottom number
----@return number first
----@return number last
-local function inkRows(pixels, top, bottom)
-	local first, last = nil, nil
-
-	for y = top, bottom do
-		for x = 0, WIDTH - 1 do
-			local at = (y * WIDTH + x) * 4 + 1
-			local r, g, b = pixels:byte(at, at + 2)
-
-			if (r or 0) + (g or 0) + (b or 0) > 30 then
-				first = first or y
-				last = y
-				break
-			end
-		end
-	end
-
-	return first or 0, last or 0
+	return screen:event(event) --[[@as InteractionMessage?]]
 end
 
 --- The runs of columns with ink on them in a band of rows, which is one run per thing drawn a few
@@ -136,9 +119,11 @@ end
 ---@param pixels string
 ---@param top number
 ---@param bottom number
----@return { first: number, last: number }[]
 local function inkRuns(pixels, top, bottom)
-	local runs, current = {}, nil
+	---@type { first: number, last: number }[]
+	local runs = {}
+	---@type { first: number, last: number }?
+	local current = nil
 	local blank = 0
 
 	for x = 0, WIDTH - 1 do
@@ -159,7 +144,7 @@ local function inkRuns(pixels, top, bottom)
 				current.last = x
 			else
 				current = { first = x, last = x }
-				runs[#runs + 1] = current
+				runs[#runs + 1] = assert(current)
 			end
 
 			blank = 0
@@ -173,7 +158,6 @@ end
 
 --- The name an element was given, which is how the layout knows which field has the keyboard.
 ---@param screen wonderland.Headless
----@return string? name
 local function focusedName(screen)
 	local element = screen.plugins.layout:getCaret(screen.window)
 
@@ -194,7 +178,6 @@ end
 -- A pane of twenty rows of twenty pixels in a box a hundred tall: three hundred pixels of content
 -- past what the box shows, which is what its bar is drawn from.
 ---@param onScroll fun(by: number?, to: number?): any
----@return wonderland.Element
 local function aPane(onScroll)
 	local rows = {}
 
@@ -279,6 +262,7 @@ test.skipIf(not canRender)("drags the bar of a box that scrolls, and only its ba
 end)
 
 test.skipIf(not canRender)("gives a press of the right button to the context menu alone", function()
+	---@type InteractionMessage[]
 	local seen = {}
 	local held = nil
 
@@ -290,6 +274,7 @@ test.skipIf(not canRender)("gives a press of the right button to the context men
 					return { type = "menu", x = x, y = y }
 				end),
 			div():style(sty():w(100):h(60)):onMouseDown(function(_, _, _, _, modifiers)
+				---@cast modifiers winit.KeyModifiers
 				held = modifiers
 
 				return { type = "pressed" }
@@ -327,7 +312,6 @@ end)
 
 --- A field that reports what is typed into it.
 ---@param name string
----@return wonderland.Element
 local function aField(name)
 	return div():style(sty():w(100):h(20)):input({
 		name = name,
@@ -339,6 +323,7 @@ local function aField(name)
 end
 
 test.skipIf(not canRender)("moves the keyboard with tab, and works what it lands on", function()
+	---@type InteractionMessage[]
 	local seen = {}
 
 	local screen = aScreen(function()
@@ -355,9 +340,12 @@ test.skipIf(not canRender)("moves the keyboard with tab, and works what it lands
 
 	---@return number
 	local function presses()
+		---@type InteractionMessage[]
+		local messages = seen
 		local count = 0
 
-		for _, message in ipairs(seen) do
+		for index = 1, #messages do
+			local message = messages[index]
 			if message.type == "pressed" then
 				count = count + 1
 			end
@@ -583,6 +571,7 @@ test.skipIf(not canRender)("lays a cut line out as wide as it was cut to", funct
 end)
 
 test.skipIf(not canRender)("pastes into the field that has the keyboard, and copies and cuts what it holds", function()
+	---@type InteractionMessage[]
 	local seen = {}
 
 	local screen = aScreen(function()

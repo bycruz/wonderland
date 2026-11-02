@@ -35,7 +35,6 @@ ffi.cdef [[
 -- A fraction of a picture as the whole number of 65535ths a quad keeps it in, which is what
 -- narrowing a glyph's own fractions on every frame that draws it cost.
 ---@param value number
----@return number
 local function toUnit(value)
 	return math.min(65535, math.max(0, math.floor(value * 65535 + 0.5)))
 end
@@ -58,9 +57,9 @@ end
 ---@class wonderland.font.Run
 ---@field width number # How far the pen moves over the widest of its lines
 ---@field height number
----@field lines ffi.cdata*? # `wl_line`, one per line, from the top
+---@field lines wonderland.font.Line[]? # `wl_line`, one per line, from the top
 ---@field lineCount number # How many, since the array is not a Lua one
----@field glyphs ffi.cdata*? # `wl_glyph`, one per glyph in the order they are drawn, nothing for an empty line
+---@field glyphs wonderland.font.PlacedGlyph[]? # `wl_glyph`, one per glyph in the order they are drawn, nothing for an empty line
 ---@field count number # How many, since the array is not a Lua one
 ---@field id number # Stable for the life of the run: what a frame compares to tell whether a line changed
 
@@ -103,7 +102,6 @@ local ELLIPSIS = 0x2026
 --- Whether a measurement is of a string drawn as it is or of one cut to a width.
 ---@param text string
 ---@param maxWidth number?
----@return string
 local function keyOf(text, maxWidth)
 	if maxWidth == nil then
 		return text
@@ -124,12 +122,12 @@ end
 ---@field lineHeight number
 ---@field runs table<string, wonderland.font.Run>
 ---@field runCount number
----@field private load fun(path: string, index: number?): wonderland.font.Face?
----@field private pending { string, number? }[] # The fallbacks not read yet, in order
----@field private recent table<number, string> # The last lines measured, oldest first
----@field private recentAt number
----@field private pieces wonderland.font.Piece[] # Where a line is cut into what one face draws of it
----@field private piecesAt number # How many of them the line being measured came to
+---@field load fun(path: string, index: number?): wonderland.font.Face?
+---@field pending { string, number? }[] # The fallbacks not read yet, in order
+---@field recent table<number, string> # The last lines measured, oldest first
+---@field recentAt number
+---@field pieces wonderland.font.Piece[] # Where a line is cut into what one face draws of it
+---@field piecesAt number # How many of them the line being measured came to
 local Font = {}
 Font.__index = Font
 
@@ -143,7 +141,7 @@ Font.__index = Font
 ---@field shaped wonderland.font.Shaped?
 
 ---@param primary wonderland.font.Atlas
----@param opts { spec: wonderland.FontSpec?, load: fun(path: string, index: number?): wonderland.font.Face?, fallbacks: { string, number? }[]? }
+---@param opts { spec: wonderland.FontSpec?, load: fun(path: string, index: number?): wonderland.font.Face?, fallbacks: (string|number)[][]? }
 ---@return wonderland.font.Font
 function Font.new(primary, opts)
 	---@type wonderland.font.Font
@@ -248,7 +246,6 @@ end
 ---@param from number
 ---@param to number
 ---@param line number
----@return number glyphs # How many the pieces of the line came to between them
 local function shapeLine(self, text, from, to, line)
 	local pieces, at, count, glyphs = self.pieces, from, self.piecesAt, 0
 
@@ -530,6 +527,9 @@ function Font:getRun(text, maxWidth)
 	end
 
 	nextRunId = nextRunId + 1
+
+	---@cast lines wonderland.font.Line[]
+	---@cast array wonderland.font.PlacedGlyph[]?
 
 	---@type wonderland.font.Run
 	local run = {

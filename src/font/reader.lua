@@ -7,7 +7,6 @@ local texter = require("texter")
 
 --- Whether some bytes look like a font, by their signature: a ttf, an otf, a collection or a dfont.
 ---@param content string
----@return boolean
 local function looksLikeAFont(content)
 	local magic = content:sub(1, 4)
 
@@ -31,6 +30,10 @@ end
 ---@field index number?
 ---@field family string?
 ---@field style string?
+---@field weight number?
+---@field italic boolean?
+---@field subfamily string?
+---@field metrics fun(self: wonderland.font.Face, pixelHeight: number): number, number
 
 --- The ink of one glyph, in the reader's own buffer, valid until the next glyph is asked for.
 ---@class wonderland.font.Ink

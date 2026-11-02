@@ -84,13 +84,18 @@ local FULL = { u0 = 0, v0 = 0, u1 = 1, v1 = 1 }
 ---@field delay number # How long a frame is shown for where it does not say for itself
 ---@field single boolean # Whether there turned out to be one frame, which never moves on
 ---@field shown wonderland.Frame? # The one being drawn, which is what `current` answers with
----@field private source wonderland.FrameSource? # Where the frames come from, for one read as it plays
----@field private textureManager TextureManager
----@field private texture number # The texture of layers the frames are written into
----@field private layers number
----@field private slots wonderland.Frame[] # What a frame is drawn by, made as they come
----@field private count number # How many frames have been shown since the source last started over
----@field private ringed boolean # Whether the frames come from the app rather than from a source
+---@field source wonderland.FrameSource? # Where the frames come from, for one read as it plays
+---@field textureManager TextureManager
+---@field texture number # The texture of layers the frames are written into
+---@field layers number
+---@field slots wonderland.Frame[] # What a frame is drawn by, made as they come
+---@field count number # How many frames have been shown since the source last started over
+---@field ringed boolean # Whether the frames come from the app rather than from a source
+---@field current fun(self: wonderland.Stream): wonderland.Frame?
+---@field advance fun(self: wonderland.Stream, now: number): boolean
+---@field read fun(self: wonderland.Stream): wonderland.Frame?
+---@field frame fun(self: wonderland.Stream, frame: image.Image, delay: number?): wonderland.Frame
+---@field due fun(self: wonderland.Stream): number?
 local Stream = {}
 Stream.__index = Stream
 
@@ -218,9 +223,10 @@ function Stream:read()
 			return nil
 		end
 
-		assert(self.source).rewind(self.source)
+		local source = assert(self.source)
+		assert(source.rewind)(source)
 		self.count = 0
-		frame = self.source:next()
+		frame = source:next()
 
 		if frame == nil then
 			return nil
@@ -282,6 +288,11 @@ end
 ---@field images table<string, wonderland.Asset> # What each path came to
 ---@field streams table<string, wonderland.Stream> # And what each animated file came to
 ---@field playing wonderland.Stream[] # The ones being played, which the clock is asked about
+---@field stream fun(self: wonderland.Assets, opts: { width: number?, height: number?, layers: number?, delay: number?, source: wonderland.FrameSource? }): wonderland.Stream
+---@field image fun(self: wonderland.Assets, path: string): wonderland.Asset?
+---@field gif fun(self: wonderland.Assets, path: string): wonderland.Stream
+---@field advance fun(self: wonderland.Assets, now: number): boolean
+---@field due fun(self: wonderland.Assets): number?
 local Assets = {}
 Assets.__index = Assets
 

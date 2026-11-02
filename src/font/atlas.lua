@@ -47,9 +47,9 @@ local PADDING = 1
 ---@field height number
 ---@field dirty boolean # Whether a glyph has been packed since it was last written
 ---@field colour boolean # Whether what it holds is a picture's own colours rather than coverage
----@field private nextX number
----@field private nextY number
----@field private rowHeight number
+---@field nextX number
+---@field nextY number
+---@field rowHeight number
 
 --- One face at one pixel height, and the glyphs of it that have been drawn.
 ---@class wonderland.font.Atlas
@@ -77,6 +77,7 @@ Atlas.ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^
 ---@return wonderland.font.Atlas
 function Atlas.new(face, pixelHeight, opts)
 	local ascent, descent = face:metrics(pixelHeight)
+	assert(ascent and descent)
 	local pictures = opts and opts.pictures
 
 	---@type wonderland.font.Atlas

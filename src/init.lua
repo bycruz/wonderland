@@ -37,7 +37,7 @@ local Assets = require("wonderland.util.assets")
 ---@field Element wonderland.Element
 ---@field Assets wonderland.Assets # The class pictures are loaded through, for one wired by hand
 ---@field headless wonderland.headless
----@field devtools wonderland.devtools # A panel of what a screen is doing, for an app being written
+---@field devtools wonderland.Devtools # A panel of what a screen is doing, for an app being written
 ---@field time wonderland.time.Time # Seconds on a clock that only goes forwards
 ---@field app fun(title: string?): wonderland.App
 ---@field run fun(app: wonderland.App)

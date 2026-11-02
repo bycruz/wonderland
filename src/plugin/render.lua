@@ -9,7 +9,6 @@ local QuadBatch = require("wonderland.util.quad_batch")
 local FontManager = require("wonderland.util.font_manager")
 local backend = require("wonderland.backend")
 
-local isVulkan = backend.isVulkan
 local shaderType = backend.shaderType
 local shaderExt = backend.shaderExt
 
@@ -67,6 +66,12 @@ local shaderExt = backend.shaderExt
 ---@field sharedResources wonderland.plugin.Render.SharedResources?
 ---@field device hood.Device? # Made when a window is first registered: see `RenderPlugin:getDevice`
 ---@field presentMode string # How frames reach the display
+---@field draw fun(self: wonderland.plugin.Render, context: wonderland.plugin.Render.Context)
+---@field getContext fun(self: wonderland.plugin.Render, window: wonderland.RenderWindow): wonderland.plugin.Render.Context
+---@field getDevice fun(self: wonderland.plugin.Render): hood.Device
+---@field size fun(self: wonderland.plugin.Render, window: wonderland.RenderWindow): number, number
+---@field getPixels fun(self: wonderland.plugin.Render, context: wonderland.plugin.Render.Context): string?, string?
+---@field target fun(self: wonderland.plugin.Render, width: number, height: number, opts: { format: string?, draw: fun(encoder: hood.CommandEncoder, view: hood.TextureView, width: number, height: number)? }?): wonderland.Surface
 local RenderPlugin = {}
 
 -- How many frames in a row may be asked for while there is still nothing to draw into.
@@ -78,6 +83,7 @@ RenderPlugin.__index = RenderPlugin
 
 ---@param windowPlugin wonderland.plugin.Window
 ---@param opts wonderland.plugin.Render.Options?
+---@return wonderland.plugin.Render
 function RenderPlugin.new(windowPlugin, opts)
 	return setmetatable({
 		contexts = {},
@@ -138,7 +144,8 @@ function RenderPlugin:setRenderData(window, batch)
 	self:getDevice().queue:writeBuffer(ctx.quadInstance, instanceSize, batch.instances)
 	self:getDevice().queue:writeBuffer(ctx.quadCorner, cornerSize, batch.corners)
 
-	ffi.copy(ctx.quadRuns, batch.runs, batch.runCount * QuadBatch.RUN_NUMBERS * ffi.sizeof("uint32_t"))
+	local quadRuns = ctx.quadRuns --[[@as ffi.cdata*]]
+	ffi.copy(quadRuns, batch.runs, batch.runCount * QuadBatch.RUN_NUMBERS * ffi.sizeof("uint32_t"))
 
 	ctx.runCount = batch.runCount
 	ctx.quads = batch.quads
@@ -171,9 +178,9 @@ function RenderPlugin:register(window)
 	local windowCtx = self.windowPlugin:getContext(window)
 	assert(windowCtx, "Window context not found for render plugin")
 
-	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode })
+	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }) --[[@as hood.Swapchain?]]
 
-	return self:createContext(window, swapchain)
+	return (self.createContext --[[@as fun(self: wonderland.plugin.Render, window: wonderland.RenderWindow, swapchain: hood.Swapchain?): wonderland.plugin.Render.Context]])(self, window, swapchain)
 end
 
 --- A picture of somebody else's, shown by a screen: a texture another renderer drew -- one built
@@ -268,7 +275,7 @@ end
 ---@param window wonderland.RenderWindow
 ---@return wonderland.plugin.Render.Context
 function RenderPlugin:registerHeadless(window)
-	return self:createContext(window, nil)
+	return (self.createContext --[[@as fun(self: wonderland.plugin.Render, window: wonderland.RenderWindow, swapchain: hood.Swapchain?): wonderland.plugin.Render.Context]])(self, window, nil)
 end
 
 ---@param window wonderland.RenderWindow
@@ -282,8 +289,8 @@ function RenderPlugin:createContext(window, swapchain)
 	-- how a colour of 255 reaches the shader as the 1.0 it was. The stride is the struct itself,
 	-- since the fields are where it puts them and it is padded to a whole number of four byte steps:
 	-- a stride that is not is one the gpu refuses.
-	local cornerDescriptor = VertexLayout.new({ stride = ffi.sizeof("wl_corner") })
-	local instanceDescriptor = VertexLayout.new({ stride = QuadBatch.INSTANCE_SIZE }):withInstanceRate()
+	local cornerDescriptor = VertexLayout.new({ stride = ffi.sizeof("wl_corner"), stepMode = "vertex" })
+	local instanceDescriptor = VertexLayout.new({ stride = QuadBatch.INSTANCE_SIZE, stepMode = "instance" })
 
 	for _, attribute in ipairs(QuadBatch.CORNER_ATTRIBUTES) do
 		cornerDescriptor:withAttribute(attribute)
@@ -345,11 +352,10 @@ function RenderPlugin:createContext(window, swapchain)
 	-- context has no swapchain: it draws into an rgba8unorm texture.
 	local targetFormat = "rgba8unorm"
 	if swapchain then
-		---@diagnostic disable-next-line: undefined-field
-		targetFormat = swapchain.format
+		targetFormat = (swapchain --[[@as { format: string }]]).format
 	end
 
-	local quadPipeline = self:getDevice():createPipeline({
+	local quadPipeline = self:getDevice():createPipeline(({
 		layout = quadLayout,
 		vertex = {
 			module = { type = shaderType, source = require("wonderland.shaders.main.vert." .. shaderExt) },
@@ -370,7 +376,7 @@ function RenderPlugin:createContext(window, swapchain)
 			depthCompare = "less-equal",
 			format = "depth24plus"
 		}
-	})
+	}) --[[@as hood.PipelineDescriptor]])
 
 	-- The depth attachment is the size of what is drawn into, which is the swapchain and not always
 	-- the size the window says it is: an attachment of another size is a pass that cannot be made.
@@ -385,9 +391,8 @@ function RenderPlugin:createContext(window, swapchain)
 		extents = { dim = "2d", width = depthWidth, height = depthHeight, count = 1 },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
-	})
+	}) --[[@as hood.PipelineDescriptor]]
 
-	---@type wonderland.plugin.Render.Context
 	local ctx = {
 		window = window,
 		swapchain = swapchain,
@@ -402,8 +407,10 @@ function RenderPlugin:createContext(window, swapchain)
 		runCount = 0,
 		quads = 0,
 		depthBuffer = depthBuffer,
-		depthBufferView = depthBuffer:createView({})
-	}
+		depthBufferView = depthBuffer:createView({}),
+		targetWidth = window.width,
+		targetHeight = window.height,
+	} --[[@as wonderland.plugin.Render.Context]]
 
 	if not swapchain then
 		ctx.capture = self:ensureCapture(ctx)
@@ -415,6 +422,8 @@ function RenderPlugin:createContext(window, swapchain)
 end
 
 --- SAFETY: Returns non-nil as we will assume user registers all windows properly :)
+---@param window wonderland.RenderWindow
+---@return wonderland.plugin.Render.Context
 function RenderPlugin:getContext(window)
 	return self.contexts[window]
 end
@@ -655,6 +664,7 @@ end
 function RenderPlugin:resize(ctx)
 	local windowCtx = assert(self.windowPlugin:getContext(ctx.window))
 	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }, ctx.swapchain)
+	---@cast swapchain hood.Swapchain?
 
 	if not swapchain then
 		return false

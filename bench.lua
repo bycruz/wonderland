@@ -53,7 +53,6 @@ local buttonStyle = sty():row():justify("center"):align("center"):size(200, 44):
 local rootStyle = sty():fill():column():bg("#12141c")
 
 ---@param rows number
----@return fun(): wonderland.Element
 local function list(rows)
 	return function()
 		local children = {}
@@ -66,7 +65,6 @@ local function list(rows)
 end
 
 --- The shape of the example: a header, a card with a button on it, and a footer.
----@return fun(): wonderland.Element
 local function example()
 	return function()
 		return div():style(rootStyle):children(
