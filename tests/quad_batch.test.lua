@@ -32,13 +32,15 @@ test.it("a quad is one instance, and one a whole number of four byte steps", fun
 	local names = {}
 
 	for _, attribute in ipairs(batch.INSTANCE_ATTRIBUTES) do
-		test.equal(attribute.offset % (attribute.type == "f32" and 4 or 2), 0,
+		local alignment = attribute.type == "f32" and 4
+			or (attribute.type == "u16" or attribute.type == "f16" or attribute.type == "i16") and 2 or 1
+		test.equal(attribute.offset % alignment, 0,
 			"a field is where the hardware can read it: " .. attribute.type)
 		test.falsy(names[attribute.offset], "and no two fields are in the same place")
 		names[attribute.offset] = true
 	end
 
-	test.equal(#batch.INSTANCE_ATTRIBUTES, 9, "and it holds what the shader reads it as")
+	test.equal(#batch.INSTANCE_ATTRIBUTES, 10, "and it holds what the shader reads it as")
 	test.equal(#batch.CORNER_ATTRIBUTES, 2, "with what a corner of the unit square is read as")
 	test.equal(batch.QUAD_INDICES[0], 0, "and the indices every quad is drawn with")
 	test.equal(batch.QUAD_INDICES[2], 2)

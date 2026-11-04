@@ -372,6 +372,30 @@ test.skipIf(not canRender)("hands a click to the screen and gives back its messa
 	test.equal(message and message.type, "clicked")
 end)
 
+test.skipIf(not canRender)("a click goes to the box on top", function()
+	local message = nil
+	local screen = wonderland.headless.new(function()
+		return div():style(sty():fill():column()):children({
+			div():style(sty():size(200, 200):bg("#111111")):onClick({ type = "under" }),
+			div():style(sty():size(200, 200):z(5):offset(0, 0)):onClick({ type = "over" }),
+		})
+	end, {
+		width = 300,
+		height = 300,
+		fontPath = assert(fontPath),
+		onMessage = function(received)
+			message = received
+		end,
+	})
+
+	screen:draw()
+	screen:click(100, 100)
+	screen:close()
+
+	test.truthy(message, "the click produced a message")
+	test.equal(message and message.type, "over", "the later, higher box is what the click reached")
+end)
+
 -- The colour a box is drawn in, at a point in it, so what the pointer does to it can be read.
 ---@param screen wonderland.Headless
 local function centrePixel(screen)

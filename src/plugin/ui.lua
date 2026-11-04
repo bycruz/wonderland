@@ -80,13 +80,13 @@ local FRAME_INTERVAL = 1 / 60
 ---@return wonderland.plugin.UI
 function UI.new(layoutPlugin, renderPlugin)
 	return setmetatable({
-		layoutPlugin = layoutPlugin,
-		renderPlugin = renderPlugin,
-		batch = QuadBatch.new(),
-		canvas = Canvas.new(),
-		tickers = {},
-		frameInterval = FRAME_INTERVAL,
-		caretBlink = CARET_BLINK,
+	layoutPlugin = layoutPlugin,
+	renderPlugin = renderPlugin,
+	batch = QuadBatch.new(),
+	canvas = Canvas.new(),
+	tickers = {},
+	frameInterval = FRAME_INTERVAL,
+	caretBlink = CARET_BLINK,
 	}, UI)
 end
 
@@ -105,7 +105,7 @@ end
 function UI:onTick(fn, window)
 	local ui = self
 	---@type wonderland.plugin.UI.Ticker
-	local ticker = { fn = fn, window = window, ui = ui }
+	local ticker = { fn = fn, window = window, ui = ui}
 
 	ticker.cancel = function()
 		ticker.cancelled = true
@@ -211,6 +211,44 @@ local PAST_THE_LINE = 1 << 24
 ---@field top number
 ---@field right number
 ---@field bottom number
+---@field radius number?
+---@field boxLeft number?
+---@field boxTop number?
+---@field boxRight number?
+---@field boxBottom number?
+
+--- Whether a rectangle is wholly inside a rounded clip. The clip's rectangle cuts first; its
+--- rounded box cuts the corners, and a child that reaches into one has to use the parent's shape
+--- rather than its own.
+---@param clip wonderland.plugin.UI.Clip
+---@param left number
+---@param top number
+---@param right number
+---@param bottom number
+---@return boolean
+local function insideRoundedClip(clip, left, top, right, bottom)
+	local radius = clip.radius
+	if radius == nil or radius <= 0 then return true end
+
+	local boxLeft = clip.boxLeft or clip.left
+	local boxTop = clip.boxTop or clip.top
+	local boxRight = clip.boxRight or clip.right
+	local boxBottom = clip.boxBottom or clip.bottom
+	local innerLeft, innerTop = boxLeft + radius, boxTop + radius
+	local innerRight, innerBottom = boxRight - radius, boxBottom - radius
+	local limit = radius * radius + 0.001
+
+	local function inside(x, y)
+		if x < boxLeft or x > boxRight or y < boxTop or y > boxBottom then return false end
+		local nearestX = x < innerLeft and innerLeft or (x > innerRight and innerRight or x)
+		local nearestY = y < innerTop and innerTop or (y > innerBottom and innerBottom or y)
+		local dx, dy = x - nearestX, y - nearestY
+
+		return dx * dx + dy * dy <= limit
+	end
+
+	return inside(left, top) and inside(right, top) and inside(left, bottom) and inside(right, bottom)
+end
 
 ---@param batch wonderland.QuadBatch
 ---@param clip wonderland.plugin.UI.Clip
@@ -229,7 +267,7 @@ local PAST_THE_LINE = 1 << 24
 ---@param own number? # Whether the picture is drawn as it is rather than through the colour
 ---@param blur number? # How far what the box draws is spread, in pixels, nothing for not at all
 local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, texture, uv0, uv1, radius, band,
-	grow, own, blur)
+	grow, own, blur, border)
 	if blur ~= nil and blur > 0 then
 		-- What a blur spreads has to be drawn somewhere, so the quad is grown by the room the taps
 		-- read in: twice the blur, which is as far as the furthest of them reaches.
@@ -253,7 +291,11 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 	-- The quad the box asked for, when all of it shows. Most quads are inside the clip -- only the
 	-- ones at the edge of a pane that scrolls are not -- and working out where a quad is cut costs
 	-- a pair of divisions, so the ones that need nothing are the ones that get nothing.
-	if drawnLeft >= clip.left and drawnTop >= clip.top and drawnRight <= clip.right and drawnBottom <= clip.bottom then
+	local rounded = clip.radius ~= nil and clip.radius > 0
+	local cutRound = rounded and not insideRoundedClip(clip, drawnLeft, drawnTop, drawnRight, drawnBottom)
+
+	if not cutRound and drawnLeft >= clip.left and drawnTop >= clip.top and drawnRight <= clip.right
+	and drawnBottom <= clip.bottom then
 		-- Cut and square are a call each rather than one argument to the same call: they are not
 		-- drawn in the same numbers, and a screen of text is nearly all of one of them.
 		--
@@ -268,14 +310,14 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 		local ndcLeft, ndcTop = left * scaleX - 1.0, 1.0 - top * scaleY
 		local ndcRight, ndcBottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
 
-		if band or (radius and radius > 0) then
+		if band or (radius and radius > 0) or (border and border > 0) then
 			if grow then
 				batch:roundQuad(drawnLeft * scaleX - 1.0, 1.0 - drawnTop * scaleY, drawnRight * scaleX - 1.0,
-					1.0 - drawnBottom * scaleY, z, colour, texture, uv0, uv1, radius or 0, band, own, blur,
-					ndcLeft, ndcTop, ndcRight, ndcBottom)
+				1.0 - drawnBottom * scaleY, z, colour, texture, uv0, uv1, radius or 0, band, own, blur,
+				ndcLeft, ndcTop, ndcRight, ndcBottom, border)
 			else
 				batch:roundQuad(ndcLeft, ndcTop, ndcRight, ndcBottom, z, colour, texture, uv0, uv1,
-					radius or 0, band, own, blur)
+				radius or 0, band, own, blur, nil, nil, nil, nil, border)
 			end
 		else
 			batch:quad(ndcLeft, ndcTop, ndcRight, ndcBottom, z, colour, texture, uv0, uv1, own)
@@ -309,18 +351,26 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 	local ndcRight, ndcBottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
 	local shownLeft, shownTop = atLeft * scaleX - 1.0, 1.0 - atTop * scaleY
 	local shownRight, shownBottom = atRight * scaleX - 1.0, 1.0 - atBottom * scaleY
+	local cutRadius, cutBand = radius or 0, band
 
-	if band or (radius and radius > 0) then
+	if cutRound then
+		cutRadius, cutBand = clip.radius or 0, 1
+		ndcLeft = (clip.boxLeft or clip.left) * scaleX - 1.0
+		ndcTop = 1.0 - (clip.boxTop or clip.top) * scaleY
+		ndcRight = (clip.boxRight or clip.right) * scaleX - 1.0
+		ndcBottom = 1.0 - (clip.boxBottom or clip.bottom) * scaleY
+	end
+
+	if cutBand or cutRadius > 0 then
 		batch:roundQuad(shownLeft, shownTop, shownRight, shownBottom, z, colour, texture, uv0, uv1,
-			radius or 0, band, own, blur, ndcLeft, ndcTop, ndcRight, ndcBottom)
+		cutRadius, cutBand, own, blur, ndcLeft, ndcTop, ndcRight, ndcBottom, border)
 
 		return
 	end
 
 	batch:roundQuad(shownLeft, shownTop, shownRight, shownBottom, z, colour, texture, uv0, uv1, 0, 0, own, blur,
-		ndcLeft, ndcTop, ndcRight, ndcBottom)
+	ndcLeft, ndcTop, ndcRight, ndcBottom)
 end
-
 
 ---@param batch wonderland.QuadBatch
 ---@param bx number
@@ -347,7 +397,7 @@ local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowW
 	end
 
 	clippedQuad(batch, clip, bx, by, bx + bw, by + bh, convertZ(z + 1), QuadBatch.colour(r, g, b, a), 0, nil, nil,
-		nil, nil, nil, nil, blur)
+	nil, nil, nil, nil, blur)
 end
 
 --- A line is drawn from the run it measured into, which is where its glyphs are. A run of
@@ -381,7 +431,7 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 	-- the font itself answers with is where a glyph with no picture of its own is drawn from, which
 	-- is a glyph of a font that was measured with no gpu under it.
 	local font = node.font ~= 0 and fontManager:get(node.font - 1)
-		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
+	or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
 
 	-- Where a glyph with no picture of its own is drawn from, which is the same answer for every
 	-- glyph of the line: asked once, since asking it per glyph is a walk of the font's faces per
@@ -403,51 +453,51 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 	-- One array of glyphs and one of lines, read by index: the run was measured as structs, so
 	-- drawing a line costs a handful of loads rather than a table lookup per glyph.
 	for lineIndex = 0, run.lineCount - 1 do
-		local line = run.lines[lineIndex]
+			local line = run.lines[lineIndex]
 
-		-- A line may be given more room than it needs, and then it says where in that room it sits.
-		local offset = 0
-		if node.justify == 1 then
-			offset = math.floor((node.width - line.width) / 2 + 0.5)
-		elseif node.justify == 2 then
-			offset = node.width - line.width
-		end
+			-- A line may be given more room than it needs, and then it says where in that room it sits.
+			local offset = 0
+			if node.justify == 1 then
+				offset = math.floor((node.width - line.width) / 2 + 0.5)
+			elseif node.justify == 2 then
+				offset = node.width - line.width
+			end
 
-		local originX = x + offset
+			local originX = x + offset
 
-		for at = 0, line.count - 1 do
-			local glyph = glyphs[line.first + at]
-			local picture = glyph.texture ~= 0 and glyph.texture or fallback
-			local colour = ink
+			for at = 0, line.count - 1 do
+					local glyph = glyphs[line.first + at]
+					local picture = glyph.texture ~= 0 and glyph.texture or fallback
+					local colour = ink
 
-			-- A glyph the selection covers is drawn in the colour that reads on the highlight rather
-			-- than in the colour of the text: what a glyph came from is the byte it kept, so which
-			-- side of the selection it is on is a comparison of bytes.
+					-- A glyph the selection covers is drawn in the colour that reads on the highlight rather
+					-- than in the colour of the text: what a glyph came from is the byte it kept, so which
+					-- side of the selection it is on is a comparison of bytes.
+					if selecting then
+						local byte = lineBase + glyph.cluster
+
+						if byte >= from and byte < to then
+							colour = marked
+						end
+					end
+
+					-- A glyph that is a picture of its own -- an emoji -- is drawn as the picture rather
+					-- than through the text's colour: what the colour is of it is how opaque the element is.
+					-- A line inside a blurred element is drawn with every glyph of it spread by the same
+					-- blur, which is what makes the text of one soft rather than its box alone.
+					clippedQuad(batch, clip, originX + glyph.x, y + glyph.y, originX + glyph.x + glyph.width,
+					y + glyph.y + glyph.height, zIndex, colour, picture, glyph.uv0, glyph.uv1, nil, nil, nil,
+					glyph.own, node.blur)
+				end
+
 			if selecting then
-				local byte = lineBase + glyph.cluster
+				local break_ = value:find("\n", lineBase + 1, true)
 
-				if byte >= from and byte < to then
-					colour = marked
+				if break_ ~= nil then
+					lineBase = break_
 				end
 			end
-
-			-- A glyph that is a picture of its own -- an emoji -- is drawn as the picture rather
-			-- than through the text's colour: what the colour is of it is how opaque the element is.
-			-- A line inside a blurred element is drawn with every glyph of it spread by the same
-			-- blur, which is what makes the text of one soft rather than its box alone.
-			clippedQuad(batch, clip, originX + glyph.x, y + glyph.y, originX + glyph.x + glyph.width,
-				y + glyph.y + glyph.height, zIndex, colour, picture, glyph.uv0, glyph.uv1, nil, nil, nil,
-				glyph.own, node.blur)
 		end
-
-		if selecting then
-			local break_ = value:find("\n", lineBase + 1, true)
-
-			if break_ ~= nil then
-				lineBase = break_
-			end
-		end
-	end
 end
 
 --- Where the caret is, as the pen it sits at, given the byte of the line it is at.
@@ -492,16 +542,16 @@ local function caretPen(run, line, byte)
 		local pen = nil
 
 		for at = 0, count - 1 do
-			local glyph = glyphs[first + at]
+				local glyph = glyphs[first + at]
 
-			if glyph.cluster >= byte then
-				local edge = glyph.pen + glyph.advance
+				if glyph.cluster >= byte then
+					local edge = glyph.pen + glyph.advance
 
-				if pen == nil or edge > pen then
-					pen = edge
+					if pen == nil or edge > pen then
+						pen = edge
+					end
 				end
 			end
-		end
 
 		return pen or 0, lineStep
 	end
@@ -509,12 +559,12 @@ local function caretPen(run, line, byte)
 	local pen = nil
 
 	for at = 0, count - 1 do
-		local glyph = glyphs[first + at]
+			local glyph = glyphs[first + at]
 
-		if glyph.cluster >= byte and (pen == nil or glyph.pen < pen) then
-			pen = glyph.pen
+			if glyph.cluster >= byte and (pen == nil or glyph.pen < pen) then
+				pen = glyph.pen
+			end
 		end
-	end
 
 	if pen ~= nil then
 		return pen, lineStep
@@ -555,10 +605,10 @@ end
 ---@return wonderland.font.Run
 local function fieldRun(element, node, value, fontManager)
 	local font = element.fontId ~= 0 and fontManager:get(element.fontId)
-		or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
+	or assert(fontManager:getDefault(), "No font to draw text with: load one and make it the default")
 	local maxWidth = bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0
-			and (node.width - node.paddingLeft - node.paddingRight)
-		or nil
+	and (node.width - node.paddingLeft - node.paddingRight)
+	or nil
 
 	return font:getRun(value, maxWidth)
 end
@@ -598,57 +648,57 @@ local function selectionQuads(batch, clip, caret, element, node, x, y, z, fontMa
 	local start = 1
 
 	for line = 0, run.lineCount - 1 do
-		local newline = value:find("\n", start, true)
-		-- The line's own bytes of the value, as the half open range a selection is counted in.
-		local lineFrom, lineTo = start - 1, (newline or #value + 1) - 1
-		local first, last = math.max(from, lineFrom), math.min(to, lineTo)
-		local whole = from <= lineFrom and to > lineTo
+			local newline = value:find("\n", start, true)
+			-- The line's own bytes of the value, as the half open range a selection is counted in.
+			local lineFrom, lineTo = start - 1, (newline or #value + 1) - 1
+			local first, last = math.max(from, lineFrom), math.min(to, lineTo)
+			local whole = from <= lineFrom and to > lineTo
 
-		if first < last or whole then
-			local glyphLine = lineAt(run, line)
-			local offset = lineOffset(node, glyphLine)
-			-- Both pens are taken into locals first: a call in the last argument of `math.min` is a
-			-- call that hands over *all* of what it returns, and `caretPen` answers with the pen and
-			-- the height of a line -- which is a left edge a line's height away from the right one.
-			local penFirst = caretPen(run, line, first - lineFrom)
-			local penLast = caretPen(run, line, last - lineFrom)
-			local left = math.min(penFirst, penLast)
-			local right = math.max(penFirst, penLast)
+			if first < last or whole then
+				local glyphLine = lineAt(run, line)
+				local offset = lineOffset(node, glyphLine)
+				-- Both pens are taken into locals first: a call in the last argument of `math.min` is a
+				-- call that hands over *all* of what it returns, and `caretPen` answers with the pen and
+				-- the height of a line -- which is a left edge a line's height away from the right one.
+				local penFirst = caretPen(run, line, first - lineFrom)
+				local penLast = caretPen(run, line, last - lineFrom)
+				local left = math.min(penFirst, penLast)
+				local right = math.max(penFirst, penLast)
 
-			if last == first then
-				right = left + SELECTION_LEAST
-			end
-
-			-- Where the ink of the line is, which is what an end of the selection that leaves the line
-			-- is drawn to: the advance of a line carries on past its last letter, so a selection of the
-			-- whole of it would otherwise be a blue box with a space's worth of nothing in it.
-			local inkedLeft, inkedRight = nil, nil
-			local glyphs = assert(run.glyphs)
-
-			for at = 0, glyphLine.count - 1 do
-				local glyph = glyphs[glyphLine.first + at]
-
-				if glyph.width > 0 then
-					inkedLeft = math.min(inkedLeft or glyph.x, glyph.x)
-					inkedRight = math.max(inkedRight or (glyph.x + glyph.width), glyph.x + glyph.width)
+				if last == first then
+					right = left + SELECTION_LEAST
 				end
-			end
 
-			if from <= lineFrom and inkedLeft ~= nil then
-				left = inkedLeft
-			end
+				-- Where the ink of the line is, which is what an end of the selection that leaves the line
+				-- is drawn to: the advance of a line carries on past its last letter, so a selection of the
+				-- whole of it would otherwise be a blue box with a space's worth of nothing in it.
+				local inkedLeft, inkedRight = nil, nil
+				local glyphs = assert(run.glyphs)
 
-			if to >= lineTo and inkedRight ~= nil then
-				right = inkedRight
-			end
+				for at = 0, glyphLine.count - 1 do
+						local glyph = glyphs[glyphLine.first + at]
 
-			clippedQuad(batch, clip, x + offset + left, y + line * lineStep, x + offset + right,
+						if glyph.width > 0 then
+							inkedLeft = math.min(inkedLeft or glyph.x, glyph.x)
+							inkedRight = math.max(inkedRight or (glyph.x + glyph.width), glyph.x + glyph.width)
+						end
+					end
+
+				if from <= lineFrom and inkedLeft ~= nil then
+					left = inkedLeft
+				end
+
+				if to >= lineTo and inkedRight ~= nil then
+					right = inkedRight
+				end
+
+				clippedQuad(batch, clip, x + offset + left, y + line * lineStep, x + offset + right,
 				y + line * lineStep + lineStep, zIndex,
 				QuadBatch.colour(SELECTION_R, SELECTION_G, SELECTION_B, 1.0), 0, nil, nil)
-		end
+			end
 
-		start = lineTo + 2
-	end
+			start = lineTo + 2
+		end
 end
 
 --- Where the caret of a field is drawn this frame, and what it is drawn as, kept on the caret the
@@ -708,13 +758,13 @@ local function findFieldText(screen, index, parentX, parentY, element, inField)
 	end
 
 	for at = 0, node.childCount - 1 do
-		local foundNode, foundX, foundY, foundRun = findFieldText(screen,
+			local foundNode, foundX, foundY, foundRun = findFieldText(screen,
 			screen.childIndices[node.firstChild + at - 1], x, y, element, inside)
 
-		if foundNode ~= nil then
-			return foundNode, foundX, foundY, foundRun
+			if foundNode ~= nil then
+				return foundNode, foundX, foundY, foundRun
+			end
 		end
-	end
 
 	return nil
 end
@@ -758,12 +808,12 @@ local function caretAtPoint(run, node, x, y, pointX, pointY)
 	-- the line.
 	if glyphLine.rtl ~= 0 then
 		for at = 0, count - 1 do
-			local glyph = glyphs[first + at]
+				local glyph = glyphs[first + at]
 
-			if target < glyph.pen + glyph.advance / 2 then
-				return line, at > 0 and glyphs[first + at - 1].cluster or PAST_THE_LINE
+				if target < glyph.pen + glyph.advance / 2 then
+					return line, at > 0 and glyphs[first + at - 1].cluster or PAST_THE_LINE
+				end
 			end
-		end
 
 		return line, glyphs[first + count - 1].cluster
 	end
@@ -771,13 +821,13 @@ local function caretAtPoint(run, node, x, y, pointX, pointY)
 	local best, bestDistance = PAST_THE_LINE, math.abs(glyphLine.width - target)
 
 	for at = 0, count - 1 do
-		local glyph = glyphs[first + at]
-		local distance = math.abs(glyph.pen - target)
+			local glyph = glyphs[first + at]
+			local distance = math.abs(glyph.pen - target)
 
-		if distance < bestDistance then
-			best, bestDistance = glyph.cluster, distance
+			if distance < bestDistance then
+				best, bestDistance = glyph.cluster, distance
+			end
 		end
-	end
 
 	return line, best
 end
@@ -792,7 +842,7 @@ local function addCaretQuad(batch, caret, windowWidth, windowHeight)
 	end
 
 	clippedQuad(batch, assert(caret.clip), assert(caret.left), assert(caret.top), assert(caret.right), assert(caret.bottom),
-		convertZ(caret.z), QuadBatch.rgba(assert(caret.r), assert(caret.g), assert(caret.b), assert(caret.a)), 0, nil, nil)
+	convertZ(caret.z), QuadBatch.rgba(assert(caret.r), assert(caret.g), assert(caret.b), assert(caret.a)), 0, nil, nil)
 end
 
 --- Walks the laid out screen, which is an array of nodes: a walk is an index and an
@@ -843,9 +893,9 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		local band = blur > 0 and (1 / (2 * blur)) or 1
 
 		clippedQuad(batch, clip, x + node.shadowX, y + node.shadowY, x + node.shadowX + node.width,
-			y + node.shadowY + node.height, convertZ(z),
-			QuadBatch.rgba(node.shadowR, node.shadowG, node.shadowB, node.shadowA), 0, nil, nil, node.radius,
-			band, blur + 1)
+		y + node.shadowY + node.height, convertZ(z),
+		QuadBatch.rgba(node.shadowR, node.shadowG, node.shadowB, node.shadowA), 0, nil, nil, node.radius,
+		band, blur + 1)
 	end
 
 	if node.visible ~= 0 and node.paint ~= 0 then
@@ -853,8 +903,8 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		-- of its own was given white by its style, and one that named a colour of its own is drawn in
 		-- it however dark that colour is.
 		clippedQuad(batch, clip, x, y, x + node.width, y + node.height, convertZ(z),
-			QuadBatch.rgba(node.bgR, node.bgG, node.bgB, node.bgA), node.texture,
-			node.u0 + node.v0 * 65536, node.u1 + node.v1 * 65536, node.radius, nil, nil, nil, node.blur)
+		QuadBatch.rgba(node.bgR, node.bgG, node.bgB, node.bgA), node.texture,
+		node.u0 + node.v0 * 65536, node.u1 + node.v1 * 65536, node.radius, nil, nil, nil, node.blur)
 	end
 
 	-- What the element draws itself goes where its own text goes: over what is under it -- the
@@ -868,12 +918,12 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 			local left = x + node.paddingLeft
 			local top = y + node.paddingTop
 			local roomWidth = node.width - node.paddingLeft - node.paddingRight
-				- node.borderLeft - node.borderRight
+			-node.borderLeft - node.borderRight
 			local roomHeight = node.height - node.paddingTop - node.paddingBottom
-				- node.borderTop - node.borderBottom
+			-node.borderTop - node.borderBottom
 
 			draw(canvas:draw(batch, clip, windowWidth, windowHeight, left, top, roomWidth, roomHeight,
-				convertZ(z), WHITE_TEXTURE))
+			convertZ(z), WHITE_TEXTURE))
 		end
 	end
 
@@ -891,32 +941,42 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		end
 
 		generateTextQuads(batch, clip, assert(screen.runs[node.run]), node, x, y, z, fontManager, windowWidth,
-			windowHeight, value, from, to)
+		windowHeight, value, from, to)
 	end
 
-	-- Borders come after the box they are on, so they land on top of it.
+	-- Borders come after the box they are on, so they land on top of it. A uniform border on a
+	-- rounded box is one ring quad rather than four rectangles: the shader cuts both the outer
+	-- and the inner edge, so the ring follows the corners instead of crossing them.
 	if node.visible ~= 0 then
 		local r, g, b, a = node.borderR / 255, node.borderG / 255, node.borderB / 255, node.borderA / 255
 		local width, height = node.width, node.height
+		local uniform = node.borderTop > 0
+		and node.borderTop == node.borderRight and node.borderTop == node.borderBottom
+		and node.borderTop == node.borderLeft
 
-		if node.borderTop > 0 then
-			addBorderQuad(batch, clip, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight,
+		if uniform then
+			clippedQuad(batch, clip, x, y, x + width, y + height, z + 1, QuadBatch.colour(r, g, b, a), 0, nil, nil,
+			node.radius, 1, nil, nil, nil, node.borderTop)
+		else
+			if node.borderTop > 0 then
+				addBorderQuad(batch, clip, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight,
 				node.blur)
-		end
+			end
 
-		if node.borderBottom > 0 then
-			addBorderQuad(batch, clip, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
+			if node.borderBottom > 0 then
+				addBorderQuad(batch, clip, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
 				windowWidth, windowHeight, node.blur)
-		end
+			end
 
-		if node.borderLeft > 0 then
-			addBorderQuad(batch, clip, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight,
+			if node.borderLeft > 0 then
+				addBorderQuad(batch, clip, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight,
 				node.blur)
-		end
+			end
 
-		if node.borderRight > 0 then
-			addBorderQuad(batch, clip, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
+			if node.borderRight > 0 then
+				addBorderQuad(batch, clip, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
 				windowWidth, windowHeight, node.blur)
+			end
 		end
 	end
 
@@ -926,11 +986,16 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 
 	if node.scrolls ~= 0 then
 		below = {
-			left = math.max(clip.left, x),
-			top = math.max(clip.top, y),
-			right = math.min(clip.right, x + node.width),
-			bottom = math.min(clip.bottom, y + node.height),
+		left = math.max(clip.left, x),
+		top = math.max(clip.top, y),
+		right = math.min(clip.right, x + node.width),
+		bottom = math.min(clip.bottom, y + node.height),
 		}
+		if node.radius > 0 then
+			below.radius = node.radius
+			below.boxLeft, below.boxTop = x, y
+			below.boxRight, below.boxBottom = x + node.width, y + node.height
+		end
 	end
 
 	-- The caret is placed from the line of text a field draws, which is the first one inside it --
@@ -941,9 +1006,9 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 	end
 
 	for at = 0, node.childCount - 1 do
-		generateNodeQuads(batch, screen, below, screen.childIndices[node.firstChild + at - 1], x, y, windowWidth,
+			generateNodeQuads(batch, screen, below, screen.childIndices[node.firstChild + at - 1], x, y, windowWidth,
 			windowHeight, z, fontManager, caret, inside, canvas)
-	end
+		end
 
 	if caret ~= nil and element ~= nil and element == caret.element and node.visible ~= 0 and not caret.placed then
 		placeCaret(caret, element, node, x + node.paddingLeft, y + node.paddingTop, z, below, fontManager)
@@ -953,7 +1018,7 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 	-- colour it was given made fainter, and the thumb is as much of the track as the box shows of
 	-- the content. It is only there when there is something to scroll, which is what "shows up"
 	-- means -- a list that fits has no bar.
-	local bar = node.scrolls ~= 0 and screen.bars[index - 1]
+	local bar = node.scrolls == 1 and screen.bars[index - 1]
 
 	if node.visible ~= 0 and bar and bar.width > 0 and bar.max > 0 then
 		local left = x + node.width - bar.width
@@ -976,12 +1041,11 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 		-- Drawn inside its own pane rather than the clip it is under, so a bar cannot come out of
 		-- the box it belongs to and over whatever is beside it.
 		clippedQuad(batch, below, left, y, left + bar.width, y + node.height, convertZ(z),
-			QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a * 0.25), 0, nil, nil)
+		QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a * 0.25), 0, nil, nil)
 		clippedQuad(batch, below, left, top, left + bar.width, top + thumb, convertZ(z + 1),
-			QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a), 0, nil, nil)
+		QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a), 0, nil, nil)
 	end
 end
-
 
 --- A frame is asked for, at most one for each frame the display has time to show. What the
 --- question is asked about is a window, so what says when the last frame went out is kept with it.
@@ -1067,7 +1131,7 @@ local function caretKey(ctx, window, layoutPlugin)
 		return nil
 	end
 
-	return table.concat({ tostring(ctx.focusedName), assert(line), assert(column), from or "", to or "" }, ":")
+	return table.concat({ tostring(ctx.focusedName), assert(line), assert(column), from or "", to or ""}, ":")
 end
 
 --- The caret as this frame has it: which field it is for, where in it, and what is selected in it,
@@ -1084,12 +1148,12 @@ function UI:caretFor(window)
 	end
 
 	return {
-		element = element,
-		value = element.inputValue,
-		line = line,
-		column = column,
-		from = from,
-		to = to,
+	element = element,
+	value = element.inputValue,
+	line = line,
+	column = column,
+	from = from,
+	to = to,
 	}
 end
 
@@ -1296,48 +1360,48 @@ function UI:tick(window, handler)
 	local live = 0
 
 	for index = 1, #tickers do
-		local ticker = tickers[index]
+			local ticker = tickers[index]
 
-		if ticker.window == nil then
-			ticker.window = window
-		end
-
-		if not ticker.cancelled and ticker.window == window then
-			if ticker.due == nil or at >= ticker.due then
-				local wait = ticker.fn(at, window)
-
-				if wait == nil then
-					ticker.cancelled = true
-				else
-					ticker.due = at + math.max(wait, 0)
-				end
+			if ticker.window == nil then
+				ticker.window = window
 			end
 
-			if not ticker.cancelled then
+			if not ticker.cancelled and ticker.window == window then
+				if ticker.due == nil or at >= ticker.due then
+					local wait = ticker.fn(at, window)
+
+					if wait == nil then
+						ticker.cancelled = true
+					else
+						ticker.due = at + math.max(wait, 0)
+					end
+				end
+
+				if not ticker.cancelled then
+					live = live + 1
+					tickers[live] = ticker
+
+					local nextAt = assert(ticker.due)
+
+					if nextAt <= at then
+						-- A callback that wants to be asked again straight away is one that is racing
+						-- the loop rather than the clock, and the loop is given no wait at all: it
+						-- comes round as fast as it can, which is what decoding a burst of frames out
+						-- of a file is.
+						due = earliest(due, at)
+					else
+						due = earliest(due, nextAt)
+					end
+				end
+			elseif not ticker.cancelled then
 				live = live + 1
 				tickers[live] = ticker
-
-				local nextAt = assert(ticker.due)
-
-				if nextAt <= at then
-					-- A callback that wants to be asked again straight away is one that is racing
-					-- the loop rather than the clock, and the loop is given no wait at all: it
-					-- comes round as fast as it can, which is what decoding a burst of frames out
-					-- of a file is.
-					due = earliest(due, at)
-				else
-					due = earliest(due, nextAt)
-				end
 			end
-		elseif not ticker.cancelled then
-			live = live + 1
-			tickers[live] = ticker
 		end
-	end
 
 	for index = #tickers, live + 1, -1 do
-		tickers[index] = nil
-	end
+			tickers[index] = nil
+		end
 
 	-- What the events left, drawn as soon as the display's time allows it. A frame that came too soon
 	-- to go out is one the event after it would have asked for again -- and an event that never comes
@@ -1393,7 +1457,7 @@ function UI:walk(window, ctx, key)
 	frameScaleX, frameScaleY = 2 / width, 2 / height
 
 	generateNodeQuads(batch, assert(ctx.screen), { left = 0, top = 0, right = width,
-		bottom = height }, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret, nil, self.canvas)
+	bottom = height}, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret, nil, self.canvas)
 
 	-- What the caret's quad is added to: the frame is the quads of the screen and then it, so a
 	-- blink is this many of them and no more.

@@ -46,11 +46,7 @@ elseif is64Bit then
 end
 
 ffi.cdef(([[
-	typedef struct wl_dir wl_dir;
 	struct wl_dirent { %s };
-	wl_dir *opendir(const char *path);
-	struct wl_dirent *readdir(wl_dir *dir);
-	int closedir(wl_dir *dir);
 
 	// Windows spells the same thing as a pattern rather than a directory, and writes the entry into
 	// the struct it was handed instead of returning a pointer to one.
@@ -65,6 +61,40 @@ ffi.cdef(([[
 	int FindNextFileA(intptr_t find, struct wl_find_data *data);
 	int FindClose(intptr_t find);
 ]]):format(entry))
+
+-- Another package may already have declared the C library's directory walk -- `fs` does, with
+-- the platform's own `struct dirent`. `readdir` cannot be declared twice with different return
+-- types; LuaJIT keeps one, and the loser reads a name at the wrong offset. Linux has `readdir64`
+-- as the same walk under a name no package has claimed, so this uses it. Elsewhere, where the
+-- symbol is shared, the entry is cast to the layout above and the platform's own declaration is
+-- used when one exists.
+local read
+
+if isWindows then
+	read = nil
+else
+	local hasDirent = pcall(ffi.typeof, "struct dirent")
+
+	if ffi.os == "Linux" then
+		ffi.cdef([[
+			typedef struct __dirstream DIR;
+			DIR *opendir(const char *path);
+			int closedir(DIR *dir);
+			struct wl_dirent *readdir64(DIR *dir);
+		]])
+		read = ffi.C.readdir64
+	else
+		if not hasDirent then
+			ffi.cdef([[
+				typedef struct __dirstream DIR;
+				DIR *opendir(const char *path);
+				struct wl_dirent *readdir(DIR *dir);
+				int closedir(DIR *dir);
+			]])
+		end
+		read = ffi.C.readdir
+	end
+end
 
 --- A directory entry as the C library writes it, which the language server cannot see.
 ---@class wonderland.font.ffi.dirent: ffi.cdata*
@@ -106,7 +136,13 @@ local function listDir(path)
 
 	if dir == nil then return nil end
 
-	local names, spot = {}, ffi.C.readdir(dir)
+	---@param handle any
+	---@return wonderland.font.ffi.dirent?
+	local function nextEntry(handle)
+		return ffi.cast("struct wl_dirent*", assert(read)(handle))
+	end
+
+	local names, spot = {}, nextEntry(dir)
 
 	while spot ~= nil do
 		---@cast spot wonderland.font.ffi.dirent
@@ -114,7 +150,7 @@ local function listDir(path)
 
 		if name ~= "." and name ~= ".." then names[#names + 1] = name end
 
-		spot = ffi.C.readdir(dir)
+		spot = nextEntry(dir)
 	end
 
 	ffi.C.closedir(dir)

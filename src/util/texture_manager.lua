@@ -66,11 +66,13 @@ local MAX_SIZE = 8192
 -- animation with more frames than that takes more textures rather than one longer one.
 local MAX_LAYERS = 256
 
--- How much of a picture one upload stages through host visible memory, in pixels: eight megabytes.
+-- How much of a picture one upload stages through host visible memory, in pixels: one megabyte.
 -- Every driver this runs on hands out a window of that memory rather than the whole card -- a
 -- resizable BAR is what a machine with a large one has -- and an upload that asks for more than is
 -- free is the one that fails, so a picture is uploaded in bands of this much however large it is.
-local DEFAULT_UPLOAD_PIXELS = 2 * 1024 * 1024
+-- Keeping the window small is also what keeps an idle app's resident memory small; the extra
+-- bands of a very large picture are cheap next to holding eight megabytes that are usually empty.
+local DEFAULT_UPLOAD_PIXELS = 256 * 1024
 
 --- A picture this library did not draw itself: a texture somebody else rendered -- another
 --- renderer built on hood, a shader of an app's own -- or one this library made to be drawn into.
@@ -112,9 +114,9 @@ TextureManager.__index = TextureManager
 ---@return TextureManager
 function TextureManager.new(device, opts)
 	local sampler = device:createSampler({
-		minFilter = "nearest",
-		magFilter = "nearest",
-		mipmapFilter = "nearest",
+		minFilter = "linear",
+		magFilter = "linear",
+		mipmapFilter = "linear",
 		addressModeU = "clamp-to-edge",
 		addressModeV = "clamp-to-edge",
 		addressModeW = "clamp-to-edge"
@@ -355,7 +357,7 @@ function TextureManager:growSlots(slots)
 		usages = { "STORAGE", "COPY_DST" } })
 
 	for slot = 0, self.slotCount - 1 do
-		self:writeSlot(slot, buffer)
+		if self.slots[slot] ~= nil then self:writeSlot(slot, buffer) end
 	end
 
 	local old = self.slotBuffer
@@ -485,6 +487,11 @@ function TextureManager:release(surface)
 	if at == nil or self.textures[at] == nil then
 		return
 	end
+
+	-- Destroying a texture a frame in flight still samples is undefined Vulkan and, on a
+	-- driver that notices, a lost device. Covers are released while a page changes, which is
+	-- exactly when the previous frame may still be in flight.
+	self.device.queue:waitIdle()
 
 	self.textures[at].bindGroup:destroy()
 	self.textures[at].view:destroy()

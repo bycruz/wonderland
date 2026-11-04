@@ -291,6 +291,8 @@ end
 ---@field stream fun(self: wonderland.Assets, opts: { width: number?, height: number?, layers: number?, delay: number?, source: wonderland.FrameSource? }): wonderland.Stream
 ---@field image fun(self: wonderland.Assets, path: string): wonderland.Asset?
 ---@field gif fun(self: wonderland.Assets, path: string): wonderland.Stream
+---@field upload fun(self: wonderland.Assets, decoded: image.Image): wonderland.Asset
+---@field release fun(self: wonderland.Assets, asset: wonderland.Asset)
 ---@field advance fun(self: wonderland.Assets, now: number): boolean
 ---@field due fun(self: wonderland.Assets): number?
 local Assets = {}
@@ -369,6 +371,15 @@ function Assets:upload(decoded)
 		}),
 		uv = FULL,
 	}
+end
+
+--- Gives a picture back: the texture it was uploaded into is released, and a quad that still
+--- names it draws the texture that says there is nothing there. What this is for is a picture an
+--- app uploaded itself with `Assets:upload`, which nothing else remembers; a picture loaded by
+--- path is remembered here and is not what this is for.
+---@param asset wonderland.Asset
+function Assets:release(asset)
+	self.textureManager:release({ slot = asset.texture })
 end
 
 --- A still picture, decoded once and remembered by path. What the bytes are is what decides

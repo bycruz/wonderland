@@ -113,6 +113,23 @@ test.skipIf(not canUpload)("decodes a picture and uploads it, whatever the file 
 	os.remove(path)
 end)
 
+test.skipIf(not canUpload)("releases a picture uploaded by an app, texture and all", function()
+	local screen = aScreen()
+	local manager = texturesOf(screen)
+	local asset = screen.assets:upload(decoded(4, 4, 10))
+	local slot = assert(manager.slots[asset.texture])
+	local textureId = slot.texture
+
+	test.truthy(manager.textures[textureId], "the picture has a texture")
+
+	screen.assets:release(asset)
+
+	test.falsy(manager.slots[asset.texture], "the slot is gone")
+	test.falsy(manager.textures[textureId], "and the texture with it")
+
+	screen:close()
+end)
+
 test.skipIf(not canUpload)("uploads a picture at its own size, whatever that size is", function()
 	local screen = aScreen()
 	local manager = texturesOf(screen)

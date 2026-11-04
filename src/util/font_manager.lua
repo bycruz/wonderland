@@ -159,6 +159,17 @@ end
 --- The font a spec asks for, made now if this is the first thing to ask for it. Every size of a
 --- family is a font of its own and every kind of anything else is shared: the fonts an app has
 --- asked for are kept, so a repaint asks by number and resolves nothing.
+--- The side of a glyph atlas, in pixels. A sheet is a texture and a CPU buffer of its pixels;
+--- a 512 square holds a megabyte each, which is more than a line of 12 px text can fill. Small
+--- sizes take small sheets and add another rather than reserving a screenful they never use.
+---@param pixelHeight number
+---@return number
+local function sheetSide(pixelHeight)
+	if pixelHeight <= 16 then return 128 end
+	if pixelHeight <= 32 then return 256 end
+	return 512
+end
+
 ---@param spec wonderland.FontSpec
 ---@return wonderland.font.Font? font
 ---@return string? err
@@ -198,9 +209,11 @@ function FontManager:resolve(spec)
 		end
 	end
 
-	local primary = Atlas.new(face, spec.pixelHeight or DEFAULT_PIXEL_HEIGHT, {
+	local pixelHeight = spec.pixelHeight or DEFAULT_PIXEL_HEIGHT
+	local primary = Atlas.new(face, pixelHeight, {
 		pictures = self.textureManager,
 		characters = spec.characters,
+		size = sheetSide(pixelHeight),
 	})
 
 	local manager = self

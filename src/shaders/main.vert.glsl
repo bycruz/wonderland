@@ -23,6 +23,7 @@ layout(location = 7) in vec4 aColour;     // the colour it is drawn in
 layout(location = 8) in float aTexture;   // which picture it samples
 layout(location = 9) in float aDepth;     // and how deep it is
 layout(location = 10) in float aOwn;      // whether the picture is drawn as it is, of one
+layout(location = 11) in float aBorder;   // how thick a rounded ring is, of 255
 
 layout(location = 0) flat out vec4 vertexColor;
 layout(location = 1) out vec2 texCoord;
@@ -33,6 +34,7 @@ layout(location = 5) flat out vec2 edge;
 layout(location = 6) flat out float own;
 layout(location = 7) flat out vec4 uvRect;
 layout(location = 8) flat out float blur;
+layout(location = 9) flat out float border;
 
 void main() {
     // Where this corner of the quad is. The four corners are what the instance names; which of them
@@ -70,4 +72,5 @@ void main() {
     blur = aCut.z;
     uvRect = aPart;
     own = aOwn;
+    border = aBorder * 255.0;
 }

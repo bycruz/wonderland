@@ -15,7 +15,7 @@ local MULTILINE = wonderlandElement.MULTILINE
 local SLIDE = wonderlandElement.SLIDE
 local RESIZE = wonderlandElement.RESIZE
 local EDGE_RIGHT, EDGE_LEFT, EDGE_TOP, EDGE_BOTTOM = wonderlandElement.EDGE_RIGHT, wonderlandElement.EDGE_LEFT,
-	wonderlandElement.EDGE_TOP, wonderlandElement.EDGE_BOTTOM
+wonderlandElement.EDGE_TOP, wonderlandElement.EDGE_BOTTOM
 
 --- Where a node ended up, and which element it is.
 ---@class wonderland.plugin.Layout.Hit
@@ -29,17 +29,27 @@ local EDGE_RIGHT, EDGE_LEFT, EDGE_TOP, EDGE_BOTTOM = wonderlandElement.EDGE_RIGH
 -- The nodes are an array, so a walk is an index and an offset rather than a tree of
 -- tables. Children are reached through the runs of child indices the layout keeps.
 
+--- A hit and where it stands in the paint order: the highest z wins, and at one z the box painted
+--- or collected last wins, which is what keeps a popup above the page under it.
+---@class wonderland.plugin.Layout.TopHit: wonderland.plugin.Layout.Hit
+---@field z number
+---@field order number
+
 ---@param screen wonderland.Layout.Screen
 ---@param index number
 ---@param x number
 ---@param y number
 ---@param parentX number
 ---@param parentY number
----@param acceptFn? fun(element: wonderland.Element): boolean
-local function findElementAtPosition(screen, index, x, y, parentX, parentY, acceptFn)
+---@param acceptFn? fun(element: wonderland.Element, absX: number, absY: number, node: wonderland.Node): boolean
+---@param parentZ? number
+---@param state { order: number }
+---@return wonderland.plugin.Layout.TopHit?
+local function findElementAtPosition(screen, index, x, y, parentX, parentY, acceptFn, parentZ, state)
 	---@type wonderland.Node
 	local node = screen:node(index)
 	local absX, absY = parentX + node.x, parentY + node.y
+	local z = math.max(node.zIndex, parentZ or 0)
 
 	-- A box that scrolls shows only what is inside it, so what is scrolled out of it is not there
 	-- to be clicked either.
@@ -47,17 +57,27 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 		return nil
 	end
 
+	state.order = state.order + 1
+	local order = state.order
+
+	-- The same rank the painter walks: children after their parent, later siblings after earlier
+	-- ones. What is on top is the highest z, and among boxes at one z, the one painted last. A
+	-- popup added to the screen last would otherwise lose to the page it covers.
+	---@type wonderland.plugin.Layout.TopHit?
+	local best = nil
+
 	-- Always recurse into children: relative-positioned children may extend outside their
 	-- parent's bounds.
 	for at = 0, node.childCount - 1 do
-		local child = screen.childIndices[node.firstChild + at - 1]
-		---@type wonderland.plugin.Layout.Hit?
-		local found = findElementAtPosition(screen, child, x, y, absX, absY, acceptFn)
+			local child = screen.childIndices[node.firstChild + at - 1]
+			---@type wonderland.plugin.Layout.TopHit?
+			local found = findElementAtPosition(screen, child, x, y, absX, absY, acceptFn, z, state)
 
-		if found and (not acceptFn or acceptFn(found.element, found.absX, found.absY, found.node)) then
-			return found
+			if found ~= nil and (best == nil or found.z > best.z
+			or (found.z == best.z and found.order > best.order)) then
+				best = found
+			end
 		end
-	end
 
 	if x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height then
 		local element = pointers[node.element]
@@ -66,11 +86,32 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 		-- is a question about the two together, and only a predicate that needs it is handed the
 		-- four numbers -- see `findResizeEdge`.
 		if not acceptFn or acceptFn(element, absX, absY, node) then
-			return { element = element, node = node, absX = absX, absY = absY } --[[@as wonderland.plugin.Layout.Hit]]
+			local hit = {
+			element = element,
+			node = node,
+			absX = absX,
+			absY = absY,
+			z = z,
+			order = order,
+			} --[[@as wonderland.plugin.Layout.TopHit]]
+			if best == nil or z > best.z or (z == best.z and order > best.order) then
+				best = hit
+			end
 		end
 	end
 
-	return nil
+	return best
+end
+
+--- The topmost box at a point, which is what a press, a release or a resize edge is aimed at.
+---@param screen wonderland.Layout.Screen
+---@param root number
+---@param x number
+---@param y number
+---@param acceptFn? fun(element: wonderland.Element, absX: number, absY: number, node: wonderland.Node): boolean
+---@return wonderland.plugin.Layout.TopHit?
+local function findTopmostAt(screen, root, x, y, acceptFn)
+	return findElementAtPosition(screen, root, x, y, 0, 0, acceptFn, 0, { order = 0})
 end
 
 ---@param screen wonderland.Layout.Screen
@@ -83,7 +124,7 @@ local function findElementsAtPosition(screen, index, x, y, parentX, parentY, res
 	if x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height then
 		local element = pointers[node.element]
 
-		results[element] = { element = element, node = node, absX = absX, absY = absY }
+		results[element] = { element = element, node = node, absX = absX, absY = absY}
 	end
 
 	if node.scrolls ~= 0 and (x < absX or x > absX + node.width or y < absY or y > absY + node.height) then
@@ -92,8 +133,8 @@ local function findElementsAtPosition(screen, index, x, y, parentX, parentY, res
 
 	-- Always recurse: relative-positioned children may extend outside parent bounds
 	for at = 0, node.childCount - 1 do
-		findElementsAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, results)
-	end
+			findElementsAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, results)
+		end
 end
 
 --- The chain of boxes a point is inside, from the one at the root to the innermost one that
@@ -115,12 +156,12 @@ local function chainAtPosition(screen, index, x, y, parentX, parentY, depth, int
 
 	if inside then
 		into[#into + 1] = {
-			element = pointers[node.element],
-			node = node,
-			index = index,
-			depth = depth,
-			absX = absX,
-			absY = absY,
+		element = pointers[node.element],
+		node = node,
+		index = index,
+		depth = depth,
+		absX = absX,
+		absY = absY,
 		}
 	end
 
@@ -129,8 +170,8 @@ local function chainAtPosition(screen, index, x, y, parentX, parentY, depth, int
 	end
 
 	for at = 0, node.childCount - 1 do
-		chainAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, depth + 1, into)
-	end
+			chainAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, depth + 1, into)
+		end
 end
 
 --- A scroll bar being dragged: the box it belongs to, how far into the thumb it was taken hold
@@ -185,6 +226,7 @@ end
 ---@field caretClick wonderland.plugin.Layout.Point? # Where a field was clicked, until the ui has placed the caret from it
 ---@field selectFrom wonderland.plugin.Layout.Point? # Where a selection was started, until the ui has placed its other end
 ---@field selecting boolean? # Whether the pointer is down in a field, which is what a drag selects with
+---@field selectWord boolean? # A double press in a field, waiting for the ui to place the caret at its point
 ---@field repeatKey string? # The key held down in the focused field, which is what the library repeats
 ---@field repeatMods winit.KeyModifiers? # And the modifiers it went down with
 ---@field repeatAt number? # When the next one of them is due, on the ui's clock: nothing of it means the hold has just begun
@@ -212,12 +254,12 @@ local KEY_REPEAT_INTERVAL = 1 / 30
 -- The keys a held key repeats, by name: what moves the caret and what takes a character away, which
 -- is what is done over and over while one is held down.
 local REPEATS = {
-	backspace = true,
-	delete = true,
-	left = true,
-	right = true,
-	up = true,
-	down = true,
+backspace = true,
+delete = true,
+left = true,
+right = true,
+up = true,
+down = true,
 }
 
 --- Whether a key is one a hold repeats: what it does is done again and again while it is held, as
@@ -273,19 +315,19 @@ Layout.__index = Layout
 ---@param renderPlugin wonderland.plugin.Render? # What a screen is drawn into, which is the size it is laid out at
 function Layout.new(view, textPlugin, renderPlugin) ---@return wonderland.plugin.Layout
 	return setmetatable({
-		view = view,
-		contexts = {},
-		textPlugin = textPlugin,
-		renderPlugin = renderPlugin,
-		keyRepeatDelay = KEY_REPEAT_DELAY,
-		keyRepeatInterval = KEY_REPEAT_INTERVAL,
+	view = view,
+	contexts = {},
+	textPlugin = textPlugin,
+	renderPlugin = renderPlugin,
+	keyRepeatDelay = KEY_REPEAT_DELAY,
+	keyRepeatInterval = KEY_REPEAT_INTERVAL,
 	}, Layout)
 end
 
 ---@param window wonderland.RenderWindow
 ---@param self wonderland.plugin.Layout
 function Layout:register(window)
-	self.contexts[window] = { window = window, focusedName = nil, cursorPos = 0, screen = UILayout.new() }
+	self.contexts[window] = { window = window, focusedName = nil, cursorPos = 0, screen = UILayout.new()}
 	self:refreshView(window)
 end
 
@@ -315,6 +357,7 @@ function Layout:setFocus(window, id)
 	ctx.cursorPos = 0
 	ctx.typed = nil
 	ctx.caretClick = nil
+	ctx.selectWord = nil
 	ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 end
 
@@ -426,17 +469,17 @@ local function cutInto(screen, index, parentX, parentY, right, fontManager)
 	local isRow = node.direction == 0
 
 	for at = 0, node.childCount - 1 do
-		local child = screen.childIndices[node.firstChild + at - 1]
-		local limit = contentRight
+			local child = screen.childIndices[node.firstChild + at - 1]
+			local limit = contentRight
 
-		if isRow and at < node.childCount - 1 then
-			limit = math.min(contentRight, x + screen:node(screen.childIndices[node.firstChild + at]).x)
-		end
+			if isRow and at < node.childCount - 1 then
+				limit = math.min(contentRight, x + screen:node(screen.childIndices[node.firstChild + at]).x)
+			end
 
-		if cutInto(screen, child, x, y, math.min(right, limit), fontManager) then
-			cut = true
+			if cutInto(screen, child, x, y, math.min(right, limit), fontManager) then
+				cut = true
+			end
 		end
-	end
 
 	return cut
 end
@@ -496,7 +539,7 @@ end
 ---@param e wonderland.Element
 local function hasMouseDownOrClick(e)
 	return bit.band(e.flags, TEXT_INPUT) ~= 0 or bit.band(e.flags, SLIDE) ~= 0
-		or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0
+	or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0
 end
 
 --- Whether a point is on the edge of a box that resizes: within the grab of that edge, inside the
@@ -531,11 +574,11 @@ end
 ---@param x number
 ---@param y number
 local function findResizeEdge(screen, root, x, y)
-	return findElementAtPosition(screen, root, x, y, 0, 0,
-		function(element, absX, absY, node) ---@param element wonderland.Element
-			return bit.band(element.flags, RESIZE) ~= 0 and element.onchange ~= 0
-				and onResizeEdge(element, x, y, absX, absY, node)
-		end)
+	return findTopmostAt(screen, root, x, y,
+	function(element, absX, absY, node) ---@param element wonderland.Element
+		return bit.band(element.flags, RESIZE) ~= 0 and element.onchange ~= 0
+		and onResizeEdge(element, x, y, absX, absY, node)
+	end)
 end
 
 --- Whether a window has a cursor shape: `hand2` is one every platform draws, and anything else is
@@ -602,6 +645,7 @@ local function findElementById(element, id)
 end
 
 local DOUBLE_CLICK_THRESHOLD = 0.3 -- seconds
+local DOUBLE_CLICK_SLOP = 4 -- pixels a pointer may drift between the two presses
 
 --- What a box that scrolls says about being scrolled: a handler that is asked, or a message that is
 --- the answer as it is. Which of the two it is is what an element was given -- see `:onScroll`.
@@ -627,13 +671,13 @@ end
 ---@param width number
 ---@param height number
 ---@param modifiers winit.KeyModifiers?
-local function contextMessage(handler, x, y, width, height, modifiers)
+local function contextMessage(handler, x, y, width, height, modifiers, windowX, windowY)
 	if handler == nil then
 		return nil
 	end
 
 	if type(handler) == "function" then
-		return handler(x, y, width, height, modifiers)
+		return handler(x, y, width, height, modifiers, windowX, windowY)
 	end
 
 	return handler
@@ -671,10 +715,10 @@ local function wheelTarget(ctx, x, y)
 	local found = nil
 
 	for _, hit in ipairs(chain) do
-		if (hit.node.scrolls ~= 0 or hit.element.onscroll ~= 0) and (found == nil or hit.depth >= found.depth) then
-			found = hit
+			if (hit.node.scrolls == 1 or hit.element.onscroll ~= 0) and (found == nil or hit.depth >= found.depth) then
+				found = hit
+			end
 		end
-	end
 
 	return found
 end
@@ -733,7 +777,6 @@ local function collectFocusable(element, into)
 	end
 end
 
-
 --- Where the pointer is. It is one table per window rather than one per event, because a
 --- pointer moves: what changes is what it says.
 ---@param ctx wonderland.plugin.Layout.Context
@@ -744,7 +787,7 @@ local function setPointer(ctx, x, y, pressed)
 	local pointer = ctx.pointer
 
 	if not pointer then
-		pointer = { x = x, y = y, pressed = false }
+		pointer = { x = x, y = y, pressed = false}
 		ctx.pointer = pointer
 	end
 
@@ -788,7 +831,7 @@ local function valueAt(drag, x, y)
 		-- has moved since, which is minus what it has moved for an edge on the far side of it: a
 		-- left edge dragged left is a wider box.
 		local size = assert(drag.size) + ((drag.vertical and y or x) - (drag.vertical and drag.y or drag.x))
-			* assert(drag.grows)
+		* assert(drag.grows)
 
 		return math.min(math.max(size, drag.min), drag.max)
 	end
@@ -834,17 +877,17 @@ local function resizeFor(hit, element, x, y)
 	local grows = edge == EDGE_RIGHT or edge == EDGE_BOTTOM
 
 	return {
-		change = callbacks[element.onchange],
-		x = x,
-		y = y,
-		span = 0,
-		vertical = vertical,
-		min = element.min,
-		max = element.max,
-		value = vertical and hit.node.height or hit.node.width,
-		edge = edge,
-		size = vertical and hit.node.height or hit.node.width,
-		grows = grows and 1 or -1,
+	change = callbacks[element.onchange],
+	x = x,
+	y = y,
+	span = 0,
+	vertical = vertical,
+	min = element.min,
+	max = element.max,
+	value = vertical and hit.node.height or hit.node.width,
+	edge = edge,
+	size = vertical and hit.node.height or hit.node.width,
+	grows = grows and 1 or -1,
 	}
 end
 
@@ -866,22 +909,22 @@ local function dragFor(screen, hit, element)
 	local nub = 0
 
 	for at = 0, node.childCount - 1 do
-		local child = screen.nodes[screen.childIndices[node.firstChild + at - 1] - 1]
+			local child = screen.nodes[screen.childIndices[node.firstChild + at - 1] - 1]
 
-		if child.thumb ~= 0 then
-			nub = across and child.width or child.height
-			break
+			if child.thumb ~= 0 then
+				nub = across and child.width or child.height
+				break
+			end
 		end
-	end
 
 	return {
-		change = callbacks[element.onchange],
-		x = hit.absX + lead + (across and nub / 2 or 0),
-		y = hit.absY + lead + (across and 0 or nub / 2),
-		span = (across and node.width or node.height) - lead - trail - borders - nub,
-		vertical = not across,
-		min = element.min,
-		max = element.max,
+	change = callbacks[element.onchange],
+	x = hit.absX + lead + (across and nub / 2 or 0),
+	y = hit.absY + lead + (across and 0 or nub / 2),
+	span = (across and node.width or node.height) - lead - trail - borders - nub,
+	vertical = not across,
+	min = element.min,
+	max = element.max,
 	}
 end
 
@@ -908,9 +951,9 @@ end
 ---@param byte number?
 local function isWordByte(byte)
 	return byte ~= nil and (byte >= 0x80 or byte == 0x5F
-		or (byte >= 0x30 and byte <= 0x39)
-		or (byte >= 0x41 and byte <= 0x5A)
-		or (byte >= 0x61 and byte <= 0x7A))
+	or (byte >= 0x30 and byte <= 0x39)
+	or (byte >= 0x41 and byte <= 0x5A)
+	or (byte >= 0x61 and byte <= 0x7A))
 end
 
 ---@param byte number?
@@ -962,6 +1005,29 @@ local function wordForward(value, at)
 	return ahead
 end
 
+--- The word around a byte of a value, for a double click in a field. The byte before the caret
+--- wins where it is part of a word, which is a double click inside one; otherwise a byte after it
+--- that starts a word is the word being asked for.
+---@param value string
+---@param at number
+---@return number first
+---@return number last
+local function wordRange(value, at)
+	local before = at > 0 and value:byte(at) or nil
+	local after = at < #value and value:byte(at + 1) or nil
+	local first
+
+	if before ~= nil and isWordByte(before) then
+		first = wordBack(value, at)
+	elseif after ~= nil and isWordByte(after) then
+		first = at
+	else
+		return at, at
+	end
+
+	return first, wordForward(value, first)
+end
+
 --- What a key types where it types something a field takes -- shift and 1 is the key 1 pressed and
 --- "!" typed -- or nothing, for a key that types nothing of its own.
 ---
@@ -976,12 +1042,12 @@ local function typedBy(event)
 	end
 
 	for at = 1, #text do
-		local byte = text:byte(at)
+			local byte = text:byte(at)
 
-		if byte < 32 or byte == 127 then
-			return nil
+			if byte < 32 or byte == 127 then
+				return nil
+			end
 		end
-	end
 
 	return text
 end
@@ -994,8 +1060,8 @@ local function lineCount(value)
 	local count = 1
 
 	for _ in value:gmatch("\n") do
-		count = count + 1
-	end
+			count = count + 1
+		end
 
 	return count
 end
@@ -1029,7 +1095,6 @@ local function lineAcross(value, at, by)
 
 	return math.min(belowStart - 1 + column, belowStop)
 end
-
 
 --- The caret of the field that has the keyboard: which element it is for, the line of it the caret is
 --- on and how many bytes of that line come before it, and the bytes the selection covers where there
@@ -1085,36 +1150,36 @@ function Layout:barPress(ctx, x, y)
 
 	-- The innermost bar under the pointer, because a box that scrolls may hold another one.
 	for at = #chain, 1, -1 do
-		local hit = chain[at]
-		local thumb, top, width = barOf(screen, hit)
+			local hit = chain[at]
+			local thumb, top, width = barOf(screen, hit)
 
-		if thumb ~= nil and top ~= nil and width ~= nil and hit.element.onscroll ~= 0
+			if thumb ~= nil and top ~= nil and width ~= nil and hit.element.onscroll ~= 0
 			and x >= hit.absX + hit.node.width - width then
-			local bar = assert(screen.bars[hit.index - 1])
+				local bar = assert(screen.bars[hit.index - 1])
 
-			-- A press on the thumb takes hold of it where it was pressed, so it does not jump
-			-- under the pointer; a press on the track takes the thumb to the pointer, which is
-			-- what says which part of the content is being asked for.
-			local grab = y - top
+				-- A press on the thumb takes hold of it where it was pressed, so it does not jump
+				-- under the pointer; a press on the track takes the thumb to the pointer, which is
+				-- what says which part of the content is being asked for.
+				local grab = y - top
 
-			if grab < 0 or grab > thumb then
-				grab = math.floor(thumb / 2)
-			end
+				if grab < 0 or grab > thumb then
+					grab = math.floor(thumb / 2)
+				end
 
-			local span = hit.node.height - thumb
-			local position = (y - grab - hit.absY) / (span > 0 and span or 1)
+				local span = hit.node.height - thumb
+				local position = (y - grab - hit.absY) / (span > 0 and span or 1)
 
-			ctx.barDrag = {
+				ctx.barDrag = {
 				hit = hit,
 				grab = grab,
 				thumb = thumb,
 				max = bar.max,
 				change = callbacks[hit.element.onscroll],
-			}
+				}
 
-			return scrollMessage(ctx.barDrag.change, nil, math.min(math.max(position, 0), 1) * bar.max)
+				return scrollMessage(ctx.barDrag.change, nil, math.min(math.max(position, 0), 1) * bar.max)
+			end
 		end
-	end
 
 	return nil
 end
@@ -1247,11 +1312,11 @@ function Layout:focusNext(ctx, backwards)
 	local at = 0
 
 	for index, element in ipairs(focusable) do
-		if wonderlandElement.nameOf(element) == ctx.focusedName then
-			at = index
-			break
+			if wonderlandElement.nameOf(element) == ctx.focusedName then
+				at = index
+				break
+			end
 		end
-	end
 
 	local next = at + (backwards and -1 or 1)
 
@@ -1270,7 +1335,7 @@ function Layout:focusNext(ctx, backwards)
 	ctx.caretClick = nil
 	ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 
-	return { type = "_inputRefresh" }
+	return { type = "_inputRefresh"}
 end
 
 --- Where a line and a column of the value come to, as a byte of it: the line the value is split into
@@ -1282,14 +1347,14 @@ local function byteAt(value, line, column)
 	local start = 1
 
 	for _ = 1, line do
-		local break_ = value:find("\n", start, true)
+			local break_ = value:find("\n", start, true)
 
-		if not break_ then
-			return nil
+			if not break_ then
+				return nil
+			end
+
+			start = break_ + 1
 		end
-
-		start = break_ + 1
-	end
 
 	return math.min(start - 1 + column, lineEnd(value, start - 1))
 end
@@ -1329,6 +1394,17 @@ function Layout:setCaret(window, line, column, anchorLine, anchorColumn)
 	end
 
 	ctx.cursorPos = at
+
+	-- A double click asked for the word at the point rather than the point itself. The ui has
+	-- just turned that point into a byte, which is where a word can be measured from.
+	if ctx.selectWord then
+		ctx.selectWord = nil
+		local first, last = wordRange(value, at)
+
+		if first < last then
+			ctx.anchorPos, ctx.cursorPos = first, last
+		end
+	end
 
 	if anchorLine ~= nil then
 		ctx.anchorPos = byteAt(value, anchorLine, anchorColumn or 0)
@@ -1397,7 +1473,7 @@ function Layout:key(window, key, modifiers, typed)
 
 		local handler = callbacks[element.oninput]
 
-		return handler and handler(edited) or { type = "_inputRefresh" }
+		return handler and handler(edited) or { type = "_inputRefresh"}
 	end
 
 	--- The bytes a selection covers, from the earlier end, clamped to what the value holds: the
@@ -1460,14 +1536,14 @@ function Layout:key(window, key, modifiers, typed)
 
 		ctx.cursorPos = at
 
-		return { type = "_inputRefresh" }
+		return { type = "_inputRefresh"}
 	end
 
 	if key == "escape" then
 		ctx.focusedName = nil
 		ctx.cursorPos = 0
 		ctx.anchorPos = nil
-		return { type = "_inputRefresh" }
+		return { type = "_inputRefresh"}
 	elseif key == "return" then
 		local submit = callbacks[element.onsubmit]
 
@@ -1516,12 +1592,12 @@ function Layout:key(window, key, modifiers, typed)
 	elseif key == "left" then
 		-- With control it walks a word rather than a character, which is the same key either way.
 		return moveTo(modifiers ~= nil and modifiers.ctrl == true
-				and wordBack(value, cursor)
-			or utf8.back(value, cursor))
+		and wordBack(value, cursor)
+		or utf8.back(value, cursor))
 	elseif key == "right" then
 		return moveTo(modifiers ~= nil and modifiers.ctrl == true
-				and wordForward(value, cursor)
-			or utf8.forward(value, cursor))
+		and wordForward(value, cursor)
+		or utf8.forward(value, cursor))
 	elseif key == "home" then
 		return moveTo(lineStart(value, cursor) - 1)
 	elseif key == "end" then
@@ -1550,12 +1626,12 @@ function Layout:key(window, key, modifiers, typed)
 			-- the start of it.
 			ctx.anchorPos, ctx.cursorPos = 0, #value
 
-			return { type = "_inputRefresh" }
+			return { type = "_inputRefresh"}
 		elseif key == "v" or key == "c" or key == "x" then
 			local from, to = selected()
 
 			local clipboardKey = self.clipboardKey --[[@as fun(self: wonderland.plugin.Layout, element: wonderland.Element, ctx: wonderland.plugin.Layout.Context, key: string, value: string, cursor: number, from: number, to: number, edit: fun(edited: string): unknown?): unknown?]]
-				return clipboardKey(self, element, ctx, key, value, cursor, from, to, edit)
+			return clipboardKey(self, element, ctx, key, value, cursor, from, to, edit)
 		end
 	elseif key == "space" then
 		return typeIn(" ")
@@ -1608,7 +1684,7 @@ function Layout:event(event)
 		-- where the press was is the other end of it. The point is left for the ui, which is what
 		-- knows where the text of the field is: see `UI:caretClick`.
 		if ctx.selecting then
-			ctx.caretClick = { x = event.x, y = event.y }
+			ctx.caretClick = { x = event.x, y = event.y}
 
 			return nil
 		end
@@ -1618,33 +1694,39 @@ function Layout:event(event)
 		findElementsAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hoveredElements)
 
 		local anyWithMouseDown = false
+		local anyTextInput = false
 		local edge = nil
 
 		for el, hit in pairs(hoveredElements) do
-			if bit.band(el.flags, RESIZE) ~= 0 and onResizeEdge(el, event.x, event.y, hit.absX, hit.absY, hit.node) then
-				-- An edge that can be dragged is the one shape that is not the pointer: which way it
-				-- is dragged is which way its cursor points across the screen or down it.
-				edge = (el.resizeEdge == EDGE_RIGHT or el.resizeEdge == EDGE_LEFT) and "sizewe" or "sizens"
-				break
-			end
+				if bit.band(el.flags, RESIZE) ~= 0 and onResizeEdge(el, event.x, event.y, hit.absX, hit.absY, hit.node) then
+					-- An edge that can be dragged is the one shape that is not the pointer: which way it
+					-- is dragged is which way its cursor points across the screen or down it.
+					edge = (el.resizeEdge == EDGE_RIGHT or el.resizeEdge == EDGE_LEFT) and "sizewe" or "sizens"
+					break
+				end
 
-			if bit.band(el.flags, TEXT_INPUT) ~= 0 or bit.band(el.flags, SLIDE) ~= 0
+				if bit.band(el.flags, TEXT_INPUT) ~= 0 then
+					anyTextInput = true
+				end
+				if bit.band(el.flags, TEXT_INPUT) ~= 0 or bit.band(el.flags, SLIDE) ~= 0
 				or el.onmousedown ~= 0 or el.onclick ~= 0 then
-				anyWithMouseDown = true
+					anyWithMouseDown = true
+				end
 			end
-		end
 
-		setShape(ctx, edge or (anyWithMouseDown and "hand2" or nil))
+		-- A field is typed in, not pressed: the I-beam says so even when the field or its row
+		-- also answers a click.
+		setShape(ctx, edge or (anyTextInput and "text" or anyWithMouseDown and "hand2" or nil))
 
 		for el, layout in pairs(hoveredElements) do
-			local handler = callbacks[el.onmousemove]
+				local handler = callbacks[el.onmousemove]
 
-			if handler then
-				local relX = event.x - layout.absX
-				local relY = event.y - layout.absY
-				return handler(relX, relY, layout.node.width, layout.node.height, ctx.modifiers)
+				if handler then
+					local relX = event.x - layout.absX
+					local relY = event.y - layout.absY
+					return handler(relX, relY, layout.node.width, layout.node.height, ctx.modifiers)
+				end
 			end
-		end
 	elseif event.name == "mousePress" then
 		local ctx = self.contexts[event.window]
 		setPointer(ctx, event.x, event.y, true)
@@ -1661,12 +1743,13 @@ function Layout:event(event)
 		-- The button that is not the left one is a menu where the pointer is, and nothing else:
 		-- what answers a click is not told about it, and the keyboard stays where it was.
 		if button == 3 then
-			local pressed = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0,
-				hasContextMenu)
+			local pressed = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y,
+			hasContextMenu)
 
 			if pressed then
 				return contextMessage(callbacks[pressed.element.oncontextmenu], event.x - pressed.absX,
-					event.y - pressed.absY, pressed.node.width, pressed.node.height, ctx.modifiers)
+				event.y - pressed.absY, pressed.node.width, pressed.node.height, ctx.modifiers,
+				event.x, event.y)
 			end
 
 			return nil
@@ -1701,7 +1784,7 @@ function Layout:event(event)
 			return nil
 		end
 
-		local info = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hasMouseDownOrClick)
+		local info = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y, hasMouseDownOrClick)
 
 		-- Update focus: set on text input click, clear otherwise
 		if info and bit.band(info.element.flags, TEXT_INPUT) ~= 0 then
@@ -1711,11 +1794,12 @@ function Layout:event(event)
 			-- point is at comes from the run the ui walks. Until the ui has placed the caret from
 			-- it, the caret is at the end of the value -- which is what a field that draws none
 			-- gets, and what every click in one did before the ui knew about it.
-			ctx.caretClick = { x = event.x, y = event.y }
+			ctx.caretClick = { x = event.x, y = event.y}
 			-- Where the press was is the other end of the selection a drag makes: a press that is
 			-- let go of where it landed is a caret, and one that is dragged is a selection.
-			ctx.selectFrom = { x = event.x, y = event.y }
+			ctx.selectFrom = { x = event.x, y = event.y}
 			ctx.selecting = true
+			ctx.selectWord = nil
 			ctx.anchorPos = nil
 			ctx.cursorPos = #wonderlandElement.inputOf(info.element)
 			ctx.typed = nil
@@ -1725,17 +1809,19 @@ function Layout:event(event)
 			ctx.caretClick = nil
 			ctx.selectFrom = nil
 			ctx.selecting = nil
+			ctx.selectWord = nil
 			ctx.anchorPos = nil
 		end
 
 		if info then
 			local now = time.now()
-			local isDblClick = (info.element.ondblclick ~= 0)
-				and ctx.lastPressElement == info.element
-				and ctx.lastPressTime
-				and (now - ctx.lastPressTime) <= DOUBLE_CLICK_THRESHOLD
-				and ctx.lastPressX == event.x
-				and ctx.lastPressY == event.y
+			local isTextInput = bit.band(info.element.flags, TEXT_INPUT) ~= 0
+			local isDblClick = (info.element.ondblclick ~= 0 or isTextInput)
+			and ctx.lastPressElement == info.element
+			and ctx.lastPressTime
+			and (now - ctx.lastPressTime) <= DOUBLE_CLICK_THRESHOLD
+			and ctx.lastPressX == event.x
+			and ctx.lastPressY == event.y
 
 			ctx.lastPressElement = info.element
 			ctx.lastPressTime = now
@@ -1745,7 +1831,22 @@ function Layout:event(event)
 			if isDblClick then
 				ctx.lastPressElement = nil
 				ctx.lastPressTime = nil
-				return callbacks[info.element.ondblclick]
+
+				if isTextInput then
+					-- The press is already where the caret goes; the ui turns that point into a
+					-- byte and setCaret grows it to the word around it.
+					ctx.caretClick = { x = event.x, y = event.y}
+					ctx.selectFrom = nil
+					ctx.selecting = nil
+					ctx.anchorPos = nil
+					ctx.selectWord = true
+				end
+
+				if info.element.ondblclick ~= 0 then
+					return callbacks[info.element.ondblclick]
+				end
+
+				return nil
 			end
 
 			if info.element.onclick ~= 0 then
@@ -1792,12 +1893,12 @@ function Layout:event(event)
 		-- them, and a window with no box for them hands the event to the app -- which is what a
 		-- screen that takes a file anywhere on it does.
 		if ctx then
-			local hit = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0,
-				hasDrop)
+			local hit = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y,
+			hasDrop)
 
 			if hit then
 				return dropMessage(callbacks[hit.element.ondrop], event.paths or {}, event.x - hit.absX,
-					event.y - hit.absY)
+				event.y - hit.absY)
 			end
 		end
 	elseif event.name == "keyPress" then
@@ -1810,7 +1911,7 @@ function Layout:event(event)
 		-- presses are its own is not something that can be worked out from what arrives: it is what
 		-- the keyboard is asked -- see the keyboard in winit, which marks the press of a repeat.
 		if self.keyRepeatInterval > 0 and event.repeated == true and ctx ~= nil
-			and ctx.repeatKey == event.key then
+		and ctx.repeatKey == event.key then
 			return nil
 		end
 
@@ -1876,7 +1977,7 @@ function Layout:event(event)
 
 			-- The last place the pointer was is a move of its own: a selection dragged to where the
 			-- pointer was let go of is the one a person made, and the release does not move it.
-			ctx.caretClick = { x = event.x, y = event.y }
+			ctx.caretClick = { x = event.x, y = event.y}
 
 			return nil
 		end
@@ -1888,7 +1989,7 @@ function Layout:event(event)
 			return report(drag, event.x, event.y)
 		end
 
-		local info = findElementAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hasMouseUp)
+		local info = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y, hasMouseUp)
 
 		if info then
 			local relX = event.x - info.absX

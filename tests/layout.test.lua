@@ -46,6 +46,19 @@ test.it("a style kept for the pointer says only what it names", function()
 	test.equal(node.bgB, 0.0)
 end)
 
+-- A background is also something a style can introduce: the base box may draw nothing until the
+-- pointer is over it, and the frame still has to be told that the hover style paints.
+test.it("a style that adds a background paints", function()
+	local button = div():style(sty():size(200, 44)):hover(sty():bg("#ff0000"))
+
+	wonderlandElement.hovering(button, true)
+
+	local node = solve(button, 400, 300):node(1)
+	test.equal(node.paint, 1, "the hover style is a box that draws")
+	test.equal(node.bgR, 255)
+	test.equal(node.bgG, 0.0)
+end)
+
 -- Brightness is how a hover or active style usually says what it wants: the colours an element
 -- already has, lit differently, rather than a second set of them to keep in step.
 test.it("a bright style lights the colours the element already has", function()

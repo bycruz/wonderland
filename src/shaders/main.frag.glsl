@@ -44,6 +44,7 @@ layout(location = 6) flat in float own;
 // blur of nought for a quad that asked for none, which is nearly all of them.
 layout(location = 7) flat in vec4 uvRect;
 layout(location = 8) flat in float blur;
+layout(location = 9) flat in float border;
 
 // What a blurred quad is sampled with: the taps of it, as offsets from the pixel being drawn, in
 // steps of the stride below, and what each of them is worth. The weights are a gaussian of the
@@ -137,6 +138,15 @@ void main() {
         vec2 q = abs(corner) - inner;
         float outside = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - edge.x;
 
-        fragColor.a *= clamp(0.5 - outside * edge.y, 0.0, 1.0);
+        float outer = clamp(0.5 - outside * edge.y, 0.0, 1.0);
+
+        if (border > 0.5) {
+            // The inside edge of a ring is the same rounded box, moved in by the border's
+            // thickness: between the two edges is the only part that keeps its colour.
+            float innerEdge = clamp(0.5 + (outside + border) * edge.y, 0.0, 1.0);
+            fragColor.a *= outer * innerEdge;
+        } else {
+            fragColor.a *= outer;
+        }
     }
 }

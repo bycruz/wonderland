@@ -270,8 +270,8 @@ test.skipIf(not canRender)("gives a press of the right button to the context men
 		return div():style(sty():fill():column()):children({
 			div():style(sty():w(100):h(60)):children(text("a row"))
 				:onClick({ type = "click" })
-				:onContextMenu(function(x, y)
-					return { type = "menu", x = x, y = y }
+				:onContextMenu(function(x, y, _, _, _, windowX, windowY)
+					return { type = "menu", x = x, y = y, windowX = windowX, windowY = windowY }
 				end),
 			div():style(sty():w(100):h(60)):onMouseDown(function(_, _, _, _, modifiers)
 				---@cast modifiers winit.KeyModifiers
@@ -288,6 +288,8 @@ test.skipIf(not canRender)("gives a press of the right button to the context men
 
 	test.equal(assert(message).type, "menu", "the right button opens a menu")
 	test.equal(assert(message).x, 20, "where in the box it was pressed")
+	test.equal(assert(message).windowX, 20, "and where in the window")
+	test.equal(assert(message).windowY, 20)
 
 	send(screen, { name = "mouseRelease", x = 20, y = 20, button = 3 })
 
@@ -685,4 +687,31 @@ test.skipIf(not canRender or emojiPath == nil)("draws an emoji in its own colour
 
 	test.greater(green, 40, string.format("the square of it is its own green: %d pixels", green))
 	test.greater(white, 4, "and the check on it is drawn as it is")
+end)
+
+test.skipIf(not canRender)("a text field asks for the typing cursor, even when it also clicks", function()
+	local asked = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill()):children(
+			div():style(sty():w(200):h(40)):input({
+				name = "field",
+				value = "",
+				oninput = function() return { type = "typed" } end,
+			}):onClick({ type = "focused" })
+		)
+	end)
+
+	screen.window.cursors = { text = true, hand2 = true }
+	screen.window.setCursor = function(_, shape)
+		asked[#asked + 1] = shape
+	end
+	screen.window.resetCursor = function()
+		asked[#asked + 1] = "default"
+	end
+
+	send(screen, { name = "mouseMove", x = 50, y = 20 })
+	test.equal(asked[#asked], "text", "a field is typed in, not pressed")
+
+	screen:close()
 end)

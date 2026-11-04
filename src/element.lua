@@ -84,6 +84,8 @@ element.GROWS = 256
 --- size it was when it was grabbed, and how far the pointer has moved since -- so the app is what
 --- keeps the size, as it is what keeps the value of a slider.
 element.RESIZE = 512
+-- A box that shows only what is inside it, without being a pane that can be scrolled.
+element.CLIPS = 1024
 
 --- The edges a box can be resized by, which is the name an app uses said as the number the
 --- element keeps: which way the pointer moves is which way the box grows, so dragging the left
@@ -171,7 +173,7 @@ element.Element = Element
 --- What a box is asked when it is pressed with a button that is not the left one, and what it
 --- answers with: the message the app is told. The modifiers are the ones held when it was pressed,
 --- which is the last the keyboard said.
----@alias wonderland.ContextMenuHandler fun(x: number, y: number, width: number, height: number, modifiers: winit.KeyModifiers?): any?
+---@alias wonderland.ContextMenuHandler fun(x: number, y: number, width: number, height: number, modifiers: winit.KeyModifiers?, windowX: number, windowY: number): any?
 
 --- What a box is asked when files are dropped on it: the paths, and where in the box they landed.
 --- It answers with the message the app is told.
@@ -268,7 +270,7 @@ end
 ---@param self wonderland.Element
 local function check(self)
 	assert(self.frame == frame,
-		"This element was made in an earlier frame: an element is built by the view function and used in the repaint it was built for")
+	"This element was made in an earlier frame: an element is built by the view function and used in the repaint it was built for")
 end
 
 --- Every repaint builds its tree again, so the frame starts empty: the elements are
@@ -278,20 +280,20 @@ function element.beginFrame()
 	count = 0
 
 	for index = 1, stringCount do
-		strings[index] = nil
-	end
+			strings[index] = nil
+		end
 
 	for index = 1, callbackCount do
-		callbacks[index] = nil
-	end
+			callbacks[index] = nil
+		end
 
 	for index = 1, runCount do
-		runs[index] = nil
-	end
+			runs[index] = nil
+		end
 
 	for index = 1, dataCount do
-		data[index] = nil
-	end
+			data[index] = nil
+		end
 
 	stringCount, callbackCount, runCount, dataCount = 0, 0, 0, 0
 end
@@ -466,17 +468,17 @@ function methods:children(...)
 
 	local after = lastChild(self)
 
-	for index = 1, select("#", ...) do
-		local value = select(index, ...)
+	for index = 1, select("#",...) do
+			local value = select(index,...)
 
-		if type(value) == "table" then
-			for _, nested in ipairs(value) do
-				after = link(self, after, intoElement(nested))
+			if type(value) == "table" then
+				for _, nested in ipairs(value) do
+						after = link(self, after, intoElement(nested))
+					end
+			else
+				after = link(self, after, intoElement(value))
 			end
-		else
-			after = link(self, after, intoElement(value))
 		end
-	end
 
 	return self
 end
@@ -661,6 +663,18 @@ function methods:scroll(offset)
 	return self
 end
 
+--- Shows only what is inside the box, following its rounded corners, without making it a pane
+--- that a wheel or a scroll bar can move. The clip is for decoration -- a picture mosaic whose
+--- tiles should not spill past its radius.
+---@return wonderland.Element
+---@param self wonderland.Element
+function methods:clip()
+	check(self)
+	self.flags = bit.bor(self.flags, element.CLIPS)
+
+	return self
+end
+
 ---@class wonderland.InputOpts<T>
 ---@field name string
 ---@field value string
@@ -748,10 +762,10 @@ end
 --- What edges are called, as the numbers an element keeps them as.
 ---@type table<string, integer>
 local EDGES = {
-	right = element.EDGE_RIGHT,
-	left = element.EDGE_LEFT,
-	top = element.EDGE_TOP,
-	bottom = element.EDGE_BOTTOM,
+right = element.EDGE_RIGHT,
+left = element.EDGE_LEFT,
+top = element.EDGE_TOP,
+bottom = element.EDGE_BOTTOM,
 }
 
 --- A box a press near one of its edges resizes: what is reported is how big the box has been asked
@@ -818,7 +832,7 @@ element.sty = style.new
 -- and pays no call for it. They are the same tables every frame: what changes is how far
 -- into them the frame has written.
 element.strings, element.callbacks, element.runs, element.data, element.pointers = strings, callbacks, runs, data,
-	pointers
+pointers
 
 --- A measured line, kept for this frame, and the handle an element holds of it. A run is
 --- interned by the font that measured it, so measuring the same line again is a lookup.
@@ -852,14 +866,14 @@ end
 ---@param on boolean
 function element.hovering(self, on)
 	self.flags = on and bit.bor(self.flags, element.HOVERED)
-		or bit.band(self.flags, bit.bnot(element.HOVERED))
+	or bit.band(self.flags, bit.bnot(element.HOVERED))
 end
 
 ---@param self wonderland.Element
 ---@param on boolean
 function element.pressing(self, on)
 	self.flags = on and bit.bor(self.flags, element.PRESSED)
-		or bit.band(self.flags, bit.bnot(element.PRESSED))
+	or bit.band(self.flags, bit.bnot(element.PRESSED))
 end
 
 --- The line an element draws, if it draws one.

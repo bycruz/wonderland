@@ -25,6 +25,7 @@ local HOVERED, PRESSED = wonderlandElement.HOVERED, wonderlandElement.PRESSED
 local ABS, REL, AUTO = style.ABS, style.REL, style.AUTO
 local PRESENT = style.PRESENT
 local SCROLLS = wonderlandElement.SCROLLS
+local CLIPS = wonderlandElement.CLIPS
 local SLIDE, THUMB = wonderlandElement.SLIDE, wonderlandElement.THUMB
 local GROWS = wonderlandElement.GROWS
 local WIDTH, HEIGHT = PRESENT.width, PRESENT.height
@@ -151,13 +152,13 @@ ffi.cdef [[
 for _, field in ipairs({ "wantWidth", "wantHeight", "bgR", "borderR", "u0", "gap", "zIndex", "paddingTop",
 	"marginTop", "top", "left", "borderTop", "fgR", "texture", "font", "bright", "radius", "blur", "shadowX",
 	"shadowBlur", "shadowA", "widthUnit", "paint", "fontFamily", "fontSize", "fontWeight", "fontItalic",
-	"ellipsis" }) do
-	assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
+	"ellipsis"}) do
+		assert(ffi.offsetof("wl_node", field) == ffi.offsetof("wl_style", field),
 		"wl_node and wl_style disagree about " .. field .. ": the build copies one into the other")
-end
+	end
 
 assert(ffi.offsetof("wl_node", "styleFlags") == ffi.offsetof("wl_style", "flags"),
-	"wl_node and wl_style disagree about their flags")
+"wl_node and wl_style disagree about their flags")
 
 --- How many bytes of a style a node takes: all of it but the scroll bar's, which a box that
 --- scrolls keeps beside its nodes.
@@ -294,22 +295,22 @@ function layout.new(capacity)
 	capacity = capacity or 256
 
 	return setmetatable({
-		nodes = nodeArray(capacity),
-		childIndices = ffi.new("uint32_t[?]", capacity),
-		bars = barArray(capacity),
-		barNone = ffi.new("wl_bar"),
-		records = recordArray(capacity),
-		lastRecords = recordArray(capacity),
-		capacity = capacity,
-		count = 0,
-		childCount = 0,
-		lastCount = 0,
-		lastChildren = 0,
-		lastWidth = 0,
-		lastHeight = 0,
-		changed = true,
-		runs = {},
-		root = 0,
+	nodes = nodeArray(capacity),
+	childIndices = ffi.new("uint32_t[?]", capacity),
+	bars = barArray(capacity),
+	barNone = ffi.new("wl_bar"),
+	records = recordArray(capacity),
+	lastRecords = recordArray(capacity),
+	capacity = capacity,
+	count = 0,
+	childCount = 0,
+	lastCount = 0,
+	lastChildren = 0,
+	lastWidth = 0,
+	lastHeight = 0,
+	changed = true,
+	runs = {},
+	root = 0,
 	}, Screen)
 end
 
@@ -420,6 +421,9 @@ local function applyOver(given, node)
 
 	if bit.band(present, PRESENT.bg) ~= 0 then
 		node.bgR, node.bgG, node.bgB, node.bgA = given.bgR, given.bgG, given.bgB, given.bgA
+		-- The base style may have had nothing to paint, so the style standing in for it is what
+		-- says this box draws at all. Without the flag its new colour never reaches the frame.
+		node.paint = 1
 	end
 
 	if bit.band(present, PRESENT.fg) ~= 0 then
@@ -429,6 +433,7 @@ local function applyOver(given, node)
 	if bit.band(present, PRESENT.texture) ~= 0 then
 		node.texture = given.texture
 		node.u0, node.v0, node.u1, node.v1 = given.u0, given.v0, given.u1, given.v1
+		node.paint = 1
 	end
 
 	if bit.band(present, PRESENT.bright) ~= 0 then
@@ -552,7 +557,8 @@ function Screen:add(element, bright, blur)
 
 	-- A box that scrolls shows only what is inside it: how far its content is moved up is the
 	-- app's, and snapped to a whole pixel so the text in it stays crisp.
-	node.scrolls = bit.band(element.flags, SCROLLS) ~= 0 and 1 or 0
+	node.scrolls = bit.band(element.flags, SCROLLS) ~= 0 and 1
+	or (bit.band(element.flags, CLIPS) ~= 0 and 2 or 0)
 	node.scroll = snap(element.scrollOffset)
 
 	-- How far it is scrolled is kept by the record as well, and is read from the node rather than
@@ -563,7 +569,7 @@ function Screen:add(element, bright, blur)
 	-- A bar is taken out of the content rather than drawn over it, so nothing is under the strip it
 	-- is in. A box that does not scroll has no bar, whatever its style says -- and no bar is
 	-- written for it either, since the nodes the frame is not longer than keep theirs.
-	if node.scrolls ~= 0 then
+	if node.scrolls == 1 then
 		local bar = self.bars[self.count - 1]
 
 		bar.max = 0
@@ -697,7 +703,7 @@ function Screen:build(element, fgR, fgG, fgB, fgA, font, bright, blur)
 		end
 
 		entry.heightUnit, entry.wantHeight = ABS, valueRun.height * lines / valueRun.lineCount
-			+ entry.paddingTop + entry.paddingBottom + entry.borderTop + entry.borderBottom
+		+entry.paddingTop + entry.paddingBottom + entry.borderTop + entry.borderBottom
 	end
 
 	local firstChild = self.childCount + 1
@@ -712,13 +718,13 @@ function Screen:build(element, fgR, fgG, fgB, fgA, font, bright, blur)
 	local child = element.childFirst
 
 	for index = 1, count do
-		local childElement = pointers[child]
-		local childNode = self:build(childElement, entry.fgR, entry.fgG, entry.fgB, entry.fgA, entry.font,
+			local childElement = pointers[child]
+			local childNode = self:build(childElement, entry.fgR, entry.fgG, entry.fgB, entry.fgA, entry.font,
 			entry.bright, entry.blur)
 
-		self.childIndices[firstChild + index - 2] = childNode
-		child = childElement.nextSibling
-	end
+			self.childIndices[firstChild + index - 2] = childNode
+			child = childElement.nextSibling
+		end
 
 	return node
 end
@@ -757,12 +763,12 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 	local availableHeight = parentHeight - node.marginTop - node.marginBottom
 
 	local width = node.widthUnit == AUTO and availableWidth
-		or (node.widthUnit == REL and node.wantWidth * availableWidth)
-		or node.wantWidth
+	or (node.widthUnit == REL and node.wantWidth * availableWidth)
+	or node.wantWidth
 
 	local height = node.heightUnit == AUTO and availableHeight
-		or (node.heightUnit == REL and node.wantHeight * availableHeight)
-		or node.wantHeight
+	or (node.heightUnit == REL and node.wantHeight * availableHeight)
+	or node.wantHeight
 
 	local borderWidth = node.borderLeft + node.borderRight
 	local borderHeight = node.borderTop + node.borderBottom
@@ -782,22 +788,22 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 	local autoCount = 0
 
 	for at = 0, count - 1 do
-		local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+			local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
 
-		if child.position == 1 then
-			-- Placed by hand, so it takes no room in the flow.
-		else
-			local childUnit = isRow and child.widthUnit or child.heightUnit
-			local childWant = isRow and child.wantWidth or child.wantHeight
-
-			if childUnit == 3 then
-				autoCount = autoCount + 1
+			if child.position == 1 then
+				-- Placed by hand, so it takes no room in the flow.
 			else
-				totalMain = totalMain + (childUnit == 2 and childWant * containerMain or childWant)
-				visibleChildren = visibleChildren + 1
+				local childUnit = isRow and child.widthUnit or child.heightUnit
+				local childWant = isRow and child.wantWidth or child.wantHeight
+
+				if childUnit == 3 then
+					autoCount = autoCount + 1
+				else
+					totalMain = totalMain + (childUnit == 2 and childWant * containerMain or childWant)
+					visibleChildren = visibleChildren + 1
+				end
 			end
 		end
-	end
 
 	local totalGaps = math.max(0, count - 1) * node.gap
 	local remaining = containerMain - totalMain - totalGaps
@@ -811,27 +817,27 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 
 	-- Solve the children, then place them.
 	for at = 0, count - 1 do
-		local childIndex = screen.childIndices[first + at - 1]
-		local child = screen.nodes[childIndex - 1]
-		local childUnit = isRow and child.widthUnit or child.heightUnit
+			local childIndex = screen.childIndices[first + at - 1]
+			local child = screen.nodes[childIndex - 1]
+			local childUnit = isRow and child.widthUnit or child.heightUnit
 
-		solveNode(screen, childIndex, contentWidth, contentHeight, childUnit == AUTO and autoSpace or nil, isRow)
-	end
+			solveNode(screen, childIndex, contentWidth, contentHeight, childUnit == AUTO and autoSpace or nil, isRow)
+		end
 
 	totalMain = 0
 	visibleChildren = 0
 
 	for at = 0, count - 1 do
-		local child = assert(screen.nodes[screen.childIndices[first + at - 1] - 1])
+			local child = assert(screen.nodes[screen.childIndices[first + at - 1] - 1])
 
-		if (child.width > 0 or child.height > 0) and child.position ~= 1 then
-			local childMainMargin = isRow and (child.marginLeft + child.marginRight)
+			if (child.width > 0 or child.height > 0) and child.position ~= 1 then
+				local childMainMargin = isRow and (child.marginLeft + child.marginRight)
 				or (child.marginTop + child.marginBottom)
 
-			totalMain = totalMain + (isRow and child.width or child.height) + childMainMargin
-			visibleChildren = visibleChildren + 1
+				totalMain = totalMain + (isRow and child.width or child.height) + childMainMargin
+				visibleChildren = visibleChildren + 1
+			end
 		end
-	end
 
 	totalGaps = math.max(0, visibleChildren - 1) * node.gap
 	totalMain = totalMain + totalGaps
@@ -855,54 +861,54 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 	local placed = 0
 
 	for at = 0, count - 1 do
-		local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
-		local shown = child.width > 0 or child.height > 0
+			local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+			local shown = child.width > 0 or child.height > 0
 
-		if shown and child.position == 1 then
-			-- At the parent's content origin, moved by its own offset.
-			if isRow then
-				child.x = snap(node.paddingLeft + child.x)
-				child.y = snap(node.paddingTop + child.y)
-			else
-				child.y = snap(node.paddingTop + child.y)
-				child.x = snap(node.paddingLeft + child.x)
-			end
-		elseif shown then
-			placed = placed + 1
-			local last = placed == visibleChildren
+			if shown and child.position == 1 then
+				-- At the parent's content origin, moved by its own offset.
+				if isRow then
+					child.x = snap(node.paddingLeft + child.x)
+					child.y = snap(node.paddingTop + child.y)
+				else
+					child.y = snap(node.paddingTop + child.y)
+					child.x = snap(node.paddingLeft + child.x)
+				end
+			elseif shown then
+				placed = placed + 1
+				local last = placed == visibleChildren
 
-			local mainPos = offset + (isRow and node.paddingLeft or node.paddingTop)
-			local childMain = (isRow and child.x or child.y) + mainPos
+				local mainPos = offset + (isRow and node.paddingLeft or node.paddingTop)
+				local childMain = (isRow and child.x or child.y) + mainPos
 
-			if isRow then
-				child.x = snap(childMain)
-			else
-				child.y = snap(childMain)
-			end
+				if isRow then
+					child.x = snap(childMain)
+				else
+					child.y = snap(childMain)
+				end
 
-			offset = offset + (isRow and child.width or child.height) + (last and 0 or spacing)
+				offset = offset + (isRow and child.width or child.height) + (last and 0 or spacing)
 
-			local crossOffset = (isRow and node.paddingTop or node.paddingLeft)
-				+ (isRow and child.y or child.x)
-			local childCrossMargin = isRow and (child.marginTop + child.marginBottom)
+				local crossOffset = (isRow and node.paddingTop or node.paddingLeft)
+				+(isRow and child.y or child.x)
+				local childCrossMargin = isRow and (child.marginTop + child.marginBottom)
 				or (child.marginLeft + child.marginRight)
-			local cross = crossOffset
+				local cross = crossOffset
 
-			if node.align == 1 then
-				cross = crossOffset + (containerCross - (isRow and child.height or child.width) - childCrossMargin) / 2
-			elseif node.align == 2 then
-				cross = crossOffset + containerCross - (isRow and child.height or child.width) - childCrossMargin
-			end
+				if node.align == 1 then
+					cross = crossOffset + (containerCross - (isRow and child.height or child.width) - childCrossMargin) / 2
+				elseif node.align == 2 then
+					cross = crossOffset + containerCross - (isRow and child.height or child.width) - childCrossMargin
+				end
 
-			if isRow then
-				child.y = snap(cross)
-			else
-				child.x = snap(cross)
+				if isRow then
+					child.y = snap(cross)
+				else
+					child.x = snap(cross)
+				end
+
 			end
 
 		end
-
-	end
 
 	-- A slider's nub is a child of it, and is put where the value is rather than where the layout
 	-- stacked it: it travels across the box less its own size, which is what makes the ends of the
@@ -918,30 +924,30 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 		local along = at1 < 0 and 0 or (at1 > 1 and 1 or at1)
 
 		for at = 0, count - 1 do
-			local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+				local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
 
-			if child.thumb ~= 0 then
-				local size = isRow and child.width or child.height
-				local travel = containerMain - size
+				if child.thumb ~= 0 then
+					local size = isRow and child.width or child.height
+					local travel = containerMain - size
 
-				if travel < 0 then
-					travel = 0
-				end
+					if travel < 0 then
+						travel = 0
+					end
 
-				if isRow then
-					child.x = snap(node.paddingLeft + along * travel)
-				else
-					child.y = snap(node.paddingTop + along * travel)
+					if isRow then
+						child.x = snap(node.paddingLeft + along * travel)
+					else
+						child.y = snap(node.paddingTop + along * travel)
+					end
 				end
 			end
-		end
 	end
 
 	-- What is scrolled is shifted, and its own children come with it: their places are relative to
 	-- it, so moving it moves the lot. How far it is shifted is what the content came out to less
 	-- what the box shows -- which is only known once every child is placed -- so an offset past
 	-- the end of the content draws the end rather than a hole. What the app keeps is its own.
-	if node.scrolls ~= 0 then
+	if node.scrolls == 1 then
 		local most = math.max(0, offset - containerMain)
 
 		-- Both ends, not just the far one: an offset below the start would put the content below
@@ -956,14 +962,14 @@ local function solveNode(screen, index, parentWidth, parentHeight, mainOverride,
 
 		if scroll > 0 then
 			for at = 0, count - 1 do
-				local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+					local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
 
-				if isRow then
-					child.x = child.x - scroll
-				else
-					child.y = child.y - scroll
+					if isRow then
+						child.x = child.x - scroll
+					else
+						child.y = child.y - scroll
+					end
 				end
-			end
 		end
 	end
 
@@ -1015,10 +1021,10 @@ local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	end
 
 	for at = 0, node.childCount - 1 do
-		if markNode(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, pressed) then
-			marked = true
+			if markNode(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, pressed) then
+				marked = true
+			end
 		end
-	end
 
 	if node.visible == 0 or not inside then
 		return marked
@@ -1071,14 +1077,14 @@ function Screen:solve(width, height, provisional)
 
 	if os.getenv("WL_DIFF_DEBUG") then
 		print(string.format("solve: count %d/%d, %dx%d/%dx%d, %d bytes of records, same %s", self.count,
-			self.lastCount, width, height, self.lastWidth, self.lastHeight, bytes, tostring(same)))
+		self.lastCount, width, height, self.lastWidth, self.lastHeight, bytes, tostring(same)))
 	end
 
 	self.changed = self.count ~= self.lastCount
-		or self.childCount ~= self.lastChildren
-		or width ~= self.lastWidth
-		or height ~= self.lastHeight
-		or not same
+	or self.childCount ~= self.lastChildren
+	or width ~= self.lastWidth
+	or height ~= self.lastHeight
+	or not same
 
 	if self.changed then
 		ffi.copy(self.lastRecords, self.records, bytes)
@@ -1105,9 +1111,9 @@ end
 local function countElements(element, depth, limit)
 	if depth > limit then
 		error("The element tree holds itself: an element was laid out in a frame later than the one "
-			.. "it was made in. An element is built by the view and used in the repaint it was built "
-			.. "for -- one kept from an earlier frame points at whatever the slot it is in holds now",
-			0)
+		.. "it was made in. An element is built by the view and used in the repaint it was built "
+		.. "for -- one kept from an earlier frame points at whatever the slot it is in holds now",
+		0)
 	end
 
 	local total = 1

@@ -76,7 +76,7 @@ ffi.cdef [[
 		uint32_t rgba;                                 // the colour: a byte a channel, one number
 		uint16_t u0, v0, u1, v1;                       // the part of the picture the box is, of 65535
 		uint16_t radius, band, blur;                   // the cut of it and the spread: pixels, as halves
-		uint8_t own, pad;                              // whether the picture is drawn as it is, of 255
+		uint8_t own, border;                           // whether the picture is drawn as it is, and how thick a ring is, of 255
 	} wl_instance;
 ]]
 
@@ -130,6 +130,7 @@ local INSTANCE_ATTRIBUTES = {
 	{ type = "f32", size = 1, offset = 0, name = "texture" },
 	{ type = "f32", size = 1, offset = 0, name = "z" },
 	{ type = "u8", size = 1, offset = 0, name = "own", normalized = true },
+	{ type = "u8", size = 1, offset = 0, name = "border", normalized = true },
 }
 
 -- Where each of them is, as the descriptor wants it: worked out from the structs at load, so that
@@ -560,6 +561,7 @@ function QuadBatch:quad(left, top, right, bottom, z, colour, texture, uv0, uv1, 
 	-- than narrowed by anything, because nought is nought in both.
 	instance.innerX, instance.innerY = halfX, halfY
 	instance.radius, instance.band, instance.blur = 0, 0, 0
+	instance.border = 0
 
 	finish(self)
 end
@@ -604,6 +606,7 @@ function QuadBatch:points(x1, y1, x2, y2, x3, y3, x4, y4, z, colour, texture)
 	instance.innerX, instance.innerY = math.abs(right - left) * self.scaleX * 0.5,
 		math.abs(bottom - top) * self.scaleY * 0.5
 	instance.radius, instance.band, instance.blur = 0, 0, 0
+	instance.border = 0
 
 	finish(self)
 end
@@ -659,8 +662,9 @@ end
 ---@param boxTop number?
 ---@param boxRight number?
 ---@param boxBottom number?
+---@param border number? # A ring of this many pixels drawn inside the cut, instead of a fill
 function QuadBatch:roundQuad(left, top, right, bottom, z, colour, texture, uv0, uv1, radius, band, own, blur,
-	boxLeft, boxTop, boxRight, boxBottom)
+	boxLeft, boxTop, boxRight, boxBottom, border)
 	if self.quads >= self.capacity then
 		self:reserve(self.capacity + 1)
 	end
@@ -709,6 +713,7 @@ function QuadBatch:roundQuad(left, top, right, bottom, z, colour, texture, uv0, 
 	putPicture(instance, uv0 or 0, uv1 or UV_WHOLE, z, colour, texture, own)
 	putCut(instance, innerX, innerY, radius, band)
 	putBlur(instance, blur or 0)
+	instance.border = math.max(0, math.min(255, math.floor((border or 0) + 0.5)))
 
 	instance.centreX, instance.centreY = centreX, centreY
 
