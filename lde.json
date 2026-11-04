@@ -4,7 +4,7 @@
 	"authors": [
 		"David Cruz <david@bycruz.dev>"
 	],
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"dependencies": {
 		"hood": {
 			"version": "0.2",
@@ -20,7 +20,7 @@
 			"version": "0.1"
 		},
 		"winit": {
-			"path": "../winit/packages/winit"
+			"version": "0.1"
 		}
 	},
 	"devDependencies": {
