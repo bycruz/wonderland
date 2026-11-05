@@ -750,9 +750,11 @@ end
 ---   sty():font("Inter")
 ---   sty():font("Inter", { weight = "semibold", italic = true })
 ---   sty():font("assets/Brand.ttf")
+---   sty():font(wonderland.embedFont("brand-icons", iconBytes))
 ---
 --- A name this machine does not have is drawn in the machine's own sans rather than in nothing:
---- see `wonderland.font.Registry`, which is what knows the names, and `wonderland.FontSpec`.
+--- see `wonderland.font.Registry`, which is what knows the names, and `wonderland.FontSpec`. A name
+--- given to `wonderland.embedFont` is read from its bytes before the machine is asked.
 --- What it changes is one thing about the text inside the element: the size, the weight and the
 --- slant stay what the nearest element above it that named them said. The weight and the slant are
 --- also calls of their own -- `:weight` and `:italic` -- for a style that says nothing about a

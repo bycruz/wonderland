@@ -21,10 +21,12 @@ end
 --- may have neither: what cannot shape is measured a character at a time.
 ---@class wonderland.font.Provider
 ---@field open fun(path: string, index: number?): wonderland.font.Face?, string?
+---@field openBytes fun(content: string, index: number?): wonderland.font.Face?, string?
 ---@field shape fun(face: wonderland.font.Face, text: string, pixelHeight: number): wonderland.font.Shaped?
 ---@field ink fun(face: wonderland.font.Face, glyph: number, pixelHeight: number): wonderland.font.Ink?
 
---- A face: a font file read, as the atlas asks for one.
+--- A face: a font file read, as the atlas asks for one. A face read from bytes is the same kind of
+--- thing; its `path` names no file, and `openBytes` is what made it.
 ---@class wonderland.font.Face
 ---@field path string?
 ---@field index number?
@@ -135,6 +137,30 @@ function reader.open(path, index)
 	assert(texter.available(), texter.why())
 
 	local face, err = provider.open(path, index)
+
+	if face ~= nil then
+		opened[face] = provider
+	end
+
+	return face, err
+end
+
+--- A face, from the bytes of a font rather than from a path. The bytes are handed to the provider
+--- as they are, so no file is made: a bundled face stays bundled in a compiled executable.
+---@param content string
+---@param index number?
+---@return wonderland.font.Face? face
+---@return string? err
+function reader.openBytes(content, index)
+	assert(texter.available(), texter.why())
+
+	local openBytes = provider.openBytes
+
+	if openBytes == nil then
+		return nil, "This reader cannot read a font from bytes"
+	end
+
+	local face, err = openBytes(content, index)
 
 	if face ~= nil then
 		opened[face] = provider

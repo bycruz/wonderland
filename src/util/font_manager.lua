@@ -16,11 +16,12 @@ local Font = require("wonderland.font.font")
 local reader = require("wonderland.font.reader")
 local Atlas = require("wonderland.font.atlas")
 local Registry = require("wonderland.font.registry")
+local embedded = require("wonderland.font.embedded")
 
 --- What an app or a style asks for. Everything but the family is what the element above it said
 --- where the style says nothing, so an app names a family once and a size where it differs.
 ---@class wonderland.FontSpec
----@field family string? # A family name, or a font file to read instead of one
+---@field family string? # A family name, an embedded face's name, or a font file to read instead of one
 ---@field pixelHeight number? # How tall the font is baked, in pixels
 ---@field weight number? # As CSS counts it: 100 to 900, 400 for a regular
 ---@field italic boolean?
@@ -156,6 +157,36 @@ function FontManager:where(spec)
 	return self.registry:path(family, { weight = spec.weight or DEFAULT_WEIGHT, italic = spec.italic or false })
 end
 
+--- A face from the bytes an app registered with `wonderland.embedFont`, read once however many
+--- sizes ask for it. The key is the name rather than where the face came from, because a face from
+--- bytes names no file.
+---@param name string
+---@param content string
+---@return wonderland.font.Face? face
+---@return string? err
+function FontManager:embeddedFace(name, content)
+	local key = "\1" .. name
+	local known = self.faces[key]
+
+	if known ~= nil then
+		if known == false then
+			return nil, "the embedded font " .. name .. " could not be read"
+		end
+
+		return known
+	end
+
+	local face, err = reader.openBytes(content, 0)
+
+	self.faces[key] = face or false
+
+	if face == nil then
+		return nil, err or ("the embedded font " .. name .. " could not be read")
+	end
+
+	return face
+end
+
 --- The font a spec asks for, made now if this is the first thing to ask for it. Every size of a
 --- family is a font of its own and every kind of anything else is shared: the fonts an app has
 --- asked for are kept, so a repaint asks by number and resolves nothing.
@@ -181,26 +212,42 @@ function FontManager:resolve(spec)
 		return known
 	end
 
-	local path, index = self:where(spec)
+	local data = spec.family ~= nil and embedded.get(spec.family) or nil
+	---@type string?
+	local path
+	---@type number?
+	local index
+	---@type wonderland.font.Face?
+	local face
+	---@type string?
+	local err
 
-	if path == nil then
-		return nil, "No font on this machine to draw text with"
+	if data ~= nil then
+		path = "\1embedded:" .. assert(spec.family)
+		face, err = self:embeddedFace(assert(spec.family), data)
+	else
+		path, index = self:where(spec)
+
+		if path == nil then
+			return nil, "No font on this machine to draw text with"
+		end
+
+		face = self:face(path, index)
 	end
 
-	local face = self:face(path, index)
-
 	if face == nil then
-		return nil, string.format("%s could not be read as a font", path)
+		return nil, err or string.format("%s could not be read as a font", assert(path))
 	end
 
 	-- The fonts to ask about a character this one does not draw, in the order worth asking: what a
 	-- title in another language is drawn with. They are read as they are needed, so a screen of
-	-- latin text pays for the one face.
+	-- latin text pays for the one face. An embedded face names no family the machine knows, so the
+	-- machine's own sans follows it rather than nothing at all.
 	local fallbacks = {}
-	local seen = { [path] = true }
+	local seen = { [assert(path)] = true }
 
 	---@type string[]
-	local fallbackPaths = self.registry:fallbacks(spec.family or "sans-serif")
+	local fallbackPaths = self.registry:fallbacks(data ~= nil and "sans-serif" or spec.family or "sans-serif")
 
 	for _, fallback in ipairs(fallbackPaths) do
 		if not seen[fallback] then

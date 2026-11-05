@@ -20,6 +20,7 @@
 --   wonderland.run(app)  run one, if you would rather not call `app:run()`
 --   wonderland.headless  the same screen with no window, for tests and screenshots
 --   wonderland.devtools  what a screen is doing, drawn by the screen: see `wonderland.devtools`
+--   wonderland.embedFont(name, bytes) a face an app carries, for `sty():font(name)`
 --
 -- Pictures are loaded with the asset manager an app is handed when its window is made -- an
 -- app's `self.assets`, and a headless screen's `screen.assets`:
@@ -31,6 +32,7 @@ local element = require("wonderland.element")
 local style = require("wonderland.style")
 local time = require("wonderland.time")
 local Assets = require("wonderland.util.assets")
+local embedded = require("wonderland.font.embedded")
 
 ---@class wonderland
 ---@field div fun(): wonderland.Element
@@ -44,6 +46,7 @@ local Assets = require("wonderland.util.assets")
 ---@field time wonderland.time.Time # Seconds on a clock that only goes forwards
 ---@field app fun(title: string?): wonderland.App
 ---@field run fun(app: wonderland.App)
+---@field embedFont fun(name: string, content: string): string # Names a face by its bytes, for `sty():font`
 local wonderland = {
 	div = element.div,
 	text = element.text,
@@ -57,6 +60,7 @@ local wonderland = {
 	time = time,
 	app = app.new,
 	run = app.run,
+	embedFont = embedded.register,
 }
 
 return wonderland

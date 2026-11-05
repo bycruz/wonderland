@@ -10,7 +10,9 @@ local ffi = require("ffi")
 local test = require("lde-test")
 local Atlas = require("wonderland.font.atlas")
 local Font = require("wonderland.font.font")
+local FontManager = require("wonderland.util.font_manager")
 local Registry = require("wonderland.font.registry")
+local embedded = require("wonderland.font.embedded")
 local reader = require("wonderland.font.reader")
 local utf8 = require("wonderland.font.utf8")
 
@@ -148,6 +150,9 @@ local realProvider = reader.get()
 local function aShapedReader(face, shape)
 	reader.set({
 		open = function()
+			return face
+		end,
+		openBytes = function()
 			return face
 		end,
 		shape = shape,
@@ -529,6 +534,29 @@ test.skipIf(fontPath == nil)("reads a font file, and says what it draws", functi
 	face:freeInk(ink)
 end)
 
+test.skipIf(fontPath == nil)("reads the same font from its bytes", function()
+	local file = assert(io.open(assert(fontPath), "rb"))
+	local content = file:read("*a")
+
+	file:close()
+
+	local face = assert(reader.openBytes(content, 0))
+
+	test.truthy(face:hasGlyph(0x41), "a font from bytes draws the letters a file does")
+	test.greater(face:advance(0x41, 18), 0, "and moves the pen for one")
+
+	local ink = face:ink(0x41, 18)
+
+	test.greater(ink.width, 0, "and has the same ink")
+	face:freeInk(ink)
+
+	local atlas = assert(Atlas.fromBytes({ pixelHeight = 18, characters = "A" },
+		content))
+	local glyph = atlas:getCharUVs("A")
+
+	test.greater(glyph.width, 0, "and an atlas packs it without a file")
+end)
+
 test.skipIf(fontPath == nil)("packs a glyph of a real font, and draws it", function()
 	local atlas = assert(Atlas.fromPath({ pixelHeight = 18, characters = "A" }, assert(fontPath)))
 	local glyph = atlas:getCharUVs("A")
@@ -546,6 +574,32 @@ test.skipIf(fontPath == nil)("packs a character the atlas was never told about",
 
 	test.greater(box.width, 0, "a character drawn for the first time is packed then")
 	test.truthy(box.u1 > box.u0, "and has a place in the picture")
+end)
+
+test.it("reads a face from bytes through a reader that has them", function()
+	local face = aFaceOf({ 0x41 }, 10)
+
+	aShapedReader(face, mirrored)
+
+	test.equal(reader.openBytes("font bytes", 0), face)
+end)
+
+test.it("draws with a face an app registered by its bytes", function()
+	local name = "embedded-" .. tostring({}):match("0x%x+")
+	local face = aFaceOf({ 0x41 }, 10)
+
+	aShapedReader(face, mirrored)
+	embedded.register(name, "font bytes")
+
+	local manager = FontManager.new(nil, {
+		fallbacks = function() return {} end,
+		default = function() return nil end,
+	})
+	local font = assert(manager:resolve({ family = name, pixelHeight = 16 }))
+	local run = font:getRun("A")
+
+	test.equal(font.spec.family, name, "the face is the embedded one")
+	test.greater(run.width, 0, "and it measures text")
 end)
 
 test.it("recognises a font file by its signature", function()

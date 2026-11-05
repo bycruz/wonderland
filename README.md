@@ -71,6 +71,21 @@ end
 App:run()
 ```
 
+## Embedded fonts
+
+A face can travel inside the executable with no file beside it. `embedFont` names its bytes, and
+the name is what a style asks for:
+
+```lua
+local wonderland = require("wonderland")
+local icons = wonderland.embedFont("app-icons", require("app.assets.icons"))
+
+local ICON = wonderland.sty():font(icons):text(20)
+```
+
+The name is resolved before the machine's fonts; if the face lacks a glyph, the machine's own sans
+follows it.
+
 ## Memory
 
 What a screen costs, reported by the app itself:

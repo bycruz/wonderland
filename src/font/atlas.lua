@@ -131,6 +131,29 @@ function Atlas.fromPath(config, path, index)
 	})
 end
 
+--- A face and a size, from the bytes of a font rather than a file: what an app that carries a face
+--- in a Lua module draws with when it has no screen.
+---@param config { pixelHeight: number?, characters: string?, size: number?, pictures: TextureManager? }?
+---@param content string
+---@param index number?
+---@return wonderland.font.Atlas? atlas
+---@return string? err
+function Atlas.fromBytes(config, content, index)
+	local face, err = reader.openBytes(content, index)
+
+	if face == nil then
+		return nil, err
+	end
+
+	local opts = config or {}
+
+	return Atlas.new(face, opts.pixelHeight or 16, {
+		pictures = opts.pictures,
+		characters = opts.characters,
+		size = opts.size,
+	})
+end
+
 ---@param content string
 ---@return boolean
 function Atlas.isValid(content)
