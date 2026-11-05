@@ -4,7 +4,7 @@
 	"authors": [
 		"David Cruz <david@bycruz.dev>"
 	],
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"dependencies": {
 		"hood": {
 			"version": "0.2",
