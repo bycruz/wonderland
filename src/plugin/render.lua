@@ -18,16 +18,20 @@ local shaderExt = backend.shaderExt
 ---@field capture wonderland.plugin.Render.Capture?
 ---@field clear wonderland.Color
 ---@field quadPipeline hood.Pipeline
----@field quadInstance hood.Buffer # The instances of the frame's quads, one a quad
----@field quadCorner hood.Buffer # The four corners every quad of it is drawn as
+---@field frames wonderland.plugin.Render.Frame[] # The gpu's copies of the frame, one a frame the swapchain can have in flight
+---@field drawn wonderland.plugin.Render.Frame? # The copy the last frame was drawn from
+---@field instances ffi.cdata* # uint8_t*, the instances of the frame's quads as the ui handed them over
+---@field instanceBytes number # How many bytes of them the frame is
+---@field corners ffi.cdata* # wl_corner*, the four corners every quad of it is drawn as
+---@field version number # Counts the frames handed over, so a copy behind it is written again
 ---@field quadIndex hood.Buffer
 ---@field target hood.Texture? # What this frame draws into, taken before the screen is built for it
 ---@field targetView hood.TextureView?
 ---@field targetWidth number # And how big it is, which is what a screen of this frame is laid out at
 ---@field targetHeight number
 ---@field quadRuns ffi.cdata*? # uint32_t*, the texture and first quad of each run
----@field instanceCapacity number # Bytes the instance buffer holds before it grows
----@field cornerCapacity number # How many corners the corner buffer holds, which never changes
+---@field instanceCapacity number # Bytes `instances` holds before it grows
+---@field cornerCapacity number # How many corners there are, which never changes
 ---@field runCapacity number # How many runs of quads fit before the run buffer grows
 ---@field runCount number # How many the frame the gpu has was drawn with
 ---@field quads number # And how many quads it was, which is where the last run ends
@@ -37,6 +41,20 @@ local shaderExt = backend.shaderExt
 ---@field screen? wonderland.Layout.Screen
 ---@field root? number
 ---@field drawRetries number? # Frames asked for in a row with no texture to draw into
+
+--- The gpu's copy of a frame, for one of the frames a swapchain has in flight.
+---
+--- A frame is drawn while the next is being built, and a mapped buffer is written by the cpu the
+--- moment it is written to: one buffer for every frame is a frame whose instances change under it
+--- while the gpu is still drawing it -- a glyph drawn from a picture's band, a picture from a sheet
+--- of glyphs, a quad from where the next frame put it, which is a screen that flashes whenever it
+--- changes. A copy per frame in flight is written only once the swapchain has waited for the frame
+--- that last drew from it.
+---@class wonderland.plugin.Render.Frame
+---@field instance hood.Buffer?
+---@field instanceCapacity number # Bytes the instance buffer holds
+---@field corner hood.Buffer
+---@field version number # Which handed-over frame the buffers hold
 
 --- An offscreen target a frame can be read back from.
 ---
@@ -97,8 +115,7 @@ function RenderPlugin.new(windowPlugin, opts)
 end
 
 --- A frame writes the instances of its quads into this, so it starts at a screenful and grows when
---- a bigger one comes along, rather than reserving the worst case for every app. Growing waits for
---- the queue because a frame still in flight is reading it.
+--- a bigger one comes along, rather than reserving the worst case for every app.
 ---@param ctx wonderland.plugin.Render.Context
 ---@param instanceBytes number
 function RenderPlugin:reserve(ctx, instanceBytes)
@@ -106,20 +123,12 @@ function RenderPlugin:reserve(ctx, instanceBytes)
 		return
 	end
 
-	self:getDevice().queue:waitIdle()
-
 	local instanceCapacity = math.max(ctx.instanceCapacity, 1)
 	while instanceCapacity < instanceBytes do
 		instanceCapacity = instanceCapacity * 2
 	end
 
-	ctx.quadInstance:destroy()
-
-	ctx.quadInstance = self:getDevice():createBuffer({
-		size = instanceCapacity,
-		usages = { "VERTEX", "COPY_DST" },
-		mapped = true
-	})
+	ctx.instances = ffi.new("uint8_t[?]", instanceCapacity)
 	ctx.instanceCapacity = instanceCapacity
 end
 
@@ -127,28 +136,88 @@ end
 --- the four corners every quad is drawn as, and the runs of quads that share a picture, which are
 --- the draw calls it comes to.
 ---
---- The runs are copied rather than referred to, because the batch the ui writes into is one batch
+--- All of it is copied rather than referred to, because the batch the ui writes into is one batch
 --- and a screen with two windows in it is two frames: what a context is drawn from is what it was
---- handed, not what the window after it put there.
+--- handed, not what the window after it put there. It reaches the gpu when it is drawn: see
+--- `RenderPlugin:upload`.
 ---@param window wonderland.RenderWindow
 ---@param batch wonderland.QuadBatch
 function RenderPlugin:setRenderData(window, batch)
 	local ctx = self:getContext(window)
 
 	local instanceSize = batch:instanceBytes()
-	local cornerSize = ffi.sizeof("wl_corner") * QuadBatch.CORNERS
 
 	self:reserve(ctx, instanceSize)
 	self:reserveRuns(ctx, batch.runCount)
 
-	self:getDevice().queue:writeBuffer(ctx.quadInstance, instanceSize, batch.instances)
-	self:getDevice().queue:writeBuffer(ctx.quadCorner, cornerSize, batch.corners)
+	ffi.copy(ctx.instances, batch.instances, instanceSize)
+	ffi.copy(ctx.corners, batch.corners, ffi.sizeof("wl_corner") * QuadBatch.CORNERS)
+	ctx.instanceBytes = instanceSize
+	ctx.version = ctx.version + 1
 
 	local quadRuns = ctx.quadRuns --[[@as ffi.cdata*]]
 	ffi.copy(quadRuns, batch.runs, batch.runCount * QuadBatch.RUN_NUMBERS * ffi.sizeof("uint32_t"))
 
 	ctx.runCount = batch.runCount
 	ctx.quads = batch.quads
+end
+
+--- The gpu's copy of the frame for the frame being drawn, written if it is behind.
+---
+--- A swapchain's frame is one of the frames it has in flight, and taking its texture waited for
+--- the last frame drawn in the same place: that frame's copy is free, and no other one is. A screen
+--- with no swapchain waits for the queue instead, since nothing waited for the frame before it.
+---@param ctx wonderland.plugin.Render.Context
+---@return wonderland.plugin.Render.Frame
+function RenderPlugin:upload(ctx)
+	local swapchain = ctx.swapchain
+	---@diagnostic disable-next-line: undefined-field
+	local slot = swapchain and swapchain.currentFrame or 1
+	local device = self:getDevice()
+	local frame = ctx.frames[slot]
+
+	if frame == nil then
+		-- Mapped, because a screen is written again every time it changes: without it each
+		-- write is a staged upload with a submit and a queue wait behind it, which measured
+		-- four tenths of a millisecond per repaint however small the screen was.
+		frame = {
+			instanceCapacity = 0,
+			version = -1,
+			corner = device:createBuffer({
+				size = ffi.sizeof("wl_corner") * QuadBatch.CORNERS,
+				usages = { "VERTEX", "COPY_DST" },
+				mapped = true
+			}),
+		}
+		ctx.frames[slot] = frame
+	end
+
+	if frame.version ~= ctx.version then
+		if not swapchain then
+			device.queue:waitIdle()
+		end
+
+		if frame.instanceCapacity < ctx.instanceCapacity then
+			if frame.instance then
+				frame.instance:destroy()
+			end
+
+			frame.instance = device:createBuffer({
+				size = ctx.instanceCapacity,
+				usages = { "VERTEX", "COPY_DST" },
+				mapped = true
+			})
+			frame.instanceCapacity = ctx.instanceCapacity
+		end
+
+		device.queue:writeBuffer(assert(frame.instance), ctx.instanceBytes, ctx.instances)
+		device.queue:writeBuffer(frame.corner, ffi.sizeof("wl_corner") * QuadBatch.CORNERS, ctx.corners)
+		frame.version = ctx.version
+	end
+
+	ctx.drawn = frame
+
+	return frame
 end
 
 --- How many runs of quads fit before the buffer they are handed over in grows. A run is two
@@ -307,24 +376,8 @@ function RenderPlugin:createContext(window, swapchain)
 	-- indices of the same screen used to be a megabyte of them.
 	local instanceCapacity = QuadBatch.INSTANCE_SIZE * INITIAL_QUADS
 
-	-- Mapped, because a screen is written again every time it changes: without it each
-	-- write is a staged upload with a submit and a queue wait behind it, which measured
-	-- four tenths of a millisecond per repaint however small the screen was.
-	local quadInstance = self:getDevice():createBuffer({
-		size = instanceCapacity,
-		usages = { "VERTEX", "COPY_DST" },
-		mapped = true
-	})
-
-	-- The corners every quad of every frame is drawn as, and the indices that draw them: written
-	-- once, since neither of them is anything a quad says. The corners carry how many pixels a
-	-- coordinate of a quad is worth, which changes when the window does -- so a frame writes them
-	-- again, and a frame that does not is four corners left alone.
-	local quadCorner = self:getDevice():createBuffer({
-		size = ffi.sizeof("wl_corner") * QuadBatch.CORNERS,
-		usages = { "VERTEX", "COPY_DST" },
-		mapped = true
-	})
+	-- The indices every quad is drawn with: written once, since they are nothing a quad says, and
+	-- read by every frame alike.
 	local quadIndex = self:getDevice():createBuffer({
 		size = ffi.sizeof("uint16_t") * 6,
 		usages = { "INDEX", "COPY_DST" },
@@ -396,12 +449,15 @@ function RenderPlugin:createContext(window, swapchain)
 	local ctx = {
 		window = window,
 		swapchain = swapchain,
+		frames = {},
+		instances = ffi.new("uint8_t[?]", instanceCapacity),
+		instanceBytes = 0,
 		instanceCapacity = instanceCapacity,
+		corners = ffi.new("wl_corner[?]", QuadBatch.CORNERS),
+		version = 0,
 		cornerCapacity = QuadBatch.CORNERS,
 		clear = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 },
 		quadPipeline = quadPipeline,
-		quadInstance = quadInstance,
-		quadCorner = quadCorner,
 		quadIndex = quadIndex,
 		runCapacity = 0,
 		runCount = 0,
@@ -522,7 +578,9 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height, depthView
 	})
 	encoder:setPipeline(ctx.quadPipeline)
 	encoder:setViewport(0, 0, width, height)
-	encoder:setVertexBuffer(0, ctx.quadCorner)
+	-- The copy of the frame this one was uploaded into: see `RenderPlugin:upload`.
+	local frame = assert(ctx.drawn, "a frame is recorded after it is uploaded")
+	encoder:setVertexBuffer(0, frame.corner)
 	encoder:setIndexBuffer(ctx.quadIndex, "u16")
 
 	-- A run at a time, in the order the walk wrote them: every quad of a run samples the picture
@@ -548,7 +606,7 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height, depthView
 				or ctx.quads
 
 			encoder:setBindGroup(0, manager:bindGroup(texture))
-			encoder:setVertexBuffer(1, ctx.quadInstance, first * QuadBatch.INSTANCE_SIZE)
+			encoder:setVertexBuffer(1, assert(frame.instance), first * QuadBatch.INSTANCE_SIZE)
 			encoder:drawIndexed(6, after - first, 0, 0, 0)
 		end
 	end
@@ -728,6 +786,7 @@ function RenderPlugin:draw(ctx)
 
 	local encoder = self:frameEncoder(ctx)
 
+	self:upload(ctx)
 	self:recordFrame(ctx, encoder, view, width, height)
 
 	if ctx.swapchain then
@@ -769,6 +828,10 @@ function RenderPlugin:getPixels(ctx)
 		-- without a frame between them would be the same buffer recorded twice over.
 		local encoder = self:getDevice():createCommandEncoder()
 
+		-- What the screen was last handed, which no frame may have been drawn from yet. The frames
+		-- in flight are waited for, so the copy the swapchain is at is free to be written.
+		self:getDevice().queue:waitIdle()
+		self:upload(ctx)
 		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height, capture.depthView)
 		self:recordCopy(ctx, encoder)
 		self:getDevice().queue:submit(encoder:finish())
@@ -838,8 +901,12 @@ function RenderPlugin:destroy(window)
 
 	ctx.depthBufferView:destroy()
 	ctx.depthBuffer:destroy()
-	ctx.quadInstance:destroy()
-	ctx.quadCorner:destroy()
+	for _, frame in pairs(ctx.frames) do
+		if frame.instance then
+			frame.instance:destroy()
+		end
+		frame.corner:destroy()
+	end
 	ctx.quadIndex:destroy()
 	ctx.quadPipeline:destroy()
 
