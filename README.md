@@ -1,6 +1,6 @@
 # wonderland
 
-A cross platform UI library for LuaJIT with no dependencies, focused on efficiency.
+A cross platform UI library for LuaJIT focused on efficiency.
 
 ## Backends
 
@@ -241,4 +241,3 @@ The panel is part of the screen it is over, so it is rebuilt in the frames the a
 for and costs the app a few hundred quads a frame -- which is why the box of every element is a key
 of its own rather than what is drawn by default: a box is four lines as wide as the window, and a
 screen of a thousand elements is four thousand of them over the app's every frame.
-
