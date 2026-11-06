@@ -17,9 +17,15 @@ local DEFAULT_SIZE = 512
 -- size on one screen, and past that a character is drawn as the advance it takes and no ink.
 local MAX_SHEETS = 16
 
--- How much room is left around a glyph. Sampling is nearest, so a neighbour cannot bleed into a
--- glyph whatever the texture coordinates round to -- this is room for the rounding itself.
+-- How much room is left around a glyph. Sampling is linear, so a glyph a fraction of a pixel off the
+-- grid of its sheet would blend with its neighbour: the padding is what keeps that from reaching it.
 local PADDING = 1
+
+-- How many fractions of a pixel a glyph is kept at. A pen is fractional -- a shaper's advances are,
+-- and so is a line set against the right of its box -- and a glyph whose bitmap sits on the pixel it
+-- is drawn at is spread over two of them by the sampler. At four, a copy is never more than an eighth
+-- of a pixel from where the pen is, which is a fraction of a pixel of softness at any size.
+local PHASES = 4
 
 --- One glyph, packed: where its ink is in its sheet and where that ink sits against the pen and
 --- the baseline.
@@ -60,6 +66,7 @@ local PADDING = 1
 ---@field lineHeight number
 ---@field glyphs table<number, wonderland.font.Glyph>
 ---@field glyphIds table<number, wonderland.font.Glyph> # The same, by the glyph's own number
+---@field phases number # How many fractions of a pixel a glyph is kept at: one where the reader cannot
 ---@field sheets wonderland.font.Sheet[]
 ---@field pictures TextureManager? # Where a packed sheet is put, where there is one
 ---@field size number # What a sheet is, a side
@@ -89,6 +96,7 @@ function Atlas.new(face, pixelHeight, opts)
 		lineHeight = ascent - descent,
 		glyphs = {},
 		glyphIds = {},
+		phases = reader.subpixel() and PHASES or 1,
 		sheets = {},
 		pictures = pictures,
 		size = (opts and opts.size) or DEFAULT_SIZE,
@@ -259,23 +267,63 @@ function Atlas:hasGlyph(codepoint)
 	return self.face:hasGlyph(codepoint)
 end
 
+--- Which copy of a glyph is nearest where a pen is, and the pixel that pen is in: the glyph's own ink
+--- is measured from a whole pixel, so the fraction of a pixel it sits at is the copy that is drawn.
+---
+--- A reader that draws a glyph at the pixel it is at has one copy, and the position comes back as it
+--- was: what is drawn there is a bitmap on the grid, and where it lands is the line's own business.
+---@param position number
+---@return number phase
+---@return number x
+function Atlas:phaseOf(position)
+	if self.phases == 1 then
+		return 0, position
+	end
+
+	local whole = math.floor(position)
+	local phase = math.floor((position - whole) * self.phases + 0.5)
+
+	-- Rounded up to the far side of the pixel, which is the next pixel's first copy.
+	if phase == self.phases then
+		return 0, whole + 1
+	end
+
+	return phase, whole
+end
+
 --- Where a character's ink goes, packed into a sheet now if this is the first line that draws it.
 ---@param codepoint number
+---@param phase number? # Which fraction of a pixel it is drawn at, where the reader draws one there
 ---@return wonderland.font.Glyph
-function Atlas:glyph(codepoint)
-	local known = self.glyphs[codepoint]
+function Atlas:glyph(codepoint, phase)
+	phase = phase or 0
+
+	local key = codepoint * PHASES + phase
+	local known = self.glyphs[key]
 
 	if known ~= nil then
 		return known
 	end
 
 	local advance = math.floor(self.face:advance(codepoint, self.pixelHeight) + 0.5)
-	local ink = self.face:ink(codepoint, self.pixelHeight)
+	local ink = self.face:ink(codepoint, self.pixelHeight, self:offset(phase))
 	local glyph = self:pack(ink, advance)
 
-	self.glyphs[codepoint] = glyph
+	self.glyphs[key] = glyph
 
 	return glyph
+end
+
+--- How far past the pixel a glyph is asked for, as the fraction of one it is kept at: the reader's
+--- own, or nothing where it draws every glyph at the pixel it sits on.
+---@param phase number
+---@return number?
+function Atlas:offset(phase)
+	if self.phases == 1 or phase == 0 then
+		return nil
+	end
+
+	return phase / self.phases
 end
 
 --- Where one glyph of a font goes, by the number the font gave it rather than by the character it was
@@ -284,17 +332,21 @@ end
 --- advance the shaper gave for that occurrence, which differs across a kerned pair.
 ---@param glyph number # Which glyph of the face it is
 ---@param advance number # How far the pen moved for it, in whole pixels
+---@param phase number? # Which fraction of a pixel it is drawn at: see `Atlas.offset`
 ---@return wonderland.font.Glyph
-function Atlas:byGlyph(glyph, advance)
-	local known = self.glyphIds[glyph]
+function Atlas:byGlyph(glyph, advance, phase)
+	phase = phase or 0
+
+	local key = glyph * PHASES + phase
+	local known = self.glyphIds[key]
 
 	if known ~= nil then
 		return known
 	end
 
-	local packed = self:pack(reader.ink(self.face, glyph, self.pixelHeight), advance)
+	local packed = self:pack(reader.ink(self.face, glyph, self.pixelHeight, self:offset(phase)), advance)
 
-	self.glyphIds[glyph] = packed
+	self.glyphIds[key] = packed
 
 	return packed
 end

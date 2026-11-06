@@ -77,7 +77,7 @@ end
 ---@field advance number # And how far it moved it
 ---@field texture number
 ---@field cluster number # The byte of the line it came from, from nought
----@field own number
+---@field own number # How it is drawn: 0 as a shape through the colour, 1 as its own picture, 2 as coverage
 
 --- One line of a run.
 ---@class wonderland.font.Line: ffi.cdata*
@@ -382,18 +382,22 @@ function Font:getRun(text, maxWidth)
 
 					for index = 1, #glyphs do
 							local glyph = glyphs[index]
-							local ink = atlas:byGlyph(glyph.glyph, math.floor(glyph.advance + 0.5))
+							-- Where the pen is for this glyph, and which copy of it is drawn there: a glyph
+							-- kept at the fraction of a pixel the pen is at is drawn from that copy, on the
+							-- pixel it starts at, and the sampler never spreads it over two.
+							local phase, x = atlas:phaseOf(pen + glyph.x)
+							local ink = atlas:byGlyph(glyph.glyph, math.floor(glyph.advance + 0.5), phase)
 							local into = assert(array)[written]
 							---@cast into wonderland.font.PlacedGlyph
 
-							into.x = pen + glyph.x + ink.left
+							into.x = x + ink.left
 							into.y = math.floor(baseline + ink.top + 0.5)
 							into.width, into.height = ink.width, ink.height
 							packUv(into, ink)
 							into.pen, into.advance = pen + piecePen, glyph.advance
 							into.texture = ink.texture
 							into.cluster = piece.from - 1 - base + glyph.cluster
-							into.own = ink.colour and 1 or 0
+							into.own = ink.colour and 1 or 2
 
 							-- The pen position is the advances before it, not where the glyph was drawn: a
 							-- mark is drawn where it sits on a letter and moves nothing, and a caret is a pen.
@@ -416,18 +420,19 @@ function Font:getRun(text, maxWidth)
 
 					while at <= piece.to do
 						local codepoint, after = utf8.decode(text, at)
-						local glyph = atlas:glyph(codepoint)
+						local phase, x = atlas:phaseOf(pen)
+						local glyph = atlas:glyph(codepoint, phase)
 						local into = assert(array)[written]
 						---@cast into wonderland.font.PlacedGlyph
 
-						into.x = pen + glyph.left
+						into.x = x + glyph.left
 						into.y = math.floor(baseline + glyph.top + 0.5)
 						into.width, into.height = glyph.width, glyph.height
 						packUv(into, glyph)
 						into.pen, into.advance = pen, glyph.advance
 						into.texture = glyph.texture
 						into.cluster = at - 1 - base
-						into.own = glyph.colour and 1 or 0
+						into.own = glyph.colour and 1 or 2
 
 						pen = pen + glyph.advance
 						written = written + 1
@@ -502,14 +507,14 @@ function Font:getRun(text, maxWidth)
 				local into = assert(array)[rtl ~= 0 and keepFrom - 1 or first + kept]
 				---@cast into wonderland.font.PlacedGlyph
 
-				into.x = dotsPen + dots.left
+				into.x = math.floor(dotsPen + 0.5) + dots.left
 				into.y = math.floor(baseline + dots.top + 0.5)
 				into.width, into.height = dots.width, dots.height
 				packUv(into, dots)
 				into.pen, into.advance = dotsPen, dots.advance
 				into.texture = dots.texture
 				into.cluster = rtl ~= 0 and 0 or (kept < total and assert(array)[first + kept].cluster or 0)
-				into.own = dots.colour and 1 or 0
+				into.own = dots.colour and 1 or 2
 
 				width = dots.advance + right - (rtl ~= 0 and left or 0)
 				from, count = rtl ~= 0 and keepFrom - 1 or first, kept + 1

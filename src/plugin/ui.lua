@@ -593,10 +593,13 @@ local function lineOffset(node, line)
 		return 0
 	end
 
+	-- A line set against the right of its box starts at a fraction of a pixel whenever the line is
+	-- not a whole number of pixels wide, and a glyph drawn from a fraction is one the sampler spreads
+	-- over two: the line is put on the nearest whole pixel, as the one set from the left is.
 	if node.justify == 1 then
 		return math.floor((node.width - line.width) / 2 + 0.5)
 	elseif node.justify == 2 then
-		return node.width - line.width
+		return math.floor(node.width - line.width + 0.5)
 	end
 
 	return 0
