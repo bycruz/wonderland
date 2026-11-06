@@ -36,9 +36,9 @@ layout(location = 2) flat in int texIndex;
 layout(location = 3) in vec2 corner;
 layout(location = 4) flat in vec2 inner;
 layout(location = 5) flat in vec2 edge;
-// Whether this quad's picture is a picture of its own colours rather than a shape the colour is
-// drawn through: a glyph a font draws as a picture -- an emoji -- is the colours it comes in, and
-// what the vertex colour is of it is how opaque the element holding it is.
+// How this quad's picture is drawn: 0 a shape the colour is drawn through, 1 a picture of its own
+// colours -- an emoji, whose vertex colour is only how opaque the element holding it is -- and 2 the
+// coverage of a glyph, which is drawn through the colour and corrected for gamma: see `TEXT_GAMMA`.
 layout(location = 6) flat in float own;
 // The part of the picture the box this quad is drawn for is, and how far what it draws is spread: a
 // blur of nought for a quad that asked for none, which is nearly all of them.
@@ -63,6 +63,14 @@ const float TAP_CENTRE = 0.152;
 // What the deviation of the offsets above and their weights comes to, as a share of the stride:
 // the stride is the blur that was asked for divided by it.
 const float TAP_STRIDE = 0.8;
+
+// What the coverage of a glyph is corrected by. It is blended into a target that holds encoded
+// colour, and half a pixel of white over black blended there is a value that shows less than half as
+// bright as it should: light text on a dark screen loses the soft half of every edge and reads as
+// jagged. Coverage is raised for light text and lowered for dark by this power, picked by how light
+// the text is, which is the correction DirectWrite and Skia make to a gamma of their own. 1.8 rather
+// than the 2.2 the display is, because full correction makes small text heavier than the platform's.
+const float TEXT_GAMMA = 1.8;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -121,7 +129,14 @@ void main() {
         texColor = fetch(texCoord, band);
     }
 
-    if (own > 0.5) {
+    if (own > 1.5) {
+        float coverage = texColor.a;
+        float light = pow(coverage, 1.0 / TEXT_GAMMA);
+        float dark = 1.0 - pow(1.0 - coverage, 1.0 / TEXT_GAMMA);
+        float luma = dot(vertexColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+
+        fragColor = vec4(vertexColor.rgb, vertexColor.a * mix(dark, light, luma));
+    } else if (own > 0.5) {
         fragColor = vec4(texColor.rgb, texColor.a * vertexColor.a);
     } else {
         fragColor = texColor * vertexColor;

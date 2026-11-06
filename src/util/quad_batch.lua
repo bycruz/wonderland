@@ -457,8 +457,9 @@ local function putPicture(instance, uv0, uv1, z, colour, texture, own)
 	-- by either way.
 	instance.texture = texture
 
-	-- Whether this one's picture is drawn as it is or through the colour, which every quad but a
-	-- glyph says no to.
+	-- How this one's picture is drawn: nought a shape the colour goes through, one a picture of its own
+	-- colours, two the coverage of a glyph, which the shader corrects for gamma. The vertex shader
+	-- reads the byte as the number it is.
 	instance.own = own or 0
 end
 

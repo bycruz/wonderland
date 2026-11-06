@@ -23,7 +23,8 @@ end
 ---@field open fun(path: string, index: number?): wonderland.font.Face?, string?
 ---@field openBytes fun(content: string, index: number?): wonderland.font.Face?, string?
 ---@field shape fun(face: wonderland.font.Face, text: string, pixelHeight: number): wonderland.font.Shaped?
----@field ink fun(face: wonderland.font.Face, glyph: number, pixelHeight: number): wonderland.font.Ink?
+---@field ink fun(face: wonderland.font.Face, glyph: number, pixelHeight: number, opts: { offset: number? }?): wonderland.font.Ink?
+---@field subpixel boolean? # Whether `ink` draws a glyph at the fraction of a pixel `opts.offset` names
 
 --- A face: a font file read, as the atlas asks for one. A face read from bytes is the same kind of
 --- thing; its `path` names no file, and `openBytes` is what made it.
@@ -113,13 +114,25 @@ function reader.shape(face, text, pixelHeight)
 	return provider.shape(face, text, pixelHeight)
 end
 
---- The ink of one glyph of a font, at a size.
+--- The ink of one glyph of a font, at a size, asked for at a fractional position: `offset` is how
+--- far past the pen's pixel the glyph's origin sits, from nought to one. A reader that cannot draw
+--- one there answers with the ink at the pixel itself, which is what `reader.subpixel` says.
 ---@param face wonderland.font.Face
 ---@param glyph number
 ---@param pixelHeight number
+---@param offset number?
 ---@return wonderland.font.Ink
-function reader.ink(face, glyph, pixelHeight)
-	return assert(provider.ink)(face, glyph, pixelHeight)
+function reader.ink(face, glyph, pixelHeight, offset)
+	return assert(provider.ink)(face, glyph, pixelHeight, offset ~= nil and { offset = offset } or nil)
+end
+
+--- Whether the ink of a glyph is drawn at the fraction of a pixel it is asked for. A reader that
+--- draws a glyph at the pixel it sits on leaves it to the sampler, which spreads it over two of
+--- them: one letter crisp and the next soft. Where a reader can, the atlas keeps a copy of a glyph
+--- for each of a few fractions of a pixel and a line picks the one its pen is nearest.
+---@return boolean
+function reader.subpixel()
+	return provider.subpixel == true
 end
 
 --- What is missing, where something is.

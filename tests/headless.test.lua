@@ -197,12 +197,17 @@ end)
 test.skipIf(not canRender)("draws text where the layout put it", function()
 	local pixels, width = renderText(40, 30, "abc", "start")
 
-	-- Being laid out from the left, the ink starts at the left edge and stops well
-	-- short of the right one.
+	-- Being laid out from the left, the ink starts at the left edge and stops well short of the
+	-- right one, and it reaches across the room three letters take. Where one letter's ink stops and
+	-- the next one's starts is the rasteriser's business -- letters set at the spacing the font asks
+	-- for can meet at a pixel -- so what is counted here is the line, not its gaps.
 	local inked = inkRuns(pixels, width, 30)
-	test.equal(#inked, 3, "three letters, three runs of ink")
-	test.truthy(inked[1].first <= 2, "the first starts at the left edge")
-	test.truthy(inked[3].last < 34, "and the last does not reach the right edge")
+	local first, last = inked[1], inked[#inked]
+
+	test.truthy(first ~= nil, "the line is drawn")
+	test.truthy(first.first <= 2, "the first starts at the left edge")
+	test.truthy(last.last < 34, "and the last does not reach the right edge")
+	test.truthy(last.last - first.first >= 18, "and the three letters take the room they take")
 end)
 
 -- A glyph quad is exactly as wide as its ink, so a quad that starts halfway across a
@@ -2985,6 +2990,80 @@ test.skipIf(not canRender)("softens the text inside a blurred box", function()
 	test.truthy(sharpPeak > 0, "the text of a box with no blur is drawn in ink of its own")
 	test.truthy(softPeak < sharpPeak, "the text of a blurred box is not as dark as it was")
 	test.truthy(softColumns > sharpColumns, "and its ink reaches further across the box than it did")
+end)
+
+-- A pen is not always on a pixel: what HarfBuzz and CoreText place a line with are fractions of a
+-- pixel, and so is a line set against the right of its box. A reader that draws a glyph at the pixel
+-- it sits on leaves the fraction to the sampler, which spreads the glyph over a column it had no ink
+-- in and makes it fainter -- one letter crisp, the next soft. Where the reader draws a glyph at the
+-- fraction itself, the atlas keeps a copy for each quarter of a pixel and the line picks the one its
+-- pen is nearest: the ink never grows a column, and none of it is diluted.
+test.skipIf(not canRender)("draws a letter between pixels without spreading it over them", function()
+	local reader = require("wonderland.font.reader")
+	local real = reader.get()
+
+	---@param shift number # How far every glyph of the line is placed past where the font put it
+	---@return string pixels
+	---@return number columns # How many columns have ink on them
+	---@return number peak # And the most ink any pixel of the line has
+	local function drawn(shift)
+		reader.set(setmetatable({
+			shape = function(face, value, pixelHeight, opts)
+				local line = real.shape(face, value, pixelHeight, opts)
+
+				for _, glyph in ipairs(line.glyphs) do
+					glyph.x = glyph.x + shift
+				end
+
+				return line
+			end,
+		}, { __index = real }))
+
+		local ok, pixels, columns, peak = pcall(function()
+			local screen = wonderland.headless.new(function()
+				return div():style({ width = { abs = 64 }, height = { abs = 24 }, direction = "column",
+					bg = BLACK, fg = WHITE, fontSize = 16 }):children({ text("lil") })
+			end, { width = 64, height = 24, fontPath = assert(fontPath) })
+
+			screen:draw()
+			local drawnPixels = assert((screen:getPixels()))
+			screen:close()
+
+			local count, most = 0, 0
+
+			for x = 0, 63 do
+				local column = 0
+
+				for y = 0, 23 do
+					column = math.max(column, select(1, pixelAt(drawnPixels, 64, x, y)) or 0)
+				end
+
+				if column > 30 then
+					count = count + 1
+				end
+
+				most = math.max(most, column)
+			end
+
+			return drawnPixels, count, most
+		end)
+
+		reader.set(real)
+		assert(ok, pixels)
+
+		return pixels, columns, peak
+	end
+
+	local whole, wholeColumns, wholePeak = drawn(0)
+	local quarter, quarterColumns, quarterPeak = drawn(0.25)
+	local half, halfColumns, halfPeak = drawn(0.5)
+
+	test.equal(wholeColumns, quarterColumns, "a quarter of a pixel along, the line has ink in the same columns")
+	test.equal(wholeColumns, halfColumns, "and half a pixel along, in those columns still")
+	test.truthy(quarterPeak >= wholePeak * 0.6, string.format("and its ink is not diluted: %d of %d", quarterPeak, wholePeak))
+	test.truthy(halfPeak >= wholePeak * 0.6, string.format("nor is it at half a pixel: %d of %d", halfPeak, wholePeak))
+	test.truthy(half ~= whole and half ~= drawn(1),
+		"and half a pixel along is neither where the pixel is nor where the next one is")
 end)
 
 test.skipIf(not canRender)("draws the frame of a gif the clock is on", function()

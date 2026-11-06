@@ -22,7 +22,7 @@ layout(location = 6) in vec3 aCut;        // how round its corners are, how shar
 layout(location = 7) in vec4 aColour;     // the colour it is drawn in
 layout(location = 8) in float aTexture;   // which picture it samples
 layout(location = 9) in float aDepth;     // and how deep it is
-layout(location = 10) in float aOwn;      // whether the picture is drawn as it is, of one
+layout(location = 10) in float aOwn;      // how the picture is drawn -- see the fragment's `own` -- of 255
 layout(location = 11) in float aBorder;   // how thick a rounded ring is, of 255
 
 layout(location = 0) flat out vec4 vertexColor;
@@ -71,6 +71,6 @@ void main() {
     edge = aCut.xy;
     blur = aCut.z;
     uvRect = aPart;
-    own = aOwn;
+    own = aOwn * 255.0;
     border = aBorder * 255.0;
 }

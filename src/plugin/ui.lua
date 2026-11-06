@@ -485,9 +485,18 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 					-- than through the text's colour: what the colour is of it is how opaque the element is.
 					-- A line inside a blurred element is drawn with every glyph of it spread by the same
 					-- blur, which is what makes the text of one soft rather than its box alone.
-					clippedQuad(batch, clip, originX + glyph.x, y + glyph.y, originX + glyph.x + glyph.width,
-					y + glyph.y + glyph.height, zIndex, colour, picture, glyph.uv0, glyph.uv1, nil, nil, nil,
-					glyph.own, node.blur)
+					--
+					-- Its ink is put on whole pixels. A glyph is rasterised onto the pixel grid, and a pen
+					-- is fractional -- a shaper's advances are, and so is a box that is centred, scrolled
+					-- or slid -- so a glyph drawn where the pen is falls between pixels and is sampled
+					-- across two of them: one letter crisp, the next smeared and fainter, which is a word
+					-- that looks misspaced. Each glyph is rounded to the nearest pixel on its own, so the
+					-- line keeps the spacing the font gave it to within half a pixel and never drifts.
+					local left = math.floor(originX + glyph.x + 0.5)
+					local top = math.floor(y + glyph.y + 0.5)
+
+					clippedQuad(batch, clip, left, top, left + glyph.width, top + glyph.height, zIndex, colour, picture,
+					glyph.uv0, glyph.uv1, nil, nil, nil, glyph.own, node.blur)
 				end
 
 			if selecting then
@@ -584,10 +593,13 @@ local function lineOffset(node, line)
 		return 0
 	end
 
+	-- A line set against the right of its box starts at a fraction of a pixel whenever the line is
+	-- not a whole number of pixels wide, and a glyph drawn from a fraction is one the sampler spreads
+	-- over two: the line is put on the nearest whole pixel, as the one set from the left is.
 	if node.justify == 1 then
 		return math.floor((node.width - line.width) / 2 + 0.5)
 	elseif node.justify == 2 then
-		return node.width - line.width
+		return math.floor(node.width - line.width + 0.5)
 	end
 
 	return 0
