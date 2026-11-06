@@ -31,6 +31,8 @@ local sfnt = {}
 ---@field weight number # As CSS counts it: 100 to 900
 ---@field italic boolean # Whether it is the slanted member of its family
 
+local utf8 = require("utf8")
+
 -- What a font file starts with. TrueType and its older spelling, PostScript outlines under a
 -- CFF table, and Apple's Type 1 in an sfnt wrapper.
 local MAGIC = {
@@ -74,51 +76,12 @@ local function u32(data, at)
 	return (a << 24) | (b << 16) | (c << 8) | d
 end
 
---- A code point as the bytes UTF-8 writes it in.
----@param code number
-local function utf8(code)
-	if code < 0x80 then
-		return string.char(code)
-	elseif code < 0x800 then
-		return string.char(0xC0 | (code >> 6), 0x80 | (code & 0x3F))
-	elseif code < 0x10000 then
-		return string.char(0xE0 | (code >> 12), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F))
-	end
-
-	return string.char(
-		0xF0 | (code >> 18),
-		0x80 | ((code >> 12) & 0x3F),
-		0x80 | ((code >> 6) & 0x3F),
-		0x80 | (code & 0x3F)
-	)
-end
-
 --- A UTF-16 big endian string as UTF-8, which is what a Windows name record holds and what the
 --- rest of the library reads. A character past the basic plane is two units -- a high one and a
---- low one -- and a high one with nothing after it is a name that has been cut in half, which is
---- left as the character it says it is rather than dropped.
+--- low one -- and a name cut in the middle of one becomes U+FFFD rather than an invalid sequence.
 ---@param data string
 local function utf16beToUtf8(data)
-	local out, at = {}, 1
-
-	while at + 1 <= #data do
-		local code = (data:byte(at) << 8) | data:byte(at + 1)
-
-		at += 2
-
-		if code >= 0xD800 and code <= 0xDBFF and at + 1 <= #data then
-			local low = (data:byte(at) << 8) | data:byte(at + 1)
-
-			if low >= 0xDC00 and low <= 0xDFFF then
-				code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
-				at += 2
-			end
-		end
-
-		out[#out + 1] = utf8(code)
-	end
-
-	return table.concat(out)
+	return utf8.fromUTF16(data, true)
 end
 
 --- How much a name record is worth believing. A font holds its name once per platform and once per

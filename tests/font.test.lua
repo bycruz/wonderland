@@ -14,7 +14,7 @@ local FontManager = require("wonderland.util.font_manager")
 local Registry = require("wonderland.font.registry")
 local embedded = require("wonderland.font.embedded")
 local reader = require("wonderland.font.reader")
-local utf8 = require("wonderland.font.utf8")
+local utf8 = require("utf8")
 
 -- Any font will do for the tests that need one; they skip where the machine has none.
 local FONT_PATHS = {

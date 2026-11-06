@@ -7,7 +7,7 @@
 local ffi = require("ffi")
 local Atlas = require("wonderland.font.atlas")
 local reader = require("wonderland.font.reader")
-local utf8 = require("wonderland.font.utf8")
+local utf8 = require("utf8")
 
 -- A glyph of a run. A run is measured once and drawn every frame, so this is an array of structs
 -- rather than a table a glyph.

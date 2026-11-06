@@ -1,7 +1,7 @@
 local bit = require("bit")
 local UILayout = require("wonderland.layout")
 local style = require("wonderland.style")
-local utf8 = require("wonderland.font.utf8")
+local utf8 = require("utf8")
 local wonderlandElement = require("wonderland.element")
 local time = require("wonderland.time")
 
@@ -519,6 +519,15 @@ function Layout:size(window)
 	end
 
 	return window.width, window.height
+end
+
+--- Where the pointer is in a window, as the last move left it: a view that needs to know whether
+--- something it drew is under it -- a toast that should wait before it fades -- asks this rather
+--- than waiting for another move.
+---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.Layout
+function Layout:pointer(window)
+	return self.contexts[window]?.pointer
 end
 
 ---@param e wonderland.Element

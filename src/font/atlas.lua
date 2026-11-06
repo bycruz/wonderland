@@ -8,7 +8,7 @@
 -- written into the glyph, so nothing is measured twice.
 local ffi = require("ffi")
 local reader = require("wonderland.font.reader")
-local utf8 = require("wonderland.font.utf8")
+local utf8 = require("utf8")
 
 local DEFAULT_SIZE = 512
 
