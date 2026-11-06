@@ -8,8 +8,9 @@
 -- of a machine's font directories is a few hundred seeks rather than a few hundred megabytes.
 --
 -- Reading a directory is the one thing the C library does not spell the same way on two platforms,
--- which is what the ffi below is for; the header parsing is in `wonderland.font.sfnt`.
+-- which is what `fs` is for; the header parsing is in `wonderland.font.sfnt`.
 local ffi = require("ffi")
+local fs = require("fs")
 local sfnt = require("wonderland.font.sfnt")
 
 local scan = {}
@@ -26,81 +27,24 @@ local scan = {}
 ---@field index number # Which face of the file, nought for a file that holds one
 
 local isWindows = ffi.os == "Windows"
-local is64Bit = ffi.arch:find("64") ~= nil
 local SEP = isWindows and "\\" or "/"
 
--- The name of an entry sits at a different offset in every `struct dirent`, so the layout is written
--- out per platform. A layout that is guessed wrong reads a name that is not a file, and the font is
--- skipped -- what happens to a file which cannot be parsed.
---
--- macOS is the trap: the headers describe the inode-64 entry the system mostly uses, with the name at
--- byte twenty-one, but plain `readdir` hands over the 4.4BSD entry that older binaries were built
--- against -- a thirty-two bit inode, a length, a type and a name length before the name at byte
--- eight. Reading one as the other finds nothing in a directory that is full of fonts.
-local entry = "uint32_t ino; int32_t off; uint16_t reclen; uint8_t type; char name[256];"
+--- The entries in a directory, or nothing where the path is not one. `fs` owns the platform's own
+--- directory walk -- and the FFI declarations it needs -- so the same call answers on every
+--- platform without a second declaration of `FindFirstFileA` in the same C namespace.
+---@param path string
+---@return fs.DirEntry[]?
+local function listDir(path)
+	local iter = fs.readdir(path)
 
-if ffi.os == "OSX" then
-	entry = "uint32_t ino; uint16_t reclen; uint8_t type; uint8_t namlen; char name[1024];"
-elseif is64Bit then
-	entry = "uint64_t ino; int64_t off; uint16_t reclen; uint8_t type; char name[256];"
+	if iter == nil then return nil end
+
+	local entries = {}
+
+	for entry in iter do entries[#entries + 1] = entry end
+
+	return entries
 end
-
-ffi.cdef(([[
-	struct wl_dirent { %s };
-
-	// Windows spells the same thing as a pattern rather than a directory, and writes the entry into
-	// the struct it was handed instead of returning a pointer to one.
-	struct wl_find_data {
-		uint32_t attributes, createdLow, createdHigh, accessedLow, accessedHigh;
-		uint32_t writtenLow, writtenHigh, sizeHigh, sizeLow, reserved0, reserved1;
-		char name[260];
-		char shortName[14];
-	};
-
-	intptr_t FindFirstFileA(const char *pattern, struct wl_find_data *data);
-	int FindNextFileA(intptr_t find, struct wl_find_data *data);
-	int FindClose(intptr_t find);
-]]):format(entry))
-
--- Another package may already have declared the C library's directory walk -- `fs` does, with
--- the platform's own `struct dirent`. `readdir` cannot be declared twice with different return
--- types; LuaJIT keeps one, and the loser reads a name at the wrong offset. Linux has `readdir64`
--- as the same walk under a name no package has claimed, so this uses it. Elsewhere, where the
--- symbol is shared, the entry is cast to the layout above and the platform's own declaration is
--- used when one exists.
-local read
-
-if isWindows then
-	read = nil
-else
-	local hasDirent = pcall(ffi.typeof, "struct dirent")
-
-	if ffi.os == "Linux" then
-		ffi.cdef([[
-			typedef struct __dirstream DIR;
-			DIR *opendir(const char *path);
-			int closedir(DIR *dir);
-			struct wl_dirent *readdir64(DIR *dir);
-		]])
-		read = ffi.C.readdir64
-	else
-		if not hasDirent then
-			ffi.cdef([[
-				typedef struct __dirstream DIR;
-				DIR *opendir(const char *path);
-				struct wl_dirent *readdir(DIR *dir);
-				int closedir(DIR *dir);
-			]])
-		end
-		read = ffi.C.readdir
-	end
-end
-
---- A directory entry as the C library writes it, which the language server cannot see.
----@class wonderland.font.ffi.dirent: ffi.cdata*
----@field name string
-
-local kernel32 = isWindows and ffi.load("kernel32") or nil
 
 -- How deep under a font directory the walk goes: fonts sit a directory or two down everywhere, and a
 -- directory that links back to one above it is a walk with no end to it.
@@ -108,55 +52,6 @@ local MAX_DEPTH = 12
 
 -- What a font file is called, which is all there is to go on before its header is read.
 local FONT_FILES = { [".ttf"] = true, [".otf"] = true, [".ttc"] = true, [".otc"] = true }
-
---- The names in a directory, or nothing where the path is not one. A walk asks this to tell a
---- directory from a file, so a tree of fonts is walked without asking the filesystem twice.
----@param path string
-local function listDir(path)
-	if isWindows then
-		local data = ffi.new("struct wl_find_data")
-		local find = kernel32.FindFirstFileA(path .. "\\*", data)
-
-		if find == -1 then return nil end
-
-		local names = {}
-
-		repeat
-			local name = ffi.string(data.name)
-
-			if name ~= "." and name ~= ".." then names[#names + 1] = name end
-		until kernel32.FindNextFileA(find, data) == 0
-
-		kernel32.FindClose(find)
-
-		return names
-	end
-
-	local dir = ffi.C.opendir(path)
-
-	if dir == nil then return nil end
-
-	---@param handle any
-	---@return wonderland.font.ffi.dirent?
-	local function nextEntry(handle)
-		return ffi.cast("struct wl_dirent*", assert(read)(handle))
-	end
-
-	local names, spot = {}, nextEntry(dir)
-
-	while spot ~= nil do
-		---@cast spot wonderland.font.ffi.dirent
-		local name = ffi.string(spot.name)
-
-		if name ~= "." and name ~= ".." then names[#names + 1] = name end
-
-		spot = nextEntry(dir)
-	end
-
-	ffi.C.closedir(dir)
-
-	return names
-end
 
 --- Where each platform keeps fonts, the system's own and the user's. What a registry is handed when
 --- the caller did not say where to look.
@@ -281,17 +176,21 @@ end
 ---@param entries string[]?
 ---@param level number
 local function walk(dir, faces, entries, level)
-	local names = entries ?? listDir(dir)
+	local listing = entries ?? listDir(dir)
 
-	if names == nil or level > MAX_DEPTH then return end
+	if listing == nil or level > MAX_DEPTH then return end
 
-	for _, name in ipairs(names) do
-		local path = dir .. SEP .. name
-		local inside = listDir(path)
+	for _, entry in ipairs(listing) do
+		local path = dir .. SEP .. entry.name
+		local inside
+
+		if entry.type == "dir" or (entry.type ~= "file" and fs.isdir(path)) then
+			inside = listDir(path)
+		end
 
 		if inside ~= nil then
 			walk(path, faces, inside, level + 1)
-		elseif FONT_FILES[((name:match("%.[^%.]+$") or ""):lower())] then
+		elseif FONT_FILES[((entry.name:match("%.[^%.]+$") or ""):lower())] then
 			indexFile(path, faces)
 		end
 	end

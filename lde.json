@@ -21,6 +21,9 @@
 		},
 		"winit": {
 			"version": "0.1"
+		},
+		"fs": {
+			"version": "^0.3.1"
 		}
 	},
 	"devDependencies": {
