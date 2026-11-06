@@ -2987,6 +2987,52 @@ test.skipIf(not canRender)("softens the text inside a blurred box", function()
 	test.truthy(softColumns > sharpColumns, "and its ink reaches further across the box than it did")
 end)
 
+-- A glyph is rasterised onto the pixel grid, and a pen is not always on it: what HarfBuzz and CoreText
+-- place a line with are fractions of a pixel, and so is a line set against the right of its box. Text
+-- drawn there was sampled across two pixels, one letter crisp and the next smeared, which reads as a
+-- word whose letters stand apart; it is drawn on the nearest whole pixel instead.
+test.skipIf(not canRender)("draws text on whole pixels wherever its pen is", function()
+	local reader = require("wonderland.font.reader")
+	local real = reader.get()
+
+	---@param shift number # How far every glyph of the line is placed past where the font put it
+	---@return string
+	local function drawn(shift)
+		reader.set(setmetatable({
+			shape = function(face, value, pixelHeight, opts)
+				local line = real.shape(face, value, pixelHeight, opts)
+
+				for _, glyph in ipairs(line.glyphs) do
+					glyph.x = glyph.x + shift
+				end
+
+				return line
+			end,
+		}, { __index = real }))
+
+		local ok, pixels = pcall(function()
+			local screen = wonderland.headless.new(function()
+				return div():style({ width = { abs = 80 }, height = { abs = 20 }, direction = "column",
+					bg = BLACK, fg = WHITE, fontSize = 13 }):children({ text("lil Fugazi") })
+			end, { width = 80, height = 20, fontPath = assert(fontPath) })
+
+			screen:draw()
+			local drawnPixels = assert((screen:getPixels()))
+			screen:close()
+
+			return drawnPixels
+		end)
+
+		reader.set(real)
+		assert(ok, pixels)
+
+		return pixels
+	end
+
+	test.equal(drawn(0.4) == drawn(0), true, "a line placed less than half a pixel over draws the same pixels")
+	test.equal(drawn(0.6) == drawn(1), true, "and one more than half a pixel over, those of the next one")
+end)
+
 test.skipIf(not canRender)("draws the frame of a gif the clock is on", function()
 	local dance = nil
 
