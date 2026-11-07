@@ -80,16 +80,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/termux-android.tar
-          key: termux-android-v2
+          key: termux-android-v3
 
-      # clang is what compiles the vendored decoders and glslang what compiles the shaders
+      # clang is what compiles the vendored decoders and glslang what compiles the shaders; the rest are
+      # the libraries the tests load: FreeType, HarfBuzz and FriBidi for text, X11 because winit has
+      # no Android backend, and a software Vulkan driver for the offscreen screen.
       - name: Run tests (Android)
         if: matrix.android
         run: |
           if [[ "${{ steps.cache-android.outputs.cache-hit }}" != "true" ]]; then
             docker run --privileged --platform linux/arm64 \
               --name termux-build termux/termux-docker:aarch64 \
-              bash -c "apt update && apt install -y clang glslang"
+              bash -c "apt update && apt install -y clang glslang x11-repo && apt install -y libx11 libxext libxi vulkan-loader freetype harfbuzz fribidi && ln -sf libXext.so \$PREFIX/lib/libXext.so.6 && ln -sf libXi.so \$PREFIX/lib/libXi.so.6"
             docker commit termux-build termux-android:latest
             docker rm termux-build
             docker save termux-android:latest -o /tmp/termux-android.tar

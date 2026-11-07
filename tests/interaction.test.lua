@@ -523,7 +523,10 @@ end)
 
 test.skipIf(not canRender)("cuts a line that does not fit to the room it has", function()
 	local screen = aScreen(function()
-		local title = "a title far too long for its box"
+		-- One unbroken word: a space between words is wider than the gaps a font leaves inside
+		-- one, and a run of ink would then be two runs for reasons that are not the line being
+		-- drawn twice.
+		local title = "averylongtitlefarwithoutspaces"
 
 		return div():style(sty():fill():column():bg("#000000")):children({
 			div():style(sty():w(40):h(20)):children(
@@ -655,11 +658,15 @@ test.skipIf(not canRender)("gives files dropped on a window to the box they land
 end)
 
 test.skipIf(not canRender or emojiPath == nil)("draws an emoji in its own colours", function()
-	local screen = aScreen(function()
+	-- The emoji face itself is the default here, rather than whatever family a fallback chain
+	-- happens to choose: which of the machine's fonts draws a check mark is a question about the
+	-- machine, and this test is about what a colour glyph looks like when it is drawn.
+	local screen = wonderland.headless.new(function()
 		return div():style(sty():fill():bg("#000000")):children(
 			text("✅"):style(sty():fg("#ffffff"):text(32))
 		)
-	end)
+	end, { width = WIDTH, height = HEIGHT, fontPath = assert(emojiPath) })
+	screen:draw()
 
 	local pixels = assert(screen:getPixels())
 

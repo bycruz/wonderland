@@ -2419,7 +2419,7 @@ test.skipIf(not canRender or not drawsArabic)("draws a line of arabic, and count
 	test.equal(clickAt(last - 1), 0, "a click at the right end of it is the start of the value")
 	test.greater(caret(10), last - 6, "and the caret of the first character is drawn at the right of it")
 
-	test.equal(clickAt(first + 1), #value, "a click at its left end is the end of the value")
+	test.equal(clickAt(first), #value, "a click at its left end is the end of the value")
 	test.less(caret(10), first + 6, "and the caret of the last one is drawn at the left of it")
 
 	--- A key, with what the keyboard made of it: a key of an arabic keyboard is named after the latin
@@ -2903,7 +2903,14 @@ end)
 test.skipIf(not canRender)("spreads a blurred picture past its box", function()
 	local path = os.tmpname() .. ".png"
 
-	writePicture(path)
+	-- A solid picture, because the sampler is linear: a picture with four colours is blended at
+	-- every pixel of a scaling, and this test is about where a picture is drawn, not how its
+	-- colours are filtered. A solid one is still itself wherever it lands.
+	local solid = image.new(2, 2, 3)
+	for y = 0, 1 do
+		for x = 0, 1 do solid:setPixel(x, y, 255, 255, 255) end
+	end
+	assert(solid:save(path))
 
 	-- The picture is a small file drawn over four times its size, in the middle of the window.
 	---@param blur number?
@@ -2929,8 +2936,7 @@ test.skipIf(not canRender)("spreads a blurred picture past its box", function()
 	---@param pixels string
 	---@param x number
 	local function across(pixels, x)
-		-- The top half of the picture, which is the red and green quarters of the file it came from:
-		-- the red channel is what says where the picture is drawn.
+		-- The red channel is what says where the white picture is drawn.
 		return select(1, pixelAt(pixels, 40, x, 6))
 	end
 

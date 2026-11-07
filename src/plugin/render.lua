@@ -12,6 +12,11 @@ local backend = require("wonderland.backend")
 local shaderType = backend.shaderType
 local shaderExt = backend.shaderExt
 
+-- The depth attachment, which is the one format a driver is allowed to not have: Vulkan's
+-- X8_D24 is the packed one SwiftShader does not draw, while 32-bit float is. OpenGL draws the
+-- 24-bit one and stores it in fewer bytes where the driver does, so each backend keeps its own.
+local DEPTH_FORMAT = backend.isVulkan and "depth32float" or "depth24plus"
+
 ---@class wonderland.plugin.Render.Context
 ---@field window wonderland.RenderWindow
 ---@field swapchain hood.Swapchain?
@@ -427,7 +432,7 @@ function RenderPlugin:createContext(window, swapchain)
 		depthStencil = {
 			depthWriteEnabled = true,
 			depthCompare = "less-equal",
-			format = "depth24plus"
+			format = DEPTH_FORMAT
 		}
 	}) --[[@as hood.PipelineDescriptor]])
 
@@ -442,7 +447,7 @@ function RenderPlugin:createContext(window, swapchain)
 
 	local depthBuffer = self:getDevice():createTexture({
 		extents = { dim = "2d", width = depthWidth, height = depthHeight, count = 1 },
-		format = "depth24plus",
+		format = DEPTH_FORMAT,
 		usages = { "RENDER_ATTACHMENT" }
 	}) --[[@as hood.PipelineDescriptor]]
 
@@ -514,7 +519,7 @@ function RenderPlugin:ensureCapture(ctx)
 
 	local depth = self:getDevice():createTexture({
 		extents = { dim = "2d", width = width, height = height, count = 1 },
-		format = "depth24plus",
+		format = DEPTH_FORMAT,
 		usages = { "RENDER_ATTACHMENT" }
 	})
 
@@ -733,7 +738,7 @@ function RenderPlugin:resize(ctx)
 	local oldBufferView, oldBuffer = ctx.depthBufferView, ctx.depthBuffer
 	ctx.depthBuffer = self:getDevice():createTexture({
 		extents = { dim = "2d", width = ctx.swapchain.width, height = ctx.swapchain.height, count = 1 },
-		format = "depth24plus",
+		format = DEPTH_FORMAT,
 		usages = { "RENDER_ATTACHMENT" }
 	})
 	ctx.depthBufferView = ctx.depthBuffer:createView({})

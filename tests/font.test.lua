@@ -267,13 +267,15 @@ end)
 test.it("bakes the characters it was made with, and packs the rest as they are drawn", function()
 	local atlas = Atlas.new(aFaceOf({ 0x41, 0x42, 0x43 }, 8), 16, { characters = "AB" })
 
+	local baked = atlas.phases
+
 	test.equal(#atlas.sheets, 1, "what an app said it draws is baked now")
-	test.truthy(atlas.glyphs[0x41] ~= nil and atlas.glyphs[0x42] ~= nil)
-	test.equal(atlas.glyphs[0x43], nil, "and everything else waits")
+	test.truthy(atlas.glyphs[0x41 * baked] ~= nil and atlas.glyphs[0x42 * baked] ~= nil)
+	test.equal(atlas.glyphs[0x43 * baked], nil, "and everything else waits")
 
 	atlas:glyph(0x43)
 
-	test.truthy(atlas.glyphs[0x43] ~= nil, "until a line holding it is measured")
+	test.truthy(atlas.glyphs[0x43 * baked] ~= nil, "until a line holding it is measured")
 end)
 
 test.it("makes another picture when one fills up", function()

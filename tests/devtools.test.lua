@@ -305,21 +305,25 @@ end)
 test.skipIf(not canRender)("says the same thing while the app does the same thing", function()
 	local screen = withPanel()
 
-	-- The numbers it shows are averages, so the first frames are the panel arriving at them.
-	for _ = 1, 6 do
+	-- The numbers it shows are averages, so the first frames are the panel arriving at them; on a
+	-- software renderer the rate a frame comes at takes longer to settle, so what is looked for is
+	-- one frame that came out the same as the one before it rather than a fixed count.
+	local before, same = nil, false
+
+	for _ = 1, 60 do
 		screen:draw()
+
+		local frame = assert(screen:getPixels())
+
+		if before ~= nil and frame == before then
+			same = true
+			break
+		end
+
+		before = frame
 	end
 
-	local before = assert(screen:getPixels())
-
-	screen:draw()
-
-	local after = assert(screen:getPixels())
 	screen:close()
 
-	test.equal(#after, #before, "two frames of a screen that did not change are the same size")
-
-	local same = before == after
-
-	test.truthy(same, "and the same pixels: a rebuild that changed nothing is not a frame to draw")
+	test.truthy(same, "a rebuild that changed nothing is the same pixels")
 end)

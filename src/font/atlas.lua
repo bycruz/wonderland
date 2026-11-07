@@ -298,7 +298,7 @@ end
 function Atlas:glyph(codepoint, phase)
 	phase = phase or 0
 
-	local key = codepoint * PHASES + phase
+	local key = codepoint * self.phases + phase
 	local known = self.glyphs[key]
 
 	if known ~= nil then
@@ -337,7 +337,7 @@ end
 function Atlas:byGlyph(glyph, advance, phase)
 	phase = phase or 0
 
-	local key = glyph * PHASES + phase
+	local key = glyph * self.phases + phase
 	local known = self.glyphIds[key]
 
 	if known ~= nil then
