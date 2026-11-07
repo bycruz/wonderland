@@ -28,7 +28,7 @@ jobs:
         with:
           version: nightly
           platform: ${{ matrix.android && 'Android' || '' }}
-
+          toolchain: true
 
       # The headless tests render a screen offscreen, which needs a vulkan driver:
       # lavapipe is the software one, and the only one a bare runner has. Elsewhere
