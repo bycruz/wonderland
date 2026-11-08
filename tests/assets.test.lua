@@ -377,3 +377,33 @@ test.skipIf(not canUpload)("writes a screenshot in the format its extension name
 	os.remove(path)
 	os.remove(jpeg)
 end)
+
+test.skipIf(not canUpload)("rebinds every picture when the band buffer grows", function()
+	local screen = aScreen()
+	local textures = texturesOf(screen)
+
+	-- A few pictures, then one given back: what a page's covers coming and going leaves behind.
+	local early = {}
+	for _ = 1, 4 do early[#early + 1] = textures:upload(decoded(1, 1, 7)) end
+
+	local before = {}
+	for _, slot in ipairs(early) do before[slot] = textures.textures[slot].bindGroup end
+	local whiteBefore = textures.textures[0].bindGroup
+
+	textures:release({ slot = early[2] })
+
+	-- The first picture past the capacity is what makes the buffer again.
+	while textures.slotCapacity == 64 do textures:upload(decoded(1, 1, 7)) end
+
+	for _, slot in ipairs(early) do
+		local texture = textures.textures[slot]
+		if texture ~= nil then
+			test.truthy(texture.bindGroup ~= before[slot],
+				"a picture past the released one is bound to the buffer that exists")
+		end
+	end
+	test.truthy(textures.textures[0].bindGroup ~= whiteBefore,
+		"and so is the picture a box with none of its own is drawn with")
+
+	screen:close()
+end)

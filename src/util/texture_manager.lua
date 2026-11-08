@@ -94,12 +94,12 @@ local DEFAULT_UPLOAD_PIXELS = 256 * 1024
 ---@field device hood.Device
 ---@field sampler hood.Sampler
 ---@field layout hood.BindGroupLayout # The layout every texture's bind group is made with
----@field slots TextureManager.Slot[] # What each picture is drawn by, by the id a quad holds
+---@field slots table<number, TextureManager.Slot> # What each picture is drawn by, by the id a quad holds: nought based
 ---@field slotCount number # How many of them there are, since the array is not a Lua one
 ---@field slotBuffer hood.Buffer # And those, in the buffer the shader reads them from
 ---@field slotCapacity number # How many it holds before it is made again
----@field textures TextureManager.Texture[]
----@field textureCount number
+---@field textures table<number, TextureManager.Texture> # By the id a quad holds, nought based, with a hole where a picture was given back
+---@field textureCount number # How many ids there have been, which is one past the last
 ---@field uploadPixels number # Pixels one upload may hold: the bands a picture is split into
 ---@field pending { slot: Texture, image: Image }[] # Pictures written since the last frame was drawn
 ---@field stage ffi.cdata*? # The buffer a band is staged in, kept: a gif has one per frame
@@ -171,14 +171,20 @@ function TextureManager.new(device, opts)
 end
 
 function TextureManager:destroy()
-	for _, texture in ipairs(self.textures) do
-		texture.bindGroup:destroy()
-		texture.view:destroy()
+	-- By id rather than by walking the table: a given-back picture leaves a hole, and a walk of a
+	-- nought-based table that starts at one both misses the white picture and stops at that hole.
+	for id = 0, self.textureCount - 1 do
+		local texture = self.textures[id]
 
-		-- A texture that was wrapped rather than made here is the caller's, and what this gives
-		-- back is the view it was shown through.
-		if texture.owned then
-			texture.texture:destroy()
+		if texture ~= nil then
+			texture.bindGroup:destroy()
+			texture.view:destroy()
+
+			-- A texture that was wrapped rather than made here is the caller's, and what this gives
+			-- back is the view it was shown through.
+			if texture.owned then
+				texture.texture:destroy()
+			end
 		end
 	end
 
@@ -365,11 +371,24 @@ function TextureManager:growSlots(slots)
 	self.slotBuffer = buffer
 	self.slotCapacity = capacity
 
-	for id, texture in ipairs(self.textures) do
-		texture.bindGroup = self:createBindGroup(texture.view)
-		self.textures[id] = texture
+	-- Every picture is rebound, by its place in the array rather than by walking it: a released
+	-- picture leaves a hole, and a walk that stops at one leaves every picture after it bound to
+	-- the band buffer that is about to be given back -- which samples as the top row of the picture
+	-- stretched down every column, because the metadata it reads is no longer there.
+	local replaced = {}
+	for id = 0, self.textureCount - 1 do
+		local texture = self.textures[id]
+		if texture ~= nil then
+			replaced[#replaced + 1] = texture.bindGroup
+			texture.bindGroup = self:createBindGroup(texture.view)
+		end
 	end
 
+	-- What the old bind groups held is what a frame still in flight may be reading: the buffer
+	-- is given back only once nothing is, as a picture is given back.
+	self.device.queue:waitIdle()
+
+	for _, bindGroup in ipairs(replaced) do bindGroup:destroy() end
 	old:destroy()
 end
 
