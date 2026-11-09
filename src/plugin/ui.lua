@@ -1116,6 +1116,17 @@ function UI:event(event, _handler)
 		return self:frame(event.window)
 	end
 
+	-- A window coming back on screen -- from the tray, from being minimized -- has the frame it
+	-- was showing before it went away and nothing since: what it needs is a frame of what is
+	-- there now, asked for as the window's own rather than held back for coming too soon, so that
+	-- it is not left blank until something else happens to it. A window the shell has just made
+	-- is not this one: its map is claimed by the window plugin, which asks for its first frame by
+	-- handing the app the message.
+	if name == "map" or name == "restore" then
+		self:present(event.window)
+		return
+	end
+
 	if name == "resize" or name == "mouseMove" or name == "mousePress" or name == "mouseRelease" or name == "focusOut" then
 		if name == "resize" then -- Resize should actually invalidate layouts
 			local ctx = self.layoutPlugin.contexts[event.window]
@@ -1537,6 +1548,16 @@ function UI:frame(window)
 	local ctx = self.layoutPlugin.contexts[window]
 
 	if not ctx then
+		return
+	end
+
+	-- A window that is not on screen is not drawn: what it would show is nothing the compositor
+	-- will show, and a present into a surface it has taken away is a present that blocks -- an app
+	-- in the tray stops playing, because the loop it plays on is stopped in here. Nothing is lost
+	-- by skipping it: the frame a window is shown with is asked for when it is mapped or restored,
+	-- and it is a frame of the screen as it is then rather than the one it was left with. See
+	-- `app.run`, which does not count such a window as owing one either.
+	if window.visible == false then
 		return
 	end
 

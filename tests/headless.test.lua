@@ -1545,6 +1545,116 @@ test.skipIf(not canRender)("a frame that comes out the same is not drawn", funct
 	screen:close()
 end)
 
+-- A window that is not on screen -- hidden, or minimized -- has a surface the compositor has taken
+-- away, and drawing into it blocks: the loop a player is fed from stops until the window comes back.
+-- So the frame such a window asks for is put off rather than presented, and what it is drawn from
+-- when it comes back is the screen as it is now, not as it was when it went away.
+test.skipIf(not canRender)("does not draw a window that is not on screen, and draws it when it comes back", function()
+	local background = { r = 0.0, g = 0.0, b = 0.0, a = 1.0 }
+
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 }, bg = background })
+	end, { width = 10, height = 10, fontPath = assert(fontPath) })
+
+	screen:draw()
+
+	local drawn = 0
+	local draw = screen.plugins.render.draw
+
+	---@param plugin wonderland.plugin.Render
+	---@param ctx wonderland.plugin.Render.Context
+	screen.plugins.render.draw = function(plugin, ctx)
+		drawn = drawn + 1
+		return draw(plugin, ctx)
+	end
+
+	--- What the loop does with the frame an event asked for.
+	local function frame()
+		screen:event({ name = "redraw", window = screen.window })
+	end
+
+	local window = screen.window
+	window.visible = false
+	window.shouldRedraw = false
+
+	-- What the screen was given while it was away is not in the frame it went away with, and what
+	-- asks for one is the app rather than the window: a present is the strongest ask there is.
+	background.r = 1.0
+	screen.plugins.ui:present(window)
+	frame()
+
+	test.equal(drawn, 0, "nothing is drawn for a window that is not on screen")
+	test.truthy(window.shouldRedraw, "and the frame it was asked for is still owed")
+
+	-- Shown again: a frame of the screen as it is now, not the one it was left with.
+	window.visible = true
+	screen:event({ name = "map", window = window })
+	frame()
+
+	test.equal(drawn, 1, "and it is drawn as soon as it is on screen again")
+
+	local pixels = assert((screen:getPixels()))
+	local r = pixelAt(pixels, 10, 5, 5)
+	test.equal(r, 255, "with what the screen was given while it was away")
+
+	-- A minimized window is the same thing by another name, and so is the ask its coming back makes.
+	window.visible = false
+	window.shouldRedraw = false
+	background.r = 0.0
+	screen.plugins.ui:present(window)
+	frame()
+
+	test.equal(drawn, 1, "a minimized window is not drawn either")
+
+	window.visible = true
+	screen:event({ name = "restore", window = window })
+	frame()
+
+	test.equal(drawn, 2, "and is drawn when it is restored")
+
+	screen:close()
+end)
+
+-- What an app is doing on its own -- reading a device, playing a track -- does not stop because its
+-- window is not on screen: the loop is still woken for it, and the deadline it asks for is still
+-- given to the loop. See `app.run`, which asks every window what it wants waking for.
+test.skipIf(not canRender)("keeps ticking a window that is not on screen, and still says when to come back", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { rel = 1.0 }, height = { rel = 1.0 } })
+	end, { width = 10, height = 10, fontPath = assert(fontPath) })
+
+	local ui = screen.plugins.ui
+	local ticks = 0
+
+	ui:onTick(function()
+		ticks = ticks + 1
+
+		return 1
+	end, screen.window)
+
+	---@type number?
+	local seconds = nil
+
+	---@diagnostic disable-next-line: missing-fields
+	local handler = {
+		---@param value number
+		setTimeout = function(_, value)
+			---@cast value number
+			seconds = value
+		end,
+	}
+	---@cast handler winit.EventManager
+
+	screen.window.visible = false
+	ui:tick(screen.window, handler)
+
+	test.equal(ticks, 1, "a window that is not on screen still has its work done")
+	test.truthy(seconds ~= nil and seconds > 0 and seconds <= 1,
+		"and the loop is still told when its next turn is due")
+
+	screen:close()
+end)
+
 test.skipIf(not canRender)("hands back nothing when a click misses", function()
 	local message = nil
 	local screen = wonderland.headless.new(function()
