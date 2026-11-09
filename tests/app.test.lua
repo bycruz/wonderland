@@ -236,3 +236,58 @@ test.it("a view is empty until the app says what it looks like", function()
 	---@diagnostic disable-next-line: param-type-mismatch
 	test.equal(app:view(nil, nil).childCount, 0)
 end)
+
+-- What the loop does when a window it knows about owes a frame: it takes what is queued and draws
+-- it. A window that is not on screen is not drawn, so a frame it owes is not a reason for the loop
+-- to spin -- which is the difference between an app in the tray that sits still and one that keeps
+-- the loop busy doing nothing at all. The loop itself is stubbed: this is what `app.run` decides.
+test.it("a window that is not on screen is not one the loop waits on", function()
+	local winit = require("winit")
+
+	-- The one window the loop knows about: it is owed a frame, and whether it is on screen is what
+	-- decides whether that frame is the loop's to draw.
+	local window = { width = 10, height = 10, shouldRedraw = true, visible = false }
+	local loop = { windows = { window }, register = function() end }
+	local callback = nil ---@type winit.EventHandler?
+	local mode = nil ---@type winit.EventLoopMode?
+
+	---@param given winit.EventHandler
+	loop.run = function(_, given)
+		callback = given
+	end
+
+	local loopNew = winit.EventLoop.new
+	local fromEventLoop = winit.Window.fromEventLoop
+	local clipboardNew = winit.Clipboard.new
+
+	-- The plugins are the real ones: what is stubbed is the window they draw in and the loop that
+	-- asks about it, which is the part a test has no display for.
+	---@diagnostic disable-next-line: inject-field
+	winit.EventLoop.new = function() return loop end
+	winit.Window.fromEventLoop = function() return window end
+	winit.Clipboard.new = function() return {} end
+
+	local ok, err = pcall(function()
+		wonderland.app():run()
+
+		local handler = {
+			---@param given winit.EventLoopMode
+			setMode = function(_, given) mode = given end,
+			setTimeout = function() end,
+		}
+		---@cast handler winit.EventManager
+
+		local run = assert(callback)
+		run({ name = "aboutToWait" }, handler)
+		test.equal(mode, "wait", "a frame owed by a window that is not on screen does not wake the loop")
+
+		window.visible = true
+		window.shouldRedraw = true
+		run({ name = "aboutToWait" }, handler)
+		test.equal(mode, "poll", "and one owed by a window that is on screen does")
+	end)
+
+	winit.EventLoop.new, winit.Window.fromEventLoop, winit.Clipboard.new = loopNew, fromEventLoop, clipboardNew
+
+	assert(ok, err)
+end)

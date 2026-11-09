@@ -262,8 +262,11 @@ local layout = {}
 
 --- What a screen is laid out against. A real window has more than this and a headless
 --- screen has less; both are laid out by their size, the redraw flag is how the ui asks for
---- another frame, and the cursor is there to be pointed with when there is one.
----@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))?, cursors: table<string, boolean>? }
+--- another frame, the cursor is there to be pointed with when there is one, and `visible` says
+--- whether the window is on screen at all -- false while it is hidden or minimized, and nil on a
+--- window that does not track it, which is one that is shown. A frame is not drawn for a window
+--- that is not on screen; see `wonderland.plugin.UI:frame`.
+---@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, visible: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))?, cursors: table<string, boolean>? }
 
 ---@class wonderland.layout
 ---@field new fun(capacity: number?): wonderland.Layout.Screen

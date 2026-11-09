@@ -427,7 +427,10 @@ function app.run(self)
 		-- draws next. See `App:handle`, which is where that frame is asked for.
 		local message = self:dispatch(event, handler)
 
-		if message and event.window then
+		-- A window that is not on screen is not drawn, and so what its events left behind is not a
+		-- burst to keep up with: taking what is already queued would be the loop spinning while
+		-- nothing is shown. See the wait below, which such a window does not cut short either.
+		if message and event.window and eventWindow.visible ~= false then
 			flowed = true
 		end
 
@@ -469,7 +472,13 @@ function app.run(self)
 					end
 				end
 
-				if window.shouldRedraw then
+				-- A window that is not on screen owes no frame: `shouldRedraw` is not cleared by a
+				-- frame that is never drawn, and the frame it is shown with is the one its being
+				-- mapped or restored asks for. Counting it here would have the loop take what is
+				-- queued for a window nothing will be drawn in, which is a loop that spins for as
+				-- long as the window is in the tray. A window no backend tracks the visibility of
+				-- is one that is shown.
+				if window.shouldRedraw and window.visible ~= false then
 					owes = true
 				end
 			end

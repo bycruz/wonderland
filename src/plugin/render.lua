@@ -769,9 +769,17 @@ function RenderPlugin:frameEncoder(ctx)
 	return self:getDevice():createCommandEncoder()
 end
 
+--- A frame is not drawn into a window that is not on screen: the compositor has taken its surface
+--- away, and a present into it blocks -- which is a loop stopped, and whatever the loop was feeding
+--- stopped with it. What the window shows again is drawn by the frame its being mapped asks for;
+--- see `wonderland.plugin.UI:frame`, which does not build one for such a window in the first place.
 ---@param ctx wonderland.plugin.Render.Context
 ---@return boolean drawn # false when there was nothing to draw into
 function RenderPlugin:draw(ctx)
+	if ctx.window.visible == false then
+		return false
+	end
+
 	local view, width, height
 
 	if not ctx.swapchain and ctx.capture then
