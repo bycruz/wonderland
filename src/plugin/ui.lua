@@ -1061,7 +1061,7 @@ end
 
 --- The least time between frames of a window: a frame of its display, where the window can say how
 --- fast that is -- a 144 Hz monitor is drawn at 144 frames a second -- and `frameInterval` where it
---- cannot. What the window says is asked once.
+--- cannot. What the window says is asked once, and again after the window is resized.
 ---@param window wonderland.RenderWindow
 ---@return number
 function UI:intervalOf(window)
@@ -1141,12 +1141,18 @@ function UI:event(event, _handler)
 		return
 	end
 
-	if name == "resize" or name == "mouseMove" or name == "mousePress" or name == "mouseRelease" or name == "focusOut" then
+	if name == "resize" or name == "mouseMove" or name == "mouseLeave" or name == "mousePress"
+	or name == "mouseRelease" or name == "focusOut" then
 		if name == "resize" then -- Resize should actually invalidate layouts
 			local ctx = self.layoutPlugin.contexts[event.window]
 			if ctx then
 				ctx.mustDraw = true
 			end
+
+			-- A window that changed size may be on another monitor, or a phone that changed its
+			-- configuration may have changed its panel's rate: the rate is asked for again.
+			local window = event.window --[[@as wonderland.RenderWindow]]
+			if window ~= nil then window.displayRate = nil end
 		end
 
 		local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]

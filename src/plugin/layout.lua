@@ -223,6 +223,7 @@ end
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
 ---@field pointing string? # What the pointer cursor was last set to, nothing for the one a window has
 ---@field cursorPos number
+---@field caretAtEnd boolean? # Whether a focus that named a field still has to put the caret after what it holds
 ---@field anchorPos number? # The other end of the selection, from nought: nothing where there is none
 ---@field typed string? # What has been typed into the focused field since the frame that built it
 ---@field caretClick wonderland.plugin.Layout.Point? # Where a field was clicked, until the ui has placed the caret from it
@@ -357,6 +358,10 @@ function Layout:setFocus(window, id)
 	if not ctx then return end
 	ctx.focusedName = id
 	ctx.cursorPos = 0
+	-- A field focused with no point to put the caret at takes it at the end of what it holds: the
+	-- caret is where typing goes on from, and the frame that draws a page's field may not exist yet.
+	-- A click in a field is a point of its own and is placed from there, which clears this again.
+	ctx.caretAtEnd = id ~= nil
 	ctx.typed = nil
 	ctx.caretClick = nil
 	ctx.selectWord = nil
@@ -1107,6 +1112,22 @@ local function lineAcross(value, at, by)
 	return math.min(belowStart - 1 + column, belowStop)
 end
 
+--- The caret of a field, with a focus that named it but left no caret in it put after what it holds.
+--- A page that opens with a field, or a dialog that asks for its first one, means typing to go on
+--- from what is already there; and the frame that draws the field may not have been built when the
+--- focus was asked for, so the end is taken from the value the field has when it is first read.
+---@param ctx wonderland.plugin.Layout.Context
+---@param element wonderland.Element
+---@return number
+local function caretOf(ctx, element)
+	if ctx.caretAtEnd then
+		ctx.caretAtEnd = nil
+		ctx.cursorPos = #wonderlandElement.inputOf(element)
+	end
+
+	return ctx.cursorPos
+end
+
 --- The caret of the field that has the keyboard: which element it is for, the line of it the caret is
 --- on and how many bytes of that line come before it, and the bytes the selection covers where there
 --- is one. Nothing is returned where no field has the keyboard.
@@ -1131,17 +1152,18 @@ function Layout:getCaret(window)
 	end
 
 	local value = wonderlandElement.inputOf(element)
-	local start = lineStart(value, ctx.cursorPos)
+	local cursor = caretOf(ctx, element)
+	local start = lineStart(value, cursor)
 	local line = lineCount(value:sub(1, start - 1)) - 1
 	local limit = #value
-	local anchor = math.min(math.max(ctx.anchorPos or ctx.cursorPos, 0), limit)
-	local at = math.min(math.max(ctx.cursorPos, 0), limit)
+	local anchor = math.min(math.max(ctx.anchorPos or cursor, 0), limit)
+	local at = math.min(math.max(cursor, 0), limit)
 
 	if anchor == at then
-		return element, line, ctx.cursorPos - (start - 1)
+		return element, line, cursor - (start - 1)
 	end
 
-	return element, line, ctx.cursorPos - (start - 1), math.min(anchor, at), math.max(anchor, at)
+	return element, line, cursor - (start - 1), math.min(anchor, at), math.max(anchor, at)
 end
 
 --- A press on a scroll bar, as the message it comes to: the bar is the box's own, so what it does
@@ -1341,6 +1363,7 @@ function Layout:focusNext(ctx, backwards)
 
 	ctx.focusedName = wonderlandElement.nameOf(element)
 	ctx.cursorPos = #wonderlandElement.inputOf(element)
+	ctx.caretAtEnd = nil
 	ctx.anchorPos = nil
 	ctx.typed = nil
 	ctx.caretClick = nil
@@ -1405,6 +1428,7 @@ function Layout:setCaret(window, line, column, anchorLine, anchorColumn)
 	end
 
 	ctx.cursorPos = at
+	ctx.caretAtEnd = nil
 
 	-- A double click asked for the word at the point rather than the point itself. The ui has
 	-- just turned that point into a byte, which is where a word can be measured from.
@@ -1473,7 +1497,7 @@ function Layout:key(window, key, modifiers, typed)
 	-- and over -- a backspace held down taking the same character each time while the caret walks
 	-- back, which is a caret that leaves the text behind rather than deleting it.
 	local value = ctx.typed or wonderlandElement.inputOf(element)
-	local cursor = ctx.cursorPos
+	local cursor = caretOf(ctx, element)
 
 	--- The value an edit left the field with, kept for the keys before the next frame and
 	--- reported to the app.
@@ -1553,6 +1577,7 @@ function Layout:key(window, key, modifiers, typed)
 	if key == "escape" then
 		ctx.focusedName = nil
 		ctx.cursorPos = 0
+		ctx.caretAtEnd = nil
 		ctx.anchorPos = nil
 		return { type = "_inputRefresh"}
 	elseif key == "return" then
@@ -1673,6 +1698,20 @@ function Layout:event(event)
 			-- away comes back as a release that nothing is repeating.
 			ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 		end
+	elseif event.name == "mouseLeave" then
+		-- The pointer is not in the window any more, so nothing is under it. A touch has no
+		-- hover: once the finger that stood in for a pointer is off the glass, the place it last
+		-- was is not a place anything is, and keeping it would keep that thing hovered until a
+		-- pointer moved again -- which on a touch screen may be never.
+		local ctx = self.contexts[event.window]
+
+		if ctx then
+			ctx.pointer = nil
+
+			-- What the pointer asked the window to draw it with goes with it: a hand or an
+			-- I-beam left over something nobody is over is the same lie as the hover.
+			setShape(ctx, nil)
+		end
 	elseif event.name == "mouseMove" then
 		local ctx = self.contexts[event.window]
 		if not ctx then return end
@@ -1773,6 +1812,7 @@ function Layout:event(event)
 			if field and bit.band(field.element.flags, TEXT_INPUT) ~= 0 then
 				ctx.focusedName = wonderlandElement.nameOf(field.element)
 				ctx.cursorPos = #wonderlandElement.inputOf(field.element)
+				ctx.caretAtEnd = nil
 				ctx.caretClick = { x = event.x, y = event.y }
 				ctx.selectFrom = nil
 				ctx.selecting = nil
@@ -1831,10 +1871,12 @@ function Layout:event(event)
 			ctx.selectWord = nil
 			ctx.anchorPos = nil
 			ctx.cursorPos = #wonderlandElement.inputOf(info.element)
+			ctx.caretAtEnd = nil
 			ctx.typed = nil
 		else
 			ctx.focusedName = nil
 			ctx.cursorPos = 0
+			ctx.caretAtEnd = nil
 			ctx.caretClick = nil
 			ctx.selectFrom = nil
 			ctx.selecting = nil

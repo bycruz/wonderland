@@ -384,10 +384,8 @@ function TextureManager:growSlots(slots)
 		end
 	end
 
-	-- What the old bind groups held is what a frame still in flight may be reading: the buffer
-	-- is given back only once nothing is, as a picture is given back.
-	self.device.queue:waitIdle()
-
+	-- What the old bind groups held is what a frame still in flight may be reading: hood gives
+	-- them back once those submissions have finished, as it does a picture.
 	for _, bindGroup in ipairs(replaced) do bindGroup:destroy() end
 	old:destroy()
 end
@@ -509,9 +507,8 @@ function TextureManager:release(surface)
 
 	-- Destroying a texture a frame in flight still samples is undefined Vulkan and, on a
 	-- driver that notices, a lost device. Covers are released while a page changes, which is
-	-- exactly when the previous frame may still be in flight.
-	self.device.queue:waitIdle()
-
+	-- exactly when the previous frame may still be in flight: hood holds each of these handles
+	-- until the submissions that could read it have finished, so nothing is waited for here.
 	self.textures[at].bindGroup:destroy()
 	self.textures[at].view:destroy()
 

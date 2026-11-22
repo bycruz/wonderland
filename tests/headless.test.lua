@@ -452,6 +452,32 @@ test.skipIf(not canRender)("a hover style is used while the pointer is over the 
 	screen:close()
 end)
 
+-- A touch screen has no pointer above it: the finger that stood in for one is gone, and the last
+-- place it was is not a place anything is. What it was over must not stay hovered until another
+-- move that may never come.
+test.skipIf(not canRender)("a mouseLeave leaves nothing hovered where the pointer was", function()
+	local screen = withButton()
+
+	screen:draw()
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 60 })
+	screen:draw()
+
+	local overR = centrePixel(screen)
+	test.equal(overR, 255, "the button is hovered while the pointer is over it")
+
+	screen:event({ name = "mouseLeave", window = screen.window })
+	screen:draw()
+
+	local r, g, b = centrePixel(screen)
+	test.equal(r, 0, "and the hover is gone once the pointer has left")
+	test.equal(g, 0)
+	test.equal(b, 0)
+
+	test.equal(screen.plugins.layout:pointer(screen.window), nil, "and the place it was is forgotten")
+
+	screen:close()
+end)
+
 test.skipIf(not canRender)("an active style is used while the pointer is held down on the element", function()
 	local screen = withButton()
 
@@ -1003,6 +1029,18 @@ test.skipIf(not canRender)("draws a caret where the typing is", function()
 
 	screen:event({ name = "keyPress", window = screen.window, key = "home", modifiers = {} })
 	test.equal(caretLeft(10), 0, "and home takes it back to the start of the line")
+
+	-- A field focused by the app rather than by a click -- a page that opens with one, or a dialog
+	-- asking for a name -- takes the caret after what it holds: no point was given to place it at.
+	value = "abc"
+	screen:draw()
+	screen.plugins.layout:setFocus(screen.window, "field")
+	screen:draw()
+	test.equal(screen.plugins.layout:getCursorPos(screen.window), 3,
+		"a focus with no click puts the caret after the value")
+
+	-- The paragraph below starts from the start of the line, as a document does.
+	screen:event({ name = "keyPress", window = screen.window, key = "home", modifiers = {} })
 
 	-- A paragraph: the caret of the second line is a line's height down, which is the line it is on
 	-- rather than the box it is in.
