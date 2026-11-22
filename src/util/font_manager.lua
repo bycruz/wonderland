@@ -119,19 +119,23 @@ local function keyOf(spec)
 end
 
 --- A font file that is read once however many fonts are made from it: a face holds the whole of a
---- font's bytes, so two sizes of one font are two atlases and one file.
+--- font's bytes, so two sizes of one font are two atlases and one file. The weight is part of what a
+--- face is, because a variable font is one file for every weight: its bold and its regular are two
+--- faces of the same path.
 ---@param path string
 ---@param index number?
+---@param weight number?
 ---@return wonderland.font.Face?
-function FontManager:face(path, index)
-	local key = string.format("%s\1%d", path, index or 0)
+function FontManager:face(path, index, weight)
+	weight = weight or DEFAULT_WEIGHT
+	local key = string.format("%s\1%d\1%d", path, index or 0, weight)
 	local known = self.faces[key]
 
 	if known ~= nil then
 		return known or nil
 	end
 
-	local face = reader.open(path, index)
+	local face = reader.open(path, index, { weight = weight })
 
 	self.faces[key] = face or false
 
@@ -232,7 +236,7 @@ function FontManager:resolve(spec)
 			return nil, "No font on this machine to draw text with"
 		end
 
-		face = self:face(path, index)
+		face = self:face(path, index, spec.weight)
 	end
 
 	if face == nil then
@@ -269,7 +273,7 @@ function FontManager:resolve(spec)
 		spec = spec,
 		fallbacks = fallbacks,
 		load = function(fallbackPath, fallbackIndex)
-			return manager:face(assert(fallbackPath), fallbackIndex)
+			return manager:face(assert(fallbackPath), fallbackIndex, spec.weight)
 		end,
 	}
 	local font = Font.new(primary, fontOpts)

@@ -141,15 +141,17 @@ function reader.why()
 	return texter.why()
 end
 
---- A face, from a font file.
+--- A face, from a font file. `opts.weight` sets a variable font's weight axis, where the provider
+--- can: one file that holds every weight is how a phone ships its system font.
 ---@param path string
 ---@param index number?
+---@param opts { weight: number? }?
 ---@return wonderland.font.Face? face
 ---@return string? err
-function reader.open(path, index)
+function reader.open(path, index, opts)
 	assert(texter.available(), texter.why())
 
-	local face, err = provider.open(path, index)
+	local face, err = provider.open(path, index, opts)
 
 	if face ~= nil then
 		opened[face] = provider

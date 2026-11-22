@@ -1765,6 +1765,22 @@ function Layout:event(event)
 				event.x, event.y)
 			end
 
+			-- A field with no menu of its own takes the right button -- a long press, on a phone --
+			-- as a press on the word under it: the word is selected, as a double click selects it,
+			-- which is what is then copied, cut or typed over.
+			local field = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y, hasMouseDownOrClick)
+
+			if field and bit.band(field.element.flags, TEXT_INPUT) ~= 0 then
+				ctx.focusedName = wonderlandElement.nameOf(field.element)
+				ctx.cursorPos = #wonderlandElement.inputOf(field.element)
+				ctx.caretClick = { x = event.x, y = event.y }
+				ctx.selectFrom = nil
+				ctx.selecting = nil
+				ctx.anchorPos = nil
+				ctx.selectWord = true
+				ctx.typed = nil
+			end
+
 			return nil
 		end
 
