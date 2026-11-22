@@ -1180,6 +1180,17 @@ function UI:caretFor(window)
 	}
 end
 
+--- Whether a field's caret is drawn: a selection hides it. The highlight already says where the
+--- typing would go -- at one end of it -- and a bar drawn over that end is a second thing to read
+--- rather than a second thing said.
+---@param element wonderland.Element?
+---@param from number?
+---@param to number?
+---@return boolean
+local function caretShown(element, from, to)
+	return element ~= nil and (from == nil or to == nil or from >= to)
+end
+
 --- A click in a field, put where the caret goes: the point that was clicked, against the text the
 --- field draws -- the run of it, and where the walk put it -- as the line and the column the layout
 --- is told to put the caret at. It is against the frame that was on screen when the pointer went
@@ -1242,7 +1253,9 @@ end
 ---@return boolean blinked # Whether the caret came or went, which is a frame's worth of change
 ---@param self wonderland.plugin.UI
 function UI:blink(ctx)
-	if ctx.focusedName == nil then
+	local element, _, _, from, to = self.layoutPlugin:getCaret(ctx.window)
+
+	if not caretShown(element, from, to) then
 		return false
 	end
 
@@ -1337,21 +1350,25 @@ function UI:tick(window, handler)
 
 	-- The caret, which is the other thing a screen does with no event behind it. What has the
 	-- keyboard is not always a caret: a thing the keyboard was tabbed to that answers a click is
-	-- a keyboard with nothing blinking under it, and a frame every half second for a caret that
-	-- is not there is a screen drawing itself for nothing.
-	if self.caretBlink > 0 and self.layoutPlugin:getCaret(window) ~= nil then
-		local blink = (ctx.caretAt or at) + self.caretBlink
+	-- a keyboard with nothing blinking under it, and a selection hides the caret it covers. A frame
+	-- every half second for a caret that is not there is a screen drawing itself for nothing.
+	if self.caretBlink > 0 then
+		local element, _, _, from, to = self.layoutPlugin:getCaret(window)
 
-		if at >= blink then
-			-- What is due is a frame, and it is the caret's own clock that has kept it rather than the
-			-- frame's: the frame's time is what holds a frame back, so it is not asked through it. The
-			-- caret's coming or going is `UI:blink`, which the frame that comes of this runs.
-			local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
-			requestRedraw(self, window, true)
-			blink = at + self.caretBlink
+		if caretShown(element, from, to) then
+			local blink = (ctx.caretAt or at) + self.caretBlink
+
+			if at >= blink then
+				-- What is due is a frame, and it is the caret's own clock that has kept it rather than the
+				-- frame's: the frame's time is what holds a frame back, so it is not asked through it. The
+				-- caret's coming or going is `UI:blink`, which the frame that comes of this runs.
+				local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+				requestRedraw(self, window, true)
+				blink = at + self.caretBlink
+			end
+
+			due = due ~= nil and math.min(due, blink) or blink
 		end
-
-		due = due ~= nil and math.min(due, blink) or blink
 	end
 
 	-- A gif, which is the other thing a screen draws that changes with no event behind it. What
@@ -1483,8 +1500,14 @@ function UI:walk(window, ctx, key)
 	bottom = height}, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret, nil, self.canvas)
 
 	-- What the caret's quad is added to: the frame is the quads of the screen and then it, so a
-	-- blink is this many of them and no more.
-	ctx.caret = caret and caret.placed and caret or nil
+	-- blink is this many of them and no more. A selection hides the caret, though its own highlight
+	-- is still drawn -- see `caretShown`.
+	if caret ~= nil and caret.placed and caretShown(caret.element, caret.from, caret.to) then
+		ctx.caret = caret
+	else
+		ctx.caret = nil
+	end
+
 	ctx.caretBase = batch.quads
 
 	-- A caret that has not blinked yet is a caret that is drawn: nothing has said it should not be,

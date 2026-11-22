@@ -1581,7 +1581,9 @@ function Layout:key(window, key, modifiers, typed)
 			return cutOut(from, to)
 		end
 
-		local back = utf8.back(value, cursor)
+		-- With control it takes the word before the caret rather than the character before it,
+		-- which is the same key either way.
+		local back = (modifiers ~= nil and modifiers.ctrl == true) ? wordBack(value, cursor) : utf8.back(value, cursor)
 
 		if back < cursor then
 			return cutOut(back, cursor)

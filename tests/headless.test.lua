@@ -1019,6 +1019,17 @@ test.skipIf(not canRender)("draws a caret where the typing is", function()
 	screen:event({ name = "keyPress", window = screen.window, key = "end", modifiers = {} })
 	test.greater(caretLeft(30), 0, "which is a line of its own, placed in that line")
 
+	-- A selection hides the caret: what the highlight says is where the typing would go, and a bar
+	-- drawn over one end of it says it twice.
+	screen:event({ name = "keyPress", window = screen.window, key = "a", modifiers = { ctrl = true } })
+	screen:draw()
+
+	local ctx = assert(screen.plugins.layout.contexts[screen.window])
+	local visible = screen.plugins.layout:getCaret(screen.window)
+
+	test.truthy(visible ~= nil, "the field still has the keyboard")
+	test.equal(ctx.caret, nil, "and a selection over all of it is no caret to draw")
+
 	screen.plugins.ui.caretBlink = blink
 	screen:close()
 end)
@@ -2256,6 +2267,16 @@ test.skipIf(not canRender)("puts the caret where in a field it was clicked, and 
 	pressModified("w", { ctrl = true })
 
 	test.equal(value, "", "and a selection is what it takes away where there is one")
+
+	-- Control and backspace takes the word before the caret, as the same key does in every editor
+	-- there is: a word rather than the one character a backspace takes.
+	value = "one two three"
+	screen:draw()
+	pressModified("end")
+	pressModified("backspace", { ctrl = true })
+
+	test.equal(value, "one two", "control and backspace takes the word before the caret away")
+	test.equal(layout:getCursorPos(screen.window), 7, "and leaves the caret where that word began")
 
 	-- What is copied is the selection, and what is pasted replaces one.
 	value = "one two three"
