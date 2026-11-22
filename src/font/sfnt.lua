@@ -203,9 +203,9 @@ function sfnt.names(reader, offset)
 		return nil
 	end
 
-	-- Every offset in a font counts from the start of that font, which is the start of the file for
-	-- a file that holds one font and the first byte of the font inside a collection for a `.ttc`.
-	local table = reader(assert(offset) + nameAt, assert(nameLength))
+	-- A table's offset counts from the start of the file, not from the start of the font inside a
+	-- collection: a `.ttc` names every face's tables against the one file they share.
+	local table = reader(nameAt, assert(nameLength))
 
 	if table == nil or #table < 6 then
 		return nil
@@ -224,7 +224,7 @@ function sfnt.names(reader, offset)
 		-- usWeightClass is at four bytes in and fsSelection at sixty-two, and the table is under
 		-- a hundred bytes: it is read in one slice rather than sought into twice. A table shorter
 		-- than that read is an old or a broken one, and the file's weight is then unknown.
-		local metrics = reader(offset + os2At, 64)
+		local metrics = reader(os2At, 64)
 
 		if metrics ~= nil and #metrics >= 64 then
 			local selection = u16(metrics, 63)
@@ -241,7 +241,7 @@ function sfnt.names(reader, offset)
 		-- macStyle is at forty-four bytes in. It is consulted where `OS/2` said upright or was not
 		-- there at all, because a Mac-made font slants its italic in that flag and never had an
 		-- `OS/2` table to say otherwise.
-		local head = reader(offset + headAt, 46)
+		local head = reader(headAt, 46)
 
 		if head ~= nil and #head >= 46 then
 			italic = (u16(head, 45) & 2) ~= 0

@@ -132,6 +132,28 @@ local function buildFont(opts)
 	return assemble(tables)
 end
 
+--- A font whose table offsets count from the start of a collection rather than its own start, which
+--- is what a `.ttc` holds: every face names the tables it shares through one file.
+---@param font string
+---@param base number # Where the font starts in the collection, from one
+local function rebase(font, base)
+	local count = ((assert(font:byte(5)) << 8) | assert(font:byte(6)))
+	local records, at = {}, 13
+
+	for _ = 1, count do
+		local offset = 0
+
+		for index = 0, 3 do
+			offset = (offset << 8) | assert(font:byte(at + 8 + index))
+		end
+
+		records[#records + 1] = font:sub(at, at + 7) .. be32(offset + base) .. font:sub(at + 12, at + 15)
+		at = at + 16
+	end
+
+	return font:sub(1, 12) .. table.concat(records) .. font:sub(13 + count * 16)
+end
+
 --- A collection: a header naming where each of the fonts inside it starts, which is what a `.ttc` on
 --- a machine is -- the faces of a family in one file.
 ---@param fonts string[]
@@ -140,7 +162,7 @@ local function buildCollection(fonts)
 
 	for _, font in ipairs(fonts) do
 		offsets[#offsets + 1] = be32(at)
-		body[#body + 1] = font
+		body[#body + 1] = rebase(font, at)
 		at += #font
 	end
 
