@@ -2,13 +2,13 @@
 	"name": "wonderland",
 	"description": "A cross platform UI library for LuaJIT",
 	"authors": ["David Cruz <david@bycruz.dev>"],
-	"version": "0.1.14",
+	"version": "0.1.15",
 	"dependencies": {
 		"utf8": {
 			"version": "^0.1.0"
 		},
 		"hood": {
-			"version": "^0.2.10",
+			"version": "^0.2.11",
 			"features": ["vk"]
 		},
 		"image": {
@@ -18,7 +18,7 @@
 			"version": "^0.1.8"
 		},
 		"winit": {
-			"version": "^0.1.16"
+			"version": "^0.1.18"
 		},
 		"fs": {
 			"version": "^0.3.1"
