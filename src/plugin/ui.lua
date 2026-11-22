@@ -1603,8 +1603,10 @@ function UI:frame(window)
 
 	-- What this frame draws into is taken before any of it is built: a screen laid out at the size
 	-- of the last frame's target and drawn into this one's is a screen the compositor stretches,
-	-- which during a resize is every frame of it.
-	if (owed or not ctx.presented) and not self.renderPlugin:retarget(window) then
+	-- which during a resize is every frame of it. A frame the screen presented is drawn too, from
+	-- the screen already built, so it needs a target as much as a rebuilt one does: without one the
+	-- draw below has nothing to draw into and the frame is silently dropped.
+	if (owed or mustDraw or not ctx.presented) and not self.renderPlugin:retarget(window) then
 		return
 	end
 
