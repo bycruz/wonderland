@@ -38,7 +38,10 @@
 --
 --   local shown = video:current()
 --   div():style(sty():size(shown.width, shown.height):image(shown.texture, shown.uv))
-local image = require("image")
+-- Loaded when a picture is actually decoded: a screen that draws no images
+-- should not need the native decoder, and on Android a bundled native library
+-- is extracted when the bundle runs rather than when the app starts.
+local function image() return require("image") end
 local time = require("wonderland.time")
 
 --- One picture, uploaded: how big it is, and the texture a style draws it with.
@@ -393,7 +396,7 @@ function Assets:image(path)
 		return known
 	end
 
-	local decoded, err = image.load(path)
+	local decoded, err = image().load(path)
 	assert(decoded, err)
 
 	local asset = self:upload(decoded)
@@ -420,7 +423,7 @@ function Assets:gif(path)
 		return known
 	end
 
-	local file, err = image.stream(path)
+	local file, err = image().stream(path)
 	assert(file, err)
 
 	---@cast file image.Stream

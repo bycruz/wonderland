@@ -10,6 +10,7 @@
 -- Reading a directory is the one thing the C library does not spell the same way on two platforms,
 -- which is what `fs` is for; the header parsing is in `wonderland.font.sfnt`.
 local ffi = require("ffi")
+local jit = require("jit")
 local fs = require("fs")
 local sfnt = require("wonderland.font.sfnt")
 
@@ -74,6 +75,12 @@ local function platformDirs()
 	if ffi.os == "OSX" then
 		return { "/System/Library/Fonts", "/Library/Fonts", "/Network/Library/Fonts",
 			home .. "/Library/Fonts" }
+	end
+
+	-- Android keeps the system's fonts at the root, product fonts beside them, and nothing in
+	-- the user's home: an app's own files are not where the platform's typefaces live.
+	if jit.android then
+		return { "/system/fonts", "/product/fonts", "/system_ext/fonts" }
 	end
 
 	---@type string

@@ -403,11 +403,12 @@ function app.run(self)
 
 	-- What the program copies to and pastes from, and what a paste in a field comes out of: the
 	-- system's clipboard is the program's rather than a window's -- a paste lands wherever the
-	-- program puts it -- so there is one of these however many windows an app has.
-	self.clipboard = winit.Clipboard.new(eventLoop)
+	if winit.Clipboard then
+		self.clipboard = winit.Clipboard.new(eventLoop)
 
-	if self.layoutPlugin then
-		self.layoutPlugin.clipboard = self.clipboard
+		if self.layoutPlugin then
+			self.layoutPlugin.clipboard = self.clipboard
+		end
 	end
 
 	-- Whether events are coming in faster than the loop can take them one at a time, which is what

@@ -1,6 +1,7 @@
 local ffi = require("ffi")
 local hood = require("hood")
-local image = require("image")
+-- Only a screenshot writes an image; a normal frame never loads the decoder.
+local function image() return require("image") end
 
 local VertexLayout = require("hood").VertexLayout
 local TextureManager = require("wonderland.util.texture_manager")
@@ -885,7 +886,7 @@ function RenderPlugin:saveScreenshot(ctx, path)
 	local buffer = ffi.new("uint8_t[?]", #pixels)
 	ffi.copy(buffer, pixels, #pixels)
 
-	return image.new(capture.width, capture.height, 4, buffer):save(path)
+	return image().new(capture.width, capture.height, 4, buffer):save(path)
 end
 
 --- Frees what a context holds, and what the contexts shared once the last one goes.
