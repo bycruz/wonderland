@@ -215,8 +215,10 @@ end
 ---@field caret wonderland.plugin.UI.Caret? # Where the caret was last placed, and what it is drawn as
 ---@field presented boolean? # And whether the gpu has drawn one for it
 ---@field focusedName string?
+---@field textInput boolean? # Whether the window was last told to show its on-screen keyboard: see `UI:frame`
 ---@field modifiers winit.KeyModifiers? # What the keyboard last said was held, which mouse events do not carry
 ---@field barDrag wonderland.plugin.Layout.BarDrag? # The scroll bar being dragged, while one is
+---@field touchScroll { index: number, to: number, at: number }? # Where a finger last dragged a box's content to, which the next move of the drag goes on from
 ---@field dragging wonderland.plugin.Layout.Drag? # The slider being dragged, while one is
 ---@field pointer wonderland.plugin.Layout.Pointer? # Where the pointer is, and whether it is held
 ---@field pointing string? # What the pointer cursor was last set to, nothing for the one a window has
@@ -1885,12 +1887,34 @@ function Layout:event(event)
 		local ctx = self.contexts[event.window]
 
 		-- A wheel arrives without a place in the window -- the platform reports that it turned,
-		-- not where -- so it goes to the box the pointer was last seen in. A window the pointer
-		-- has never been in has no box for it, and the app's own event handler is what hears it.
-		if ctx and ctx.pointer ~= nil and (event.dy ~= 0 or event.dx ~= 0) then
-			local hit = wheelTarget(ctx, ctx.pointer.x, ctx.pointer.y)
+		-- not where -- so it goes to the box the pointer was last seen in. A finger dragging the
+		-- content says where it is, and that is the box it moves. A window the pointer has never
+		-- been in has no box for a wheel, and the app's own event handler is what hears it.
+		local x, y = event.x, event.y
+		if x == nil and ctx and ctx.pointer ~= nil then x, y = ctx.pointer.x, ctx.pointer.y end
+
+		if ctx and x ~= nil and (event.dy ~= 0 or event.dx ~= 0) then
+			local hit = wheelTarget(ctx, x, y)
 
 			if hit ~= nil and hit.element.onscroll ~= 0 then
+				local bar = event.pixels and hit.node.scrolls == 1 and assert(ctx.screen).bars[hit.index - 1] or nil
+				if bar ~= nil then
+					-- A finger dragging the content is a distance, and the content goes where the
+					-- finger put it: an absolute place, as a bar dragged is, kept inside what the
+					-- box can scroll. The moves of a drag come faster than frames, and the frame's
+					-- offset is behind the last of them, so each goes on from where the last one put
+					-- the content. The box is known by its place in the layout: its element is made
+					-- again every frame.
+					local last = ctx.touchScroll
+					local from = hit.node.scroll
+					if last ~= nil and last.index == hit.index and time.now() - last.at < 0.25 then
+						from = last.to
+					end
+					local to = math.min(math.max(from + event.dy, 0), bar.max)
+					ctx.touchScroll = { index = hit.index, to = to, at = time.now() }
+					return scrollMessage(callbacks[hit.element.onscroll], nil, to)
+				end
+
 				-- How far a wheel asks the content to move is the app's to work out: a row of a
 				-- list and a page of a document are not the same distance, and what the platform
 				-- reports is the wheel turning rather than the distance.

@@ -188,6 +188,19 @@ function App:every(seconds, fn)
 	end)
 end
 
+--- How long a frame of a window's display lasts, in seconds: what an animation of the app's own is
+--- stepped at, so it moves at the rate the display shows rather than a rate guessed for it. See
+--- `UI:intervalOf`.
+---@param window wonderland.RenderWindow
+---@return number
+---@param self wonderland.App
+function App:frameInterval(window)
+	if self.uiPlugin then
+		return self.uiPlugin:intervalOf(window)
+	end
+	return 1 / 60
+end
+
 --- A frame now, rather than at the display's own rate: what an app that has just been given
 --- something new to show asks for. See `UI:present`.
 ---@param window wonderland.RenderWindow

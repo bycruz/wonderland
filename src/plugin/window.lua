@@ -3,7 +3,7 @@ local backend = require("wonderland.backend")
 
 ---@class wonderland.plugin.Window.Context
 ---@field window winit.Window
----@field surface hood.Surface
+---@field surface hood.Surface? # Nil between an unmap that took the surface away and the next map
 
 ---@class wonderland.plugin.Window<Message>: wonderland.Plugin, { onWindowCreate: Message }
 ---@field mainCtx wonderland.plugin.Window.Context?
@@ -48,6 +48,13 @@ function WindowPlugin:event(event, handler)
 	if event.name == "map" and not self:getContext(event.window) then
 		self:register(event.window)
 		return self.onWindowCreate
+	elseif event.name == "map" then
+		-- A window whose surface the platform took away on its unmap -- Android does whenever the
+		-- app leaves the screen -- has a new one now; the renderer makes its swapchain for it.
+		local ctx = assert(self:getContext(event.window))
+		if ctx.surface == nil then
+			ctx.surface = self.instance:createSurface(event.window)
+		end
 	elseif event.name == "create" then
 		self:register(event.window)
 		return self.onWindowCreate

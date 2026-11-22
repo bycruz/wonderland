@@ -21,6 +21,7 @@ local DEPTH_FORMAT = backend.isVulkan and "depth32float" or "depth24plus"
 ---@class wonderland.plugin.Render.Context
 ---@field window wonderland.RenderWindow
 ---@field swapchain hood.Swapchain?
+---@field surfaceLost boolean? # The window's surface was taken away on an unmap: no frame until the map that brings a new one
 ---@field capture wonderland.plugin.Render.Capture?
 ---@field clear wonderland.Color
 ---@field quadPipeline hood.Pipeline
@@ -101,6 +102,43 @@ local RenderPlugin = {}
 -- How many frames in a row may be asked for while there is still nothing to draw into.
 local DRAW_RETRIES = 3
 RenderPlugin.__index = RenderPlugin
+
+--- A window whose surface the platform takes away -- an Android app leaving the screen -- gives up
+--- its swapchain with it, before the surface is destroyed under the swapchain; the map that shows
+--- the window again brings a new surface (see `wonderland.plugin.Window`), and its swapchain is
+--- made here, before the frame that map asks for is drawn.
+---@param event winit.Event
+function RenderPlugin:event(event)
+	if event.name ~= "unmap" and event.name ~= "map" then
+		return nil
+	end
+
+	local ctx = self.contexts[event.window]
+	if ctx == nil then
+		return nil
+	end
+
+	if event.name == "unmap" and event.surfaceLost then
+		local windowCtx = assert(self.windowPlugin:getContext(event.window))
+		self:getDevice().queue:waitIdle()
+		ctx.target, ctx.targetView = nil, nil
+		if ctx.swapchain then
+			ctx.swapchain:destroy()
+			ctx.swapchain = nil
+		end
+		if windowCtx.surface then
+			windowCtx.surface:destroy()
+			windowCtx.surface = nil
+		end
+		ctx.surfaceLost = true
+	elseif event.name == "map" and ctx.surfaceLost then
+		if self:resize(ctx) then
+			ctx.surfaceLost = nil
+		end
+	end
+
+	return nil
+end
 
 ---@class wonderland.plugin.Render.Options
 ---@field presentMode string? # "fifo" waits for the display, "immediate" does not
@@ -665,6 +703,10 @@ function RenderPlugin:retarget(window)
 
 	if ctx.target then
 		return true
+	end
+
+	if ctx.surfaceLost then
+		return false
 	end
 
 	if not ctx.swapchain then

@@ -49,7 +49,7 @@ local now = time.now
 ---@field toggle fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context)
 ---@field tick fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, handler: winit.EventManager): any?
 ---@field caretFor fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow): any
----@field frameInterval number # The least time between frames, in seconds: see `UI:requestRedraw`
+---@field frameInterval number # The least time between frames, in seconds, for a window whose display rate is not known: see `UI:intervalOf`
 ---@field caretBlink number # How long a caret is drawn for and how long it is not, nought for one that stays
 local UI = {}
 UI.__index = UI
@@ -1059,6 +1059,20 @@ local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, w
 	end
 end
 
+--- The least time between frames of a window: a frame of its display, where the window can say how
+--- fast that is -- a 144 Hz monitor is drawn at 144 frames a second -- and `frameInterval` where it
+--- cannot. What the window says is asked once.
+---@param window wonderland.RenderWindow
+---@return number
+function UI:intervalOf(window)
+	local rate = window.displayRate
+	if rate == nil then
+		rate = window.refreshRate ~= nil and window:refreshRate() or false
+		window.displayRate = rate
+	end
+	return (rate and rate > 0) and 1 / rate or self.frameInterval
+end
+
 --- A frame is asked for, at most one for each frame the display has time to show. What the
 --- question is asked about is a window, so what says when the last frame went out is kept with it.
 --- A frame asked for before that time is not lost: what the screen says goes into the frame that
@@ -1083,7 +1097,7 @@ function UI:requestRedraw(window, forced)
 		-- A frame the window manager asked for is the display's own time: one that was held back
 		-- for coming too soon is the one that goes out then, so what a window shows is the state
 		-- its events left rather than the state they left a frame ago.
-		if not forced and not window.frameAsked and at - (ctx.framedAt or 0) < self.frameInterval then
+		if not forced and not window.frameAsked and at - (ctx.framedAt or 0) < self:intervalOf(window) then
 			return
 		end
 
@@ -1450,7 +1464,7 @@ function UI:tick(window, handler)
 	-- the loop to be woken: the ration is the same one, so this is a frame at the rate of a frame and
 	-- no faster.
 	if ctx.owed then
-		local ready = (ctx.framedAt or 0) + self.frameInterval
+		local ready = (ctx.framedAt or 0) + self:intervalOf(window)
 
 		if at >= ready then
 			local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
@@ -1582,6 +1596,14 @@ function UI:frame(window)
 	-- `app.run`, which does not count such a window as owing one either.
 	if window.visible == false then
 		return
+	end
+
+	-- The on-screen keyboard follows the focus: up while a field has it, down once none does. A
+	-- window with no keyboard of its own has no `setTextInput`.
+	local typing = ctx.focusedName ~= nil
+	if typing ~= (ctx.textInput == true) and window.setTextInput ~= nil then
+		ctx.textInput = typing
+		window:setTextInput(typing)
 	end
 
 	-- Where a click in a field put the caret, before anything is built out of it: the point is

@@ -266,7 +266,7 @@ local layout = {}
 --- whether the window is on screen at all -- false while it is hidden or minimized, and nil on a
 --- window that does not track it, which is one that is shown. A frame is not drawn for a window
 --- that is not on screen; see `wonderland.plugin.UI:frame`.
----@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, visible: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))?, cursors: table<string, boolean>? }
+---@alias wonderland.RenderWindow { width: number, height: number, shouldRedraw: boolean?, frameAsked: boolean?, visible: boolean?, setCursor: (fun(self: any, shape: string))?, resetCursor: (fun(self: any))?, cursors: table<string, boolean>?, refreshRate: (fun(self: any): number?)?, displayRate: number|false|nil }
 
 ---@class wonderland.layout
 ---@field new fun(capacity: number?): wonderland.Layout.Screen
