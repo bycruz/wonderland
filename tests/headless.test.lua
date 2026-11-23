@@ -1285,6 +1285,43 @@ test.skipIf(not canRender)("a blink is one quad and no screen is built for it", 
 	screen:close()
 end)
 
+-- A frame with nothing to draw into -- a minimized window, an Android surface taken away in the
+-- background -- is dropped. The view it owed is still owed: the next frame that has a target
+-- builds it, rather than repainting the screen built before the app's state changed.
+test.skipIf(not canRender)("a dropped frame keeps the view it owed", function()
+	local screen = wonderland.headless.new(function()
+		return div():style({ width = { abs = 20 }, height = { abs = 20 } })
+	end, { width = 20, height = 20, fontPath = assert(fontPath) })
+
+	local ui = screen.plugins.ui
+	local layout = screen.plugins.layout
+	ui.frameInterval = 0
+	screen:draw()
+
+	local refreshes = 0
+	local refresh = layout.refreshView
+
+	---@param plugin wonderland.plugin.Layout
+	---@param window wonderland.RenderWindow
+	layout.refreshView = function(plugin, window)
+		refreshes = refreshes + 1
+
+		return refresh(plugin, window)
+	end
+
+	local retarget = ui.renderPlugin.retarget
+	ui.renderPlugin.retarget = function() return false end
+	ui:requestRedraw(screen.window, true)
+	ui:frame(screen.window)
+	test.equal(refreshes, 0, "a frame with no target builds nothing")
+
+	ui.renderPlugin.retarget = retarget
+	ui:frame(screen.window)
+	test.equal(refreshes, 1, "the next frame with a target builds the view the dropped one owed")
+
+	screen:close()
+end)
+
 -- A field that takes more than one line: return breaks the line rather than sending it,
 -- control with return sends it, and the caret moves between the lines and the ends of them. What
 -- is typed is the app's to keep, as it is in a field of one line: the message comes back and the

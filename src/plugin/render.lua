@@ -107,9 +107,14 @@ RenderPlugin.__index = RenderPlugin
 --- its swapchain with it, before the surface is destroyed under the swapchain; the map that shows
 --- the window again brings a new surface (see `wonderland.plugin.Window`), and its swapchain is
 --- made here, before the frame that map asks for is drawn.
+---
+--- A resize that leaves the swapchain at another size makes it again here. Most platforms say so
+--- by refusing the next image, which `retarget` answers; Android does not -- a phone turned on
+--- its side keeps handing out images of the old shape, which the compositor squeezes into the
+--- new one.
 ---@param event winit.Event
 function RenderPlugin:event(event)
-	if event.name ~= "unmap" and event.name ~= "map" then
+	if event.name ~= "unmap" and event.name ~= "map" and event.name ~= "resize" then
 		return nil
 	end
 
@@ -131,6 +136,12 @@ function RenderPlugin:event(event)
 			windowCtx.surface = nil
 		end
 		ctx.surfaceLost = true
+	elseif event.name == "resize" then
+		local swapchain = ctx.swapchain
+		if swapchain ~= nil and not ctx.surfaceLost
+			and (swapchain.width ~= event.window.width or swapchain.height ~= event.window.height) then
+			self:resize(ctx)
+		end
 	elseif event.name == "map" and ctx.surfaceLost then
 		if self:resize(ctx) then
 			ctx.surfaceLost = nil

@@ -1619,7 +1619,8 @@ function UI:frame(window)
 
 	-- An ask is answered by the frame that comes out of it, which is where the window is told the
 	-- frame is ready: see `X11Window:acknowledgeSync`, which is what puts the ask away.
-	local asked = ctx.asked or window.frameAsked
+	local ownAsk = ctx.asked
+	local asked = ownAsk or window.frameAsked
 	local mustDraw = ctx.mustDraw
 
 	ctx.asked, ctx.mustDraw = nil, nil
@@ -1635,6 +1636,13 @@ function UI:frame(window)
 	-- the screen already built, so it needs a target as much as a rebuilt one does: without one the
 	-- draw below has nothing to draw into and the frame is silently dropped.
 	if (owed or mustDraw or not ctx.presented) and not self.renderPlugin:retarget(window) then
+		-- Nothing was built or drawn, so what this frame was for is still owed. Forgetting it would
+		-- leave the next frame that does get a target repainting the screen built before it: an app
+		-- whose state changed while its window had no image (minimized, or an Android surface gone
+		-- in the background) would come back showing the old state until something else changed.
+		ctx.owed = ctx.owed or owed
+		ctx.mustDraw = ctx.mustDraw or mustDraw
+		ctx.asked = ctx.asked or ownAsk
 		return
 	end
 
