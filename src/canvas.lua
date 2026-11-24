@@ -35,6 +35,24 @@ local NAMED = {
 --- The colour of a shape as the number a frame is written with: a name, a hex string, or a table of
 --- channels. What none of those is is white, which is what a canvas draws where it was given
 --- something it cannot read rather than drawing nothing.
+---
+--- A canvas draws every frame, and a shape names the same colour every time, so what a string comes
+--- to is read once and kept: a hex string is parsed and packed on the frame it is first drawn with,
+--- and every frame after it is a lookup. That also keeps the parse out of the trace a canvas is
+--- compiled as -- it is a match, four substrings and four numbers, which is not what a shape is.
+---@type table<string, number>
+local colourCache = {}
+
+--- One channel of a hex string, as the fraction of one the packed colour is made of.
+---@param hex string
+---@param step number
+---@param index number
+local function part(hex, step, index)
+	local byte = tonumber(hex:sub(index * step + 1, index * step + step), 16) or 0
+
+	return step == 1 and byte / 15 or byte / 255
+end
+
 ---@param colour string|wonderland.Color
 local function colourOf(colour)
 	if type(colour) == "table" then
@@ -43,26 +61,31 @@ local function colourOf(colour)
 	end
 
 	if type(colour) == "string" then
+		local cached = colourCache[colour]
+
+		if cached ~= nil then
+			return cached
+		end
+
+		local packed = 0xffffffff
 		local named = NAMED[colour:lower()]
 
 		if named ~= nil then
-			return Quads.colour(named[1], named[2], named[3], 1)
-		end
+			packed = Quads.colour(named[1], named[2], named[3], 1)
+		else
+			local hex = colour:match("^#(%x+)$")
 
-		local hex = colour:match("^#(%x+)$")
+			if hex ~= nil then
+				local step = #hex <= 3 and 1 or 2
 
-		if hex ~= nil then
-			local step = #hex <= 3 and 1 or 2
-
-			---@param index number
-			local function part(index)
-				local byte = tonumber(hex:sub(index * step + 1, index * step + step), 16) or 0
-
-				return step == 1 and byte / 15 or byte / 255
+				packed = Quads.colour(part(hex, step, 0), part(hex, step, 1), part(hex, step, 2),
+					#hex == 8 and part(hex, step, 3) or 1)
 			end
-
-			return Quads.colour(part(0), part(1), part(2), #hex == 8 and part(3) or 1)
 		end
+
+		colourCache[colour] = packed
+
+		return packed
 	end
 
 	return 0xffffffff
@@ -313,14 +336,20 @@ function Canvas:rect(x, y, width, height, colour, radius)
 	local cut = left < clip.left or top < clip.top or right > clip.right or bottom > clip.bottom
 
 	if not cut then
+		local batch = store.batch
+		local r = batch.request
+
+		r.left, r.top = toNDC(left, store.windowWidth), -toNDC(top, store.windowHeight)
+		r.right, r.bottom = toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight)
+		r.z, r.colour, r.texture = store.z, rgba, store.white
+		r.uv0, r.uv1 = 0, 0xFFFFFFFF
+		r.own, r.blur, r.border, r.spread = 0, 0, 0, 0
+
 		if radius ~= nil and radius > 0 then
-			store.batch:roundQuad(toNDC(left, store.windowWidth), -toNDC(top, store.windowHeight),
-				toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight), store.z, rgba,
-				store.white, nil, nil, radius)
+			r.radius, r.band, r.hasBand, r.hasBox = radius, 1, 1, 0
+			batch:roundQuadFrom()
 		else
-			store.batch:quad(toNDC(left, store.windowWidth), -toNDC(top, store.windowHeight),
-				toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight), store.z, rgba,
-				store.white)
+			batch:quadFrom()
 		end
 
 		return self
@@ -335,16 +364,23 @@ function Canvas:rect(x, y, width, height, colour, radius)
 	local drawnRight = math.min(right, clip.right)
 	local drawnBottom = math.min(bottom, clip.bottom)
 
+	local batch = store.batch
+	local r = batch.request
+
+	r.left, r.top = toNDC(drawnLeft, store.windowWidth), -toNDC(drawnTop, store.windowHeight)
+	r.right, r.bottom = toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight)
+	r.z, r.colour, r.texture = store.z, rgba, store.white
+	r.uv0, r.uv1 = 0, 0xFFFFFFFF
+	r.own, r.blur, r.border, r.spread = 0, 0, 0, 0
+
 	if radius ~= nil and radius > 0 then
-		store.batch:roundQuad(toNDC(drawnLeft, store.windowWidth), -toNDC(drawnTop, store.windowHeight),
-			toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight), store.z, rgba,
-			store.white, nil, nil, radius, nil, nil, nil, toNDC(left, store.windowWidth),
-			-toNDC(top, store.windowHeight), toNDC(right, store.windowWidth),
-			-toNDC(bottom, store.windowHeight))
+		r.radius, r.band, r.hasBand, r.hasBox = radius, 1, 1, 1
+		r.boxLeft, r.boxTop = toNDC(left, store.windowWidth), -toNDC(top, store.windowHeight)
+		r.boxRight, r.boxBottom = toNDC(right, store.windowWidth), -toNDC(bottom, store.windowHeight)
+
+		batch:roundQuadFrom()
 	else
-		store.batch:quad(toNDC(drawnLeft, store.windowWidth), -toNDC(drawnTop, store.windowHeight),
-			toNDC(drawnRight, store.windowWidth), -toNDC(drawnBottom, store.windowHeight), store.z, rgba,
-			store.white)
+		batch:quadFrom()
 	end
 
 	return self

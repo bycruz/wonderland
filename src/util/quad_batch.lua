@@ -179,6 +179,7 @@ batch.QUAD_INDICES = QUAD_INDICES
 ---@field texture number
 ---@field z number
 ---@field own number
+---@field border number
 
 --- One corner of the unit square every quad is drawn as, as the language server sees it.
 ---@class wonderland.ffi.wl_corner: ffi.cdata*
@@ -203,6 +204,7 @@ local DEFAULT_CAPACITY = 1024
 ---@field runCount number # How many runs this frame has
 ---@field quads number # How many are in it
 ---@field capacity number # How many fit before it grows
+---@field request wonderland.QuadBatch.Request # the quad a `From` call writes: see below
 ---@field texture number? # The texture a run is drawn from
 ---@field scaleX number # How many pixels one of a quad's x coordinates is worth
 ---@field scaleY number # and one of its y coordinates, which is what keeps a corner round
@@ -284,23 +286,6 @@ function QuadBatch:reset()
 	self.quads = 0
 	self.runCount = 0
 	self.texture = nil
-end
-
---- Every quad from here on is drawn with another picture, so the run the last one was in ends
---- and another starts. A quad that samples what the one before it did joins that run, which is
---- what makes a line of text one draw call rather than one per glyph.
----@param texture number
-function QuadBatch:startRun(texture)
-	if self.runCount >= self.capacity then
-		self:reserve(self.capacity + 1)
-	end
-
-	local at = self.runCount * RUN_NUMBERS
-
-	self.runs[at + RUN_TEXTURE] = texture
-	self.runs[at + RUN_FIRST] = self.quads
-	self.runCount = self.runCount + 1
-	self.texture = texture
 end
 
 --- Throws away the quads past a point, and the runs that were only theirs: a frame is drawn
@@ -425,105 +410,217 @@ function batch.rgba(r, g, b, a)
 	return bit.tobit(r + g * 256 + b * 65536 + a * 16777216)
 end
 
---- What a quad samples and what is left of it: the part of the picture the box is, how deep it is
---- drawn, its colour, which picture that is, and whether it is drawn as it is.
+--- One quad a caller is asking for, in one place a call hands over as a pointer rather than as
+--- eighteen values. It is a scratch structure rather than a new one a quad: what a call carries is
+--- what the recorder has to keep alive across it, and a request of eighteen arguments is one it
+--- cannot coalesce -- so the values go into memory first, where they are plain stores, and the
+--- call is `self` and the request.
 ---
---- Eleven values is a call the recorder cannot keep in registers: what it does with them is more
---- than it can coalesce, and the trace it is in is thrown away -- see `putBox`, which is the other
---- half of what this used to be written as, and `quad`, which is where the two are called.
+--- The doubles matter: a position or a size that is a float32 is 0.7 read as 0.69999999, which is
+--- a pixel on a 1200 pixel screen. The caller writes pixels, `clippedQuad` writes the normalized
+--- corners the batch reads, and both are the same width as the numbers they came from.
+---
+--- `hasBand` says whether a band was named (a band of nought is a hard edge, and no band at all is
+--- the one pixel either side a round corner has by default) and `hasBox` says whether the box the
+--- corners belong to is the quad itself or a box a clip cut it down from.
+---@class wonderland.QuadBatch.Request: ffi.cdata*
+---@field left number
+---@field top number
+---@field right number
+---@field bottom number
+---@field z number
+---@field radius number
+---@field band number
+---@field blur number
+---@field border number
+---@field spread number
+---@field boxLeft number
+---@field boxTop number
+---@field boxRight number
+---@field boxBottom number
+---@field colour number
+---@field texture number
+---@field uv0 number
+---@field uv1 number
+---@field own number
+---@field hasBox number
+---@field hasBand number
+local request = ffi.new([[
+	struct {
+		double left, top, right, bottom;
+		double z, radius, band, blur, border, spread;
+		double boxLeft, boxTop, boxRight, boxBottom;
+		uint32_t colour, texture, uv0, uv1;
+		uint8_t own, hasBox, hasBand;
+	}
+]])
+
+-- On the class as well as the module: a batch instance is indexed through the class, and a
+-- canvas drawing with one asks it for the request it fills.
+batch.request = request
+QuadBatch.request = request
+
+--- The corners, the part of the picture and what they are drawn with: everything a quad says that
+--- does not depend on how round or how spread it is. It is a function of its own so that what it
+--- reads is dead before the cut is worked out -- a side trace that starts at the cut inherits what
+--- is still live there, and enough of them is more than the register allocator can coalesce. See
+--- `QuadBatch:roundQuadFrom`.
 ---@param instance wonderland.ffi.wl_instance
----@param uv0 number
----@param uv1 number
----@param z number
----@param colour number
----@param texture number
----@param own number?
-local function putPicture(instance, uv0, uv1, z, colour, texture, own)
+---@param r wonderland.QuadBatch.Request
+local function putCorners(instance, r)
+	local left, top, right, bottom = r.left, r.top, r.right, r.bottom
+	local uv0, uv1 = r.uv0, r.uv1
+
+	instance.c0x, instance.c0y, instance.c1x, instance.c1y = left, top, right, top
+	instance.c2x, instance.c2y, instance.c3x, instance.c3y = right, bottom, left, bottom
+
 	-- The part of the picture the box is, as the two corners it is: a 65535th across and a 65535th
 	-- down in each, which is the pair of numbers the instance keeps. What is written here is what was
 	-- narrowed once, by whoever had the picture's own numbers to hand -- see `batch.uv`.
 	instance.u0, instance.v0 = bit.band(uv0, 0xffff), bit.rshift(uv0, 16)
 	instance.u1, instance.v1 = bit.band(uv1, 0xffff), bit.rshift(uv1, 16)
-	instance.z = z
+	instance.z = r.z
 
 	-- The colour is the four bytes it is, in one number: a byte a channel, which is what the shader
 	-- reads as the fractions of one they are. Written here rather than narrowed four times over with
 	-- a clamp each, which is what a colour handed over as four fractions cost -- see `batch.colour`.
-	instance.rgba = colour
+	instance.rgba = r.colour
 
 	-- Which picture it samples, as the id it is: narrowed no further than it is, because the two
 	-- backends do not agree on an integer vertex attribute -- one scales a narrowed one back into a
 	-- fraction and the other reads a number -- and a picture is a number the shader looks a band up
 	-- by either way.
-	instance.texture = texture
+	instance.texture = r.texture
 
 	-- How this one's picture is drawn: nought a shape the colour goes through, one a picture of its own
 	-- colours, two the coverage of a glyph, which the shader corrects for gamma. The vertex shader
 	-- reads the byte as the number it is.
-	instance.own = own or 0
+	instance.own = r.own
 end
 
---- The box a quad covers, written as the four corners the gpu reads: it is handed the box rather
---- than the corners because every quad but a shape of a canvas is one -- a box cut down by the pane
---- it is in is a box, and one drawn past the box it is in by a blur is a box.
----
---- A box and not the corners is also four numbers fewer at every call: what a call hands over is
---- what the recorder has to keep alive across it, and a call that hands over eleven of them is one
---- it cannot coalesce -- see `putPicture` and `putCorners`.
+--- The middle of the box and how far its corners are cut: the half of it either way, the radius
+--- and the band, and the blur a spread-out edge is drawn with. It is written after the corners so
+--- that at the guards below only the box and the cut are live.
 ---@param instance wonderland.ffi.wl_instance
----@param left number # In the coordinates the batch is handed, which are the gpu's own
----@param top number
----@param right number
----@param bottom number
-local function putBox(instance, left, top, right, bottom)
-	instance.c0x, instance.c0y, instance.c1x, instance.c1y = left, top, right, top
-	instance.c2x, instance.c2y, instance.c3x, instance.c3y = right, bottom, left, bottom
-end
+---@param r wonderland.QuadBatch.Request
+---@param scaleX number
+---@param scaleY number
+local function putCut(instance, r, scaleX, scaleY)
+	-- The box the corners belong to is the quad itself unless the request names another one: a quad
+	-- a clip cut down is still the whole box, and its corners are the corners of that box.
+	local boxLeft, boxTop, boxRight, boxBottom
 
---- One quad of four corners that are not a box, which is what a shape of a canvas is: a line, a
---- slice of a circle, a bar of a spectrum that is not square to the screen. What it samples is one
---- point of the picture it is given, which is the white one, so the whole of it is that point.
----@param instance wonderland.ffi.wl_instance
----@param x1 number # The corners, in the order they go round
----@param y1 number
----@param x2 number
----@param y2 number
----@param x3 number
----@param y3 number
----@param x4 number
----@param y4 number
-local function putCorners(instance, x1, y1, x2, y2, x3, y3, x4, y4)
-	instance.c0x, instance.c0y, instance.c1x, instance.c1y = x1, y1, x2, y2
-	instance.c2x, instance.c2y, instance.c3x, instance.c3y = x3, y3, x4, y4
-end
+	if r.hasBox ~= 0 then
+		boxLeft, boxTop, boxRight, boxBottom = r.boxLeft, r.boxTop, r.boxRight, r.boxBottom
+	else
+		boxLeft, boxTop, boxRight, boxBottom = r.left, r.top, r.right, r.bottom
+	end
 
---- How far what a quad draws is spread, in pixels, as the half an instance keeps it in: nought for
---- every quad that asked for none, which is nearly all of them.
----@param instance wonderland.ffi.wl_instance
----@param blur number
-local function putBlur(instance, blur)
-	instance.blur = toHalf(blur)
-end
+	local halfX = math.abs(boxRight - boxLeft) * scaleX * 0.5
+	local halfY = math.abs(boxBottom - boxTop) * scaleY * 0.5
 
---- The cut of a quad: how round its corners are and how sharp the edge of that is, both as the
---- halves an instance keeps them in, and how far inside the box the arcs of it sit, in pixels.
----@param instance wonderland.ffi.wl_instance
----@param innerX number
----@param innerY number
----@param radius number
----@param band number
-local function putCut(instance, innerX, innerY, radius, band)
-	instance.innerX, instance.innerY = innerX, innerY
+	instance.centreX, instance.centreY = (boxLeft + boxRight) * 0.5, (boxTop + boxBottom) * 0.5
+
+	-- A radius bigger than the box it is asked for is the roundest the box can be: the arcs meet
+	-- in the middle of it, and what is left is a box round all the way down its short side. The
+	-- minimum is the IR min rather than a branch, which matters here: a circle asks for a radius
+	-- that is exactly half its box, so this is taken for every round box and a branch would be a
+	-- side trace started for every one of them.
+	local radius = math.min(r.radius, math.min(halfX, halfY))
+
+	-- A cut that names no band is one pixel either side of an edge, which is what a box wants.
+	local band = r.band
+
+	if r.hasBand == 0 then
+		band = 1
+	end
+
+	instance.innerX, instance.innerY = halfX - radius, halfY - radius
 	instance.radius, instance.band = toHalf(radius), toHalf(band)
+	instance.blur = toHalf(r.blur)
+	instance.border = math.max(0, math.min(255, math.floor(r.border + 0.5)))
 end
 
---- One more quad in the batch.
----@param self wonderland.QuadBatch
-local function finish(self)
-	self.quads = self.quads + 1
+--- Adds one quad, growing to fit if this frame is the largest so far. What it writes is all read
+--- from the request that was filled for it: see `request`.
+function QuadBatch:quadFrom()
+	local r = request
+	local at = self.quads
+
+	if at >= self.capacity then
+		self:reserve(self.capacity + 1)
+	end
+
+	-- Opening the run here rather than through a call: a call made among the values a quad is
+	-- written from is one the recorder has to keep every one of them alive across, and enough
+	-- of them is more than it can coalesce. A run cannot overflow the array before a quad does,
+	-- since every run holds at least the quad that opened it.
+	local texture = r.texture
+
+	if texture ~= self.texture then
+		local run = self.runCount * RUN_NUMBERS
+
+		self.runs[run + RUN_TEXTURE] = texture
+		self.runs[run + RUN_FIRST] = at
+		self.runCount = self.runCount + 1
+		self.texture = texture
+	end
+
+	local instance = self.instances[at]
+
+	putCorners(instance, r)
+
+	-- The box a quad of two corners is cut against is the quad itself, which is what the shader maps
+	-- the picture across and measures a corner of it from.
+	instance.centreX, instance.centreY = (r.left + r.right) * 0.5, (r.top + r.bottom) * 0.5
+
+	-- A quad that is not round and not spread says so in a cut of nought and a blur of nought, which
+	-- is what nearly every quad in a screen writes: it is written here as the halves they are rather
+	-- than narrowed by anything, because nought is nought in both.
+	instance.innerX = math.abs(r.right - r.left) * self.scaleX * 0.5
+	instance.innerY = math.abs(r.bottom - r.top) * self.scaleY * 0.5
+	instance.radius, instance.band, instance.blur = 0, 0, 0
+	instance.border = 0
+
+	self.quads = at + 1
 end
 
---- Adds one quad, growing to fit if this frame is the largest so far.
+--- Opens a run of quads that sample another picture, for a caller that has the room for the quad
+--- it is about to write: a glyph of a face after the first, or a picture of its own. It is a call
+--- rather than five lines in the caller's loop because the branch out of a loop is a side trace
+--- that inherits the loop's values, and this one is taken by the glyphs that name a face of their
+--- own rather than by the line.
+---@param texture number
+function QuadBatch:openRun(texture)
+	local run = self.runCount * RUN_NUMBERS
+
+	self.runs[run + RUN_TEXTURE] = texture
+	self.runs[run + RUN_FIRST] = self.quads
+	self.runCount = self.runCount + 1
+	self.texture = texture
+end
+
+--- Adds one quad that is a glyph: its four corners, the part of the picture it is, and its colour,
+--- with no cut, no blur and no border about it -- which is every glyph drawn inside the pane it is
+--- in. It grows nothing and opens no run: the loop that draws a line does both before it, because
+--- a loop that carries those two branches per glyph is a loop the recorder gives up on.
+function QuadBatch:glyphFrom()
+	local r = request
+	local at = self.quads
+	local instance = self.instances[at]
+
+	putCorners(instance, r)
+
+	instance.centreX, instance.centreY = (r.left + r.right) * 0.5, (r.top + r.bottom) * 0.5
+	instance.innerX = math.abs(r.right - r.left) * self.scaleX * 0.5
+	instance.innerY = math.abs(r.bottom - r.top) * self.scaleY * 0.5
+	instance.radius, instance.band, instance.blur = 0, 0, 0
+	instance.border = 0
+
+	self.quads = at + 1
+end
+
+--- Adds one quad, the values of which are the request's: the call a caller outside a frame makes.
 ---@param left number # Normalized, so the gpu can use them as they are
 ---@param top number
 ---@param right number
@@ -535,36 +632,14 @@ end
 ---@param uv1 number?
 ---@param own number? # Whether the picture is drawn as it is rather than through the colour
 function QuadBatch:quad(left, top, right, bottom, z, colour, texture, uv0, uv1, own)
-	if self.quads >= self.capacity then
-		self:reserve(self.capacity + 1)
-	end
+	local r = request
 
-	if texture ~= self.texture then
-		self:startRun(texture)
-	end
+	r.left, r.top, r.right, r.bottom = left, top, right, bottom
+	r.z, r.colour, r.texture = z, colour, texture
+	r.uv0, r.uv1 = uv0 or 0, uv1 or UV_WHOLE
+	r.own = own or 0
 
-	local instances = self.instances
-	local at = self.quads
-
-	-- The box a quad of two corners is cut against is the quad itself, which is what the shader maps
-	-- the picture across and measures a corner of it from.
-	local halfX = math.abs(right - left) * self.scaleX * 0.5
-	local halfY = math.abs(bottom - top) * self.scaleY * 0.5
-	local instance = instances[at]
-
-	putBox(instance, left, top, right, bottom)
-	putPicture(instance, uv0 or 0, uv1 or UV_WHOLE, z, colour, texture, own)
-
-	instance.centreX, instance.centreY = (left + right) * 0.5, (top + bottom) * 0.5
-
-	-- A quad that is not round and not spread says so in a cut of nought and a blur of nought, which
-	-- is what nearly every quad in a screen writes: it is written here as the halves they are rather
-	-- than narrowed by anything, because nought is nought in both.
-	instance.innerX, instance.innerY = halfX, halfY
-	instance.radius, instance.band, instance.blur = 0, 0, 0
-	instance.border = 0
-
-	finish(self)
+	self:quadFrom()
 end
 
 --- Adds one quad of four arbitrary corners, which is what a shape that is not a box is drawn with:
@@ -590,7 +665,12 @@ function QuadBatch:points(x1, y1, x2, y2, x3, y3, x4, y4, z, colour, texture)
 	end
 
 	if texture ~= self.texture then
-		self:startRun(texture)
+		local run = self.runCount * RUN_NUMBERS
+
+		self.runs[run + RUN_TEXTURE] = texture
+		self.runs[run + RUN_FIRST] = self.quads
+		self.runCount = self.runCount + 1
+		self.texture = texture
 	end
 
 	-- A shape of a canvas is four points and no box: what it is cut against is the box its corners
@@ -598,10 +678,18 @@ function QuadBatch:points(x1, y1, x2, y2, x3, y3, x4, y4, z, colour, texture)
 	-- point of a picture whatever it is drawn across.
 	local left, right = math.min(x1, x2, x3, x4), math.max(x1, x2, x3, x4)
 	local top, bottom = math.min(y1, y2, y3, y4), math.max(y1, y2, y3, y4)
-	local instance = self.instances[self.quads]
+	local at = self.quads
+	local instance = self.instances[at]
 
-	putCorners(instance, x1, y1, x2, y2, x3, y3, x4, y4)
-	putPicture(instance, 0, UV_WHOLE, z, colour, texture, 0)
+	instance.c0x, instance.c0y, instance.c1x, instance.c1y = x1, y1, x2, y2
+	instance.c2x, instance.c2y, instance.c3x, instance.c3y = x3, y3, x4, y4
+
+	instance.u0, instance.v0 = 0, 0
+	instance.u1, instance.v1 = bit.band(UV_WHOLE, 0xffff), bit.rshift(UV_WHOLE, 16)
+	instance.z = z
+	instance.rgba = colour
+	instance.texture = texture
+	instance.own = 0
 
 	instance.centreX, instance.centreY = (left + right) * 0.5, (top + bottom) * 0.5
 	instance.innerX, instance.innerY = math.abs(right - left) * self.scaleX * 0.5,
@@ -609,7 +697,7 @@ function QuadBatch:points(x1, y1, x2, y2, x3, y3, x4, y4, z, colour, texture)
 	instance.radius, instance.band, instance.blur = 0, 0, 0
 	instance.border = 0
 
-	finish(self)
+	self.quads = at + 1
 end
 
 --- Adds one triangle, which is a quad whose last two corners are the same: the second of the two
@@ -639,13 +727,42 @@ end
 --- does that often enough is one the recorder stops compiling at all.
 ---
 --- Everything about the corners is in pixels: the radius, and the box they are round in, which is
---- passed only when a clip cut the quad down to less than the box it was asked for -- the corners
---- of a box cut by the pane it is in are still the corners of the whole box.
+--- the box the quad itself is unless the request says a clip cut the quad down to less than the
+--- box it was asked for -- the corners of a box cut by the pane it is in are still the corners of
+--- the whole box.
 ---
---- The box comes after everything a quad usually says, so that a quad which is its own box -- which
---- is every box that a pane did not cut -- is a call that stops at the radius. What a call is
---- written as is what the recorder has to keep alive across it, and a call that hands over four
---- numbers nothing is going to read is four numbers too many: see `put`.
+--- What it writes is all read from the request that was filled for it: a call that carries no
+--- values is one the recorder has nothing to keep alive across. See `request`.
+function QuadBatch:roundQuadFrom()
+	local r = request
+	local at = self.quads
+
+	if at >= self.capacity then
+		self:reserve(self.capacity + 1)
+	end
+
+	if r.texture ~= self.texture then
+		local run = self.runCount * RUN_NUMBERS
+
+		self.runs[run + RUN_TEXTURE] = r.texture
+		self.runs[run + RUN_FIRST] = at
+		self.runCount = self.runCount + 1
+		self.texture = r.texture
+	end
+
+	local instance = self.instances[at]
+
+	-- The corners first and the cut after them: the values a side trace starting at the radius
+	-- inherits are the box and the cut alone, rather than everything a quad says. See `putCorners`.
+	putCorners(instance, r)
+	putCut(instance, r, self.scaleX, self.scaleY)
+
+	self.quads = at + 1
+end
+
+--- Adds one round quad, the values of which are the request's: the call a caller outside a frame
+--- makes. What is round about it comes after everything a quad usually says so that a quad that
+--- is its own box is a call that stops at the radius. See `request`.
 ---@param left number # Normalized, as `quad` takes them
 ---@param top number
 ---@param right number
@@ -666,59 +783,24 @@ end
 ---@param border number? # A ring of this many pixels drawn inside the cut, instead of a fill
 function QuadBatch:roundQuad(left, top, right, bottom, z, colour, texture, uv0, uv1, radius, band, own, blur,
 	boxLeft, boxTop, boxRight, boxBottom, border)
-	if self.quads >= self.capacity then
-		self:reserve(self.capacity + 1)
+	local r = request
+
+	r.left, r.top, r.right, r.bottom = left, top, right, bottom
+	r.z, r.colour, r.texture = z, colour, texture
+	r.uv0, r.uv1 = uv0 or 0, uv1 or UV_WHOLE
+	r.radius, r.band, r.own = radius, band or 0, own or 0
+	r.hasBand = band ~= nil and 1 or 0
+	r.blur, r.border, r.spread = blur or 0, border or 0, 0
+
+	if boxLeft ~= nil then
+		r.hasBox = 1
+		r.boxLeft, r.boxTop = boxLeft, assert(boxTop)
+		r.boxRight, r.boxBottom = assert(boxRight), assert(boxBottom)
+	else
+		r.hasBox = 0
 	end
 
-	if texture ~= self.texture then
-		self:startRun(texture)
-	end
-
-	local instances = self.instances
-	local at = self.quads
-
-	-- One pixel either side of the edge unless the caller says otherwise, which is what a box
-	-- with round corners wants and what a shadow does not.
-	band = band or 1
-
-	-- Where the corners are cut from: the middle of the box, how far the arcs sit inside it, and
-	-- the radius itself. All of it in pixels either way, so that an arc is a circle.
-	local scaleX, scaleY = self.scaleX, self.scaleY
-
-	boxLeft, boxTop = boxLeft or left, boxTop or top
-	boxRight, boxBottom = boxRight or right, boxBottom or bottom
-
-	local halfX = math.abs(boxRight - boxLeft) * scaleX * 0.5
-	local halfY = math.abs(boxBottom - boxTop) * scaleY * 0.5
-
-	-- A radius bigger than the box it is asked for is the roundest the box can be: the arcs meet
-	-- in the middle of it, and what is left is a box round all the way down its short side.
-	if radius > halfX then
-		radius = halfX
-	end
-
-	if radius > halfY then
-		radius = halfY
-	end
-
-	local innerX, innerY = halfX - radius, halfY - radius
-	local centreX, centreY = (boxLeft + boxRight) * 0.5, (boxTop + boxBottom) * 0.5
-
-	-- Where the quad samples the picture is worked out from the box and the part of the picture the
-	-- box is, so what is written is that part and no mapping of it: a quad drawn past the box it is
-	-- in -- what a blur is -- reads past the part of the picture that is there, which is what fades
-	-- its edge out.
-	local instance = instances[at]
-
-	putBox(instance, left, top, right, bottom)
-	putPicture(instance, uv0 or 0, uv1 or UV_WHOLE, z, colour, texture, own)
-	putCut(instance, innerX, innerY, radius, band)
-	putBlur(instance, blur or 0)
-	instance.border = math.max(0, math.min(255, math.floor((border or 0) + 0.5)))
-
-	instance.centreX, instance.centreY = centreX, centreY
-
-	finish(self)
+	self:roundQuadFrom()
 end
 
 ---@return number # Bytes written, which is what the gpu is told to read

@@ -244,23 +244,32 @@ end
 
 --- One element, zeroed, which is what makes a slot handed out again look new: the array
 --- is reused, so nothing here is zero because it is new.
+---
+--- The reference handed back is the one the table already holds rather than one made by indexing
+--- the array: an array indexing is a reference made for the reading, and a view that builds a screen
+--- makes one for every element it keeps -- which is what a repaint used to cost before this. A slot
+--- is the same address for the same index every frame, so the reference is kept and handed out
+--- again: see `pointers`.
 ---@return wonderland.Element
 local function make()
 	count = count + 1
 
-	local block = bit.rshift(count - 1, SHIFT) + 1
+	local made = pointers[count]
 
-	if blocks[block] == nil then
-		blocks[block] = ffi.new("wl_element[?]", BLOCK)
+	if made == nil then
+		local block = bit.rshift(count - 1, SHIFT) + 1
+
+		if blocks[block] == nil then
+			blocks[block] = ffi.new("wl_element[?]", BLOCK)
+		end
+
+		made = blocks[block][bit.band(count - 1, MASK)]
+		pointers[count] = made
 	end
-
-	local made = blocks[block][bit.band(count - 1, MASK)]
 
 	ffi.fill(made, SIZE)
 	made.index = count
 	made.frame = frame
-
-	pointers[count] = made
 
 	return made
 end
@@ -269,8 +278,14 @@ end
 --- would otherwise read is the element the next frame has already put in its slot.
 ---@param self wonderland.Element
 local function check(self)
-	assert(self.frame == frame,
-	"This element was made in an earlier frame: an element is built by the view function and used in the repaint it was built for")
+	-- A test and an error rather than an assert: an assert is a call into C for every element of
+	-- every frame -- this is the one check every element passes through -- and the message is only
+	-- wanted on the frame that gets it wrong.
+	if self.frame == frame then
+		return
+	end
+
+	error("This element was made in an earlier frame: an element is built by the view function and used in the repaint it was built for")
 end
 
 --- Every repaint builds its tree again, so the frame starts empty: the elements are
@@ -417,7 +432,9 @@ end
 ---@return wonderland.Element
 ---@param self wonderland.Element
 function methods:style(value)
-	check(self)
+	if self.frame ~= frame then
+		error("This element was made in an earlier frame: an element is built by the view function and used in the repaint it was built for")
+	end
 	self.baseStyle = style.intern(value)
 
 	return self
@@ -464,21 +481,50 @@ end
 ---@return wonderland.Element
 ---@param self wonderland.Element
 function methods:children(...)
-	check(self)
+	-- The frame check is written out rather than called: every element of every frame goes through
+	-- this and `style`, and a call for a comparison is a call the interpreter makes per element.
+	if self.frame ~= frame then
+		error("This element was made in an earlier frame: an element is built by the view function and used in the repaint it was built for")
+	end
 
 	local after = lastChild(self)
+	local given = select("#", ...)
 
-	for index = 1, select("#",...) do
-			local value = select(index,...)
+	-- One list is what nearly every call passes, and reaching it without `select` is a C call
+	-- fewer for it: see below for what a list is walked with rather than `ipairs`.
+	if given == 1 then
+		local value = ...
 
-			if type(value) == "table" then
-				for _, nested in ipairs(value) do
-						after = link(self, after, intoElement(nested))
-					end
-			else
-				after = link(self, after, intoElement(value))
+		if type(value) == "table" then
+			local list = value --[[@as wonderland.IntoElement[]]
+
+			for at = 1, #list do
+				after = link(self, after, intoElement(list[at] --[[@as wonderland.IntoElement]]))
 			end
+
+			return self
 		end
+
+		link(self, after, intoElement(value))
+
+		return self
+	end
+
+	-- A list is walked by index rather than with `ipairs`: the iterator is a call into C for
+	-- every child, and a repaint's tree is made of children.
+	for index = 1, given do
+		local value = select(index, ...)
+
+		if type(value) == "table" then
+			local list = value --[[@as wonderland.IntoElement[]]
+
+			for at = 1, #list do
+				after = link(self, after, intoElement(list[at] --[[@as wonderland.IntoElement]]))
+			end
+		else
+			after = link(self, after, intoElement(value))
+		end
+	end
 
 	return self
 end

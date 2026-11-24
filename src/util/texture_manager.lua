@@ -36,6 +36,7 @@ local backend = require("wonderland.backend")
 ---@field view hood.TextureView
 ---@field bindGroup hood.BindGroup
 ---@field layers number
+---@field channels number # One for a picture of coverage, four for one of colours
 ---@field owned boolean?
 
 --- A picture, as the shader needs it: the texture it is in, the layer its first band is, how many
@@ -47,13 +48,14 @@ local backend = require("wonderland.backend")
 ---@field base number
 ---@field scale number
 ---@field last number
+---@field channels number # One where the texture holds coverage in one channel
 
 -- The sampler's binding is one of its own on Vulkan, where a sampler and the texture it reads are
 -- two objects, and the texture's own unit on OpenGL, where they are one.
 local SAMPLER_BINDING = backend.isVulkan and 1 or 0
 
 -- Where the shader reads a picture's bands from, and how much of it is one picture: a vec4 of
--- base layer, layers spanned, last layer, and one to spare.
+-- base layer, layers spanned, last layer, and whether the picture is coverage in one channel.
 local SLOT_BINDING = 2
 local SLOT_FLOATS = 4
 
@@ -73,6 +75,13 @@ local MAX_LAYERS = 256
 -- Keeping the window small is also what keeps an idle app's resident memory small; the extra
 -- bands of a very large picture are cheap next to holding eight megabytes that are usually empty.
 local DEFAULT_UPLOAD_PIXELS = 256 * 1024
+
+-- How many channels a picture of coverage is uploaded with. Vulkan samples a single channel texture
+-- as (coverage, coverage, coverage, coverage) at the shader, so a font sheet of coverage is a
+-- quarter of the memory the same sheet in four channels is; the OpenGL backend here has only four
+-- channel pictures and says so, and a sheet of coverage is uploaded as white with the coverage in
+-- the alpha there.
+local COVERAGE_CHANNELS = backend.isVulkan and 1 or 4
 
 --- A picture this library did not draw itself: a texture somebody else rendered -- another
 --- renderer built on hood, a shader of an app's own -- or one this library made to be drawn into.
@@ -106,6 +115,7 @@ local DEFAULT_UPLOAD_PIXELS = 256 * 1024
 ---@field stagePixels number # How much of a band it holds
 ---@field whiteTexture Texture # The picture a box with no picture of its own is drawn with
 ---@field errorTexture Texture # And the one that says a texture id was not one
+---@field coverageChannels number # One where a picture of coverage is one channel, four where it is not
 local TextureManager = {}
 TextureManager.__index = TextureManager
 
@@ -142,6 +152,7 @@ function TextureManager.new(device, opts)
 		slotCapacity = 64,
 		textures = {},
 		textureCount = 0,
+		coverageChannels = COVERAGE_CHANNELS,
 	}, TextureManager)
 
 	-- A box with no picture is drawn with the first of these, which is why it is uploaded first:
@@ -220,14 +231,19 @@ end
 ---@param width number # The width of a layer, which is the width of the pictures
 ---@param height number # And its height, which is the rows of one band
 ---@param layers number
+---@param format string? # The format of a pixel: rgba8unorm, or r8unorm for coverage
+---@param channels number? # One where the format holds coverage, four where it holds colours
 ---@return number # Its place in `textures`
-function TextureManager:createTexture(width, height, layers)
+function TextureManager:createTexture(width, height, layers, format, channels)
 	assert(width <= MAX_SIZE and height <= MAX_SIZE and layers <= MAX_LAYERS,
 		string.format("A texture of %dx%dx%d is larger than this renderer makes", width, height, layers))
 
+	channels = channels or 4
+	format = format or "rgba8unorm"
+
 	local texture = self.device:createTexture({
 		extents = { dim = "2d", width = width, height = height, count = layers },
-		format = "rgba8unorm",
+		format = format,
 		usages = { "TEXTURE_BINDING", "COPY_DST" }
 	})
 
@@ -238,6 +254,7 @@ function TextureManager:createTexture(width, height, layers)
 		texture = texture,
 		view = view,
 		layers = layers,
+		channels = channels,
 		bindGroup = self:createBindGroup(view),
 		owned = true,
 	}
@@ -277,8 +294,16 @@ end
 ---@param bands number
 function TextureManager:writeBands(texture, first, image, layerHeight, bands)
 	local width, height = image.width, image.height
-	local pixels = width * layerHeight * 4
 	local layer = assert(self.textures[texture])
+	local channels = layer.channels
+	local rowBytes = width * channels
+
+	-- Rows are staged one after another from the start of a 4 byte boundary, so that a row of
+	-- coverage -- a byte a pixel rather than four -- reaches the gpu at the stride it has: what a
+	-- copy into an image names is a row length in whole words, and the last row is padded rather
+	-- than bleeding into the next.
+	local stride = math.ceil(rowBytes / 4) * 4
+	local pixels = stride * layerHeight
 
 	-- Kept rather than made per band: a gif is a band of a frame per frame, and a buffer of that
 	-- size asked for and thrown away once per frame is churn for nothing.
@@ -293,14 +318,15 @@ function TextureManager:writeBands(texture, first, image, layerHeight, bands)
 		local top = band * layerHeight
 		local rows = math.min(layerHeight, height - top)
 
-		ffi.fill(stage, width * layerHeight * 4)
+		ffi.fill(stage, stride * layerHeight)
 
 		for row = 0, rows - 1 do
-			ffi.copy(stage + row * width * 4, image.pixels + (top + row) * width * 4, width * 4)
+			ffi.copy(stage + row * stride, image.pixels + (top + row) * rowBytes, rowBytes)
 		end
 
 		self.device.queue:writeTexture(layer.texture,
-			{ layer = first + band, width = width, height = layerHeight }, stage)
+			{ layer = first + band, width = width, height = layerHeight, bytesPerRow = stride,
+				rowLength = width }, stage)
 	end
 end
 
@@ -330,6 +356,7 @@ function TextureManager:addSlot(width, height, texture, first, layerHeight, band
 		base = first,
 		scale = height / layerHeight,
 		last = first + bands - 1,
+		channels = assert(self.textures[texture]).channels,
 	}
 
 	self.slotCount = slot + 1
@@ -343,7 +370,10 @@ end
 ---@param buffer hood.Buffer
 function TextureManager:writeSlot(slot, buffer)
 	local metadata = assert(self.slots[slot])
-	local entry = ffi.new("float[4]", { metadata.base, metadata.scale, metadata.last, 0 })
+	-- The fourth number tells the shader that what it samples is coverage in one channel rather
+	-- than a white picture with the coverage in its alpha: the two read the same at the shader.
+	local mono = metadata.channels == 1 and 1 or 0
+	local entry = ffi.new("float[4]", { metadata.base, metadata.scale, metadata.last, mono })
 
 	self.device.queue:writeBuffer(buffer, SLOT_FLOATS * ffi.sizeof("float"), entry,
 		slot * SLOT_FLOATS * ffi.sizeof("float"))
@@ -448,6 +478,7 @@ function TextureManager:wrap(texture, opts)
 		texture = texture,
 		view = view,
 		layers = 1,
+		channels = 4,
 		bindGroup = self:createBindGroup(view),
 		owned = opts ~= nil and opts.owned == true or nil,
 	}
@@ -535,6 +566,7 @@ function TextureManager:writeLayer(slot, image)
 	assert(image.width == metadata.width and image.height == metadata.height, string.format(
 		"A %dx%d picture does not fit the %dx%d frame this layer holds", image.width, image.height,
 		metadata.width, metadata.height))
+	assert(assert(image.channels) == metadata.channels, "A picture of another channel count does not fit this layer")
 
 	self.pending[#self.pending + 1] = { slot = slot, image = image }
 end
@@ -552,9 +584,20 @@ function TextureManager:flush(encoder)
 		local upload = self.pending[index]
 		local metadata = assert(self.slots[upload.slot])
 		local layer = assert(self.textures[metadata.texture])
+		local width = upload.image.width
+		local channels = layer.channels
+
+		-- A row is named in bytes, and a copy into an image names it in whole words: a picture of
+		-- coverage has one byte a pixel, so its rows are read at their own stride rather than at
+		-- four bytes a pixel. A sheet is a power of two a side, so its rows are whole words.
+		local bytesPerRow = width * channels
+
+		assert(bytesPerRow % 4 == 0, string.format(
+			"A %d pixel row of %d channels is not a whole number of words", width, channels))
 
 		encoder:writeTexture(layer.texture,
-			{ layer = metadata.base, width = upload.image.width, height = upload.image.height },
+			{ layer = metadata.base, width = width, height = upload.image.height,
+				bytesPerRow = bytesPerRow, rowLength = width },
 			upload.image.pixels)
 
 		self.pending[index] = nil
@@ -572,12 +615,14 @@ function TextureManager:upload(image)
 		"A %dx%d picture is larger than the %d pixels a side this renderer uploads a texture of.",
 		width, height, MAX_SIZE))
 
-	-- The array is rgba8unorm and the shader reads it as such, so a buffer of fewer channels
-	-- would be sampled as if its bytes were pixels of four.
-	assert(image.channels == 4, "A texture takes four channels")
+	-- A picture is either colours, four channels sampled as four, or coverage, one channel the
+	-- shader reads as a whole pixel. Anything else has no format here to be uploaded as.
+	assert(image.channels == 4 or image.channels == 1, "A texture takes four channels or one")
 
+	local channels = image.channels
+	local format = channels == 1 and "r8unorm" or "rgba8unorm"
 	local layerHeight, bands = banding(width, height, self.uploadPixels)
-	local texture = self:createTexture(width, layerHeight, bands)
+	local texture = self:createTexture(width, layerHeight, bands, format, channels)
 
 	self:writeBands(texture, 0, image, layerHeight, bands)
 

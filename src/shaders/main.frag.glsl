@@ -19,9 +19,10 @@ BINDING(0, 0)uniform sampler2DArray uTexture;
 #endif
 
 // Where a picture's rows are, per picture: the layer its first band is in, how many layers a
-// picture of its height spans, and the last of them. A picture is uploaded in bands -- rows of it
-// stacked as layers -- because an upload reaches the gpu through a window of host visible memory
-// rather than the whole card, so what one upload holds is bounded however large a picture is.
+// picture of its height spans, the last of them, and whether what it holds is coverage in one
+// channel. A picture is uploaded in bands -- rows of it stacked as layers -- because an upload
+// reaches the gpu through a window of host visible memory rather than the whole card, so what one
+// upload holds is bounded however large a picture is.
 BUFFER_BINDING(0, 2)readonly buffer PictureBands {
     vec4 pictureBand[];
 };
@@ -81,11 +82,21 @@ vec4 fetch(vec2 uv, vec4 band) {
     float down = uv.y * band.y;
 
     #ifdef VULKAN
-    return texture(sampler2DArray(uTexture, uSampler),
+    vec4 texel = texture(sampler2DArray(uTexture, uSampler),
         vec3(uv.x, fract(down), min(band.x + floor(down), band.z)));
     #else
-    return texture(uTexture, vec3(uv.x, fract(down), min(band.x + floor(down), band.z)));
+    vec4 texel = texture(uTexture, vec3(uv.x, fract(down), min(band.x + floor(down), band.z)));
     #endif
+
+    // A sheet of coverage is one channel, which the sampler reads as that value with nothing in
+    // the others and one in the alpha. It is read here as the white picture with the coverage in
+    // its alpha that a backend with only four channel textures packs, so everything after this
+    // samples the two alike -- and the coverage itself is the same byte of the same value.
+    if (band.w > 0.5) {
+        return vec4(texel.r, texel.r, texel.r, texel.r);
+    }
+
+    return texel;
 }
 
 // And one point of it that is inside it: the space beside a picture is not the picture, and the cell

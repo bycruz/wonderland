@@ -35,6 +35,11 @@ local WIDTH, HEIGHT = PRESENT.width, PRESENT.height
 -- nodes are made from one -- so it is taken again at the start of each frame.
 local styleArena = style.arena
 
+-- And the same styles as references, which is what a slot is read as: reading one out of the
+-- array is a reference made for the reading, and a build reads a few per element. See `refs` in
+-- `wonderland.style`.
+local styleRefs = style.refs
+
 ffi.cdef [[
 	// Under ffi.C because LuaJIT only knows the symbols it has been told about: this is
 	// how a whole frame is compared at once.
@@ -60,7 +65,7 @@ ffi.cdef [[
 		int32_t marginTop, marginRight, marginBottom, marginLeft;
 		int32_t top, left, right, bottom;
 		int32_t borderTop, borderRight, borderBottom, borderLeft;
-		uint32_t fgR, fgG, fgB, fgA;   // text colour as bytes, 0 for nothing
+		uint8_t fgR, fgG, fgB, fgA;    // text colour as bytes, 0 for nothing
 		uint32_t texture, font;        // the texture it paints, and the font it is drawn in
 		float bright;                  // a multiplier on the colours, 1.0 for not one
 		float radius;                  // how round its corners are, in pixels, 0 for square
@@ -167,6 +172,9 @@ local STYLE_COPY = ffi.offsetof("wl_style", "barWidth")
 local nodeArray = ffi.typeof("wl_node[?]")
 local barArray = ffi.typeof("wl_bar[?]")
 local recordArray = ffi.typeof("wl_record[?]")
+-- Whether every solve is written to the log, which is a question asked of the environment once
+-- rather than once a frame: a repaint asks nothing of a process that is not being debugged.
+local DIFF_DEBUG = os.getenv("WL_DIFF_DEBUG") ~= nil
 local NODE_SIZE = assert(ffi.sizeof("wl_node"))
 local RECORD_SIZE = assert(ffi.sizeof("wl_record"))
 
@@ -287,9 +295,95 @@ local layout = {}
 ---@field lastChildren number
 ---@field lastWidth number # And the window it was solved in, which every box follows
 ---@field lastHeight number
+---@field refs wonderland.Node[] # The nodes as references, by the same index: see `fillRefs`
+---@field recordRefs ffi.cdata* # And the records, the same way
+---@field solveIndex ffi.cdata* # The stack a solve is worked on: one slot a level of the tree
+---@field solvePhase ffi.cdata*
+---@field solveCursor ffi.cdata*
+---@field solveParentWidth ffi.cdata*
+---@field solveParentHeight ffi.cdata*
+---@field solveMain ffi.cdata*
+---@field solveMainSet ffi.cdata*
+---@field solveMainRow ffi.cdata*
+---@field solveRow ffi.cdata*
+---@field solveWidth ffi.cdata*
+---@field solveHeight ffi.cdata*
+---@field solveContentWidth ffi.cdata*
+---@field solveContentHeight ffi.cdata*
+---@field solveContainerMain ffi.cdata*
+---@field solveContainerCross ffi.cdata*
+---@field solveAuto ffi.cdata*
+---@field solveTotalMain ffi.cdata*
+---@field solveVisible ffi.cdata*
+---@field solveAutoCount ffi.cdata*
+---@field solveOffset ffi.cdata*
+---@field solveSpacing ffi.cdata*
+---@field solvePlaced ffi.cdata*
+---@field solveAux ffi.cdata*
+---@field markIndex ffi.cdata* # And the stack the pointer is marked down: a node and its place
+---@field markX ffi.cdata*
+---@field markY ffi.cdata*
+---@field buildElement ffi.cdata* # And the stack a screen is built on: an element, its parent, its child slot
+---@field buildParent ffi.cdata*
+---@field buildSlot ffi.cdata*
+---@field buildChild ffi.cdata*
 ---@field root number # 1 based index of the root
 local Screen = {}
 Screen.__index = Screen
+
+--- The node and record arrays as references, which is what a build and a solve read: an index into
+--- the array is a reference made for the reading, and a frame reads one per element several times.
+--- Kept, a read is a table index. Refreshed whenever the arrays are copied to bigger ones.
+---@param screen wonderland.Layout.Screen
+local function fillRefs(screen)
+	local nodes, records = screen.nodes, screen.records
+	local refs, recordRefs = screen.refs, screen.recordRefs
+
+	for at = 1, screen.capacity do
+		refs[at] = nodes[at - 1]
+		recordRefs[at] = records[at - 1]
+	end
+end
+
+--- The stacks the per-frame walks keep, one slot a level of the tree. They live here rather than
+--- in the walks because a walk is called every frame and an array made every frame is garbage:
+--- they are grown with the node arrays, since a tree is no deeper than the nodes it makes.
+---@param screen wonderland.Layout.Screen
+---@param capacity number
+local function allocateStacks(screen, capacity)
+	screen.solveIndex = ffi.new("uint32_t[?]", capacity)
+	screen.solvePhase = ffi.new("uint8_t[?]", capacity)
+	screen.solveCursor = ffi.new("int32_t[?]", capacity)
+	screen.solveParentWidth = ffi.new("double[?]", capacity)
+	screen.solveParentHeight = ffi.new("double[?]", capacity)
+	screen.solveMain = ffi.new("double[?]", capacity)
+	screen.solveMainSet = ffi.new("uint8_t[?]", capacity)
+	screen.solveMainRow = ffi.new("uint8_t[?]", capacity)
+	screen.solveRow = ffi.new("uint8_t[?]", capacity)
+	screen.solveWidth = ffi.new("double[?]", capacity)
+	screen.solveHeight = ffi.new("double[?]", capacity)
+	screen.solveContentWidth = ffi.new("double[?]", capacity)
+	screen.solveContentHeight = ffi.new("double[?]", capacity)
+	screen.solveContainerMain = ffi.new("double[?]", capacity)
+	screen.solveContainerCross = ffi.new("double[?]", capacity)
+	screen.solveAuto = ffi.new("double[?]", capacity)
+	screen.solveTotalMain = ffi.new("double[?]", capacity)
+	screen.solveVisible = ffi.new("int32_t[?]", capacity)
+	screen.solveAutoCount = ffi.new("int32_t[?]", capacity)
+	screen.solveOffset = ffi.new("double[?]", capacity)
+	screen.solveSpacing = ffi.new("double[?]", capacity)
+	screen.solvePlaced = ffi.new("int32_t[?]", capacity)
+	screen.solveAux = ffi.new("double[?]", capacity)
+
+	screen.markIndex = ffi.new("uint32_t[?]", capacity)
+	screen.markX = ffi.new("double[?]", capacity)
+	screen.markY = ffi.new("double[?]", capacity)
+
+	screen.buildElement = ffi.new("uint32_t[?]", capacity)
+	screen.buildParent = ffi.new("uint32_t[?]", capacity)
+	screen.buildSlot = ffi.new("uint32_t[?]", capacity)
+	screen.buildChild = ffi.new("uint32_t[?]", capacity)
+end
 
 --- A screen's storage, kept between repaints and grown when a bigger screen arrives.
 ---@param capacity number? # Roughly how many nodes to start with
@@ -297,13 +391,15 @@ Screen.__index = Screen
 function layout.new(capacity)
 	capacity = capacity or 256
 
-	return setmetatable({
+	local screen = setmetatable({
 	nodes = nodeArray(capacity),
 	childIndices = ffi.new("uint32_t[?]", capacity),
 	bars = barArray(capacity),
 	barNone = ffi.new("wl_bar"),
 	records = recordArray(capacity),
 	lastRecords = recordArray(capacity),
+	refs = {},
+	recordRefs = {},
 	capacity = capacity,
 	count = 0,
 	childCount = 0,
@@ -315,6 +411,11 @@ function layout.new(capacity)
 	runs = {},
 	root = 0,
 	}, Screen)
+
+	fillRefs(screen)
+	allocateStacks(screen, capacity)
+
+	return screen
 end
 
 ---@param nodes number
@@ -355,6 +456,8 @@ function Screen:reserve(nodes)
 	self.lastRecords = recordArray(capacity)
 	self.lastCount = 0
 	self.capacity = capacity
+	fillRefs(self)
+	allocateStacks(self, capacity)
 end
 
 -- The fields of a style that stands in for another one: what it names is written over what the
@@ -500,7 +603,7 @@ function Screen:add(element, bright, blur)
 
 	-- For the frame, not for the node: the arena is only replaced while a tree is being
 	-- built, and this runs after that.
-	local node = self.nodes[self.count - 1]
+	local node = self.refs[self.count]
 
 	-- What it is drawn and laid out with. A style is a slot in the arena, so "which style
 	-- does the pointer make this" is two numbers the element holds, and what that style
@@ -515,7 +618,7 @@ function Screen:add(element, bright, blur)
 		over = element.hoverStyle
 	end
 
-	local given = styleArena[element.baseStyle]
+	local given = styleRefs[element.baseStyle]
 
 	-- The arrays are reused, so nothing is zero because it is new: every field is written
 	-- from the style whether the style named it or not, which is also why a style that
@@ -543,7 +646,7 @@ function Screen:add(element, bright, blur)
 	-- the elements above it, whose own records are in the same array. So two frames that agree on
 	-- every record and on the window they were solved in are the same frame, and the array is one
 	-- memcmp rather than one per node.
-	local record = self.records[self.count - 1]
+	local record = self.recordRefs[self.count]
 
 	record.style = element.baseStyle
 	record.over = over
@@ -588,7 +691,7 @@ function Screen:add(element, bright, blur)
 	-- does not name is what the base style says, so a hover style that only names a background
 	-- leaves the size, the padding and the direction alone. It is written after the base style
 	-- rather than before it, because what it says is what wins.
-	local worn = over ~= 0 and styleArena[over]
+	local worn = over ~= 0 and styleRefs[over]
 
 	if worn then
 		node.styleFlags = bit.bor(node.styleFlags, bit.band(worn.flags, 0xffff))
@@ -639,7 +742,7 @@ local function sizeToRun(screen, node, index, run)
 	-- What the frame was built from remembers the line by what the font measured, not by where this
 	-- frame put it: a run is cached by the text and the font, so the same text measured again is the
 	-- same run, and a line that changed is a different one.
-	screen.records[index - 1].runId = run.id
+	screen.recordRefs[index].runId = run.id
 
 	if bit.band(node.styleFlags, WIDTH) == 0 then
 		node.widthUnit, node.wantWidth = assert(ABS), assert(run.width)
@@ -652,6 +755,12 @@ end
 
 --- Builds the nodes for an element tree, depth first, and the runs of child indices that
 --- go with them.
+---
+--- The tree is walked with the same stack the solve uses: a call a level is a level the recorder
+--- has to unroll, and a tree deep enough for an album is deeper than it will. What a node hands
+--- down to its children -- the text colour, the font, the brightness and the blur -- is read
+--- from the node it handed them down from, since a node holds all four and they do not change
+--- while its tree is built.
 ---@param element wonderland.Element
 ---@param fgR number? # What the elements above this one draw text in
 ---@param fgG number?
@@ -662,339 +771,525 @@ end
 ---@param blur number? # And how far they spread what they draw, which a blur under them replaces
 ---@return number # The node the element became
 function Screen:build(element, fgR, fgG, fgB, fgA, font, bright, blur)
-	local node = self:add(element, bright, blur)
-	local entry = self.nodes[node - 1]
+	local refs = self.refs
+	local buildElement = self.buildElement
+	local buildParent, buildSlot = self.buildParent, self.buildSlot
+	local buildChild = self.buildChild
+	local childIndices = self.childIndices
 
-	-- Text properties are inherited; everything else is not, because a background belongs
-	-- to the box that has it rather than to everything inside it.
-	if entry.fgA == 0 then
-		entry.fgR, entry.fgG, entry.fgB, entry.fgA = fgR or 0, fgG or 0, fgB or 0, fgA or 0
-	end
+	-- What the root is handed is the view's, which is nothing in every frame a screen is built
+	-- from a view. A frame with no node above it is the root.
+	local topFgR, topFgG, topFgB, topFgA = fgR, fgG, fgB, fgA
+	local topFont, topBright, topBlur = font, bright, blur
 
-	-- The font a line is drawn in is the one it was measured in. It is resolved from the
-	-- base style rather than the one the pointer picked, because that is the font the run
-	-- was measured with: a style that changes it would be drawing glyphs baked for
-	-- another one.
-	local base = styleArena[element.baseStyle]
-	local named = base.font ~= 0 and base.font or element.fontId
-	entry.font = (named ~= 0 and named or font or 0) + 1
+	local top = 1
+	buildElement[1] = element.index
+	buildParent[1] = 0
+	buildSlot[1] = 0
 
-	-- Most elements draw no line at all, so the walk for one is only made when there is
-	-- one to find.
-	local measured = runs[element.run]
+	local root = 0
 
-	if measured ~= nil then
-		sizeToRun(self, entry, node, measured)
-	end
+	while top > 0 do
+		local elementIndex = buildElement[top]
+		local parentNode = buildParent[top]
+		local slot = buildSlot[top]
+		top = top - 1
 
-	-- A field that is as tall as what is typed into it: the height its style gave it is not what
-	-- the box is, what has been typed into it is -- up to the lines it is held to, which is the
-	-- last of it that shows. The value was measured with everything else the frame draws, in the
-	-- font it is drawn in, so the box comes out exactly as tall as the text in it.
-	local valueRun = runs[element.valueRun]
+		local entry = pointers[elementIndex]
 
-	if valueRun ~= nil then
-		self.records[node - 1].valueRunId = valueRun.id
-	end
-
-	if valueRun ~= nil and bit.band(element.flags, GROWS) ~= 0 then
-		local lines = valueRun.lineCount
-		local most = element.maxLines
-
-		if most > 0 and lines > most then
-			lines = most
+		if parentNode ~= 0 then
+			local parent = refs[parentNode]
+			fgR, fgG, fgB, fgA = parent.fgR, parent.fgG, parent.fgB, parent.fgA
+			font, bright, blur = parent.font, parent.bright, parent.blur
+		else
+			fgR, fgG, fgB, fgA = topFgR, topFgG, topFgB, topFgA
+			font, bright, blur = topFont, topBright, topBlur
 		end
 
-		entry.heightUnit, entry.wantHeight = ABS, valueRun.height * lines / valueRun.lineCount
-		+entry.paddingTop + entry.paddingBottom + entry.borderTop + entry.borderBottom
-	end
+		local node = self:add(entry, bright, blur)
 
-	local firstChild = self.childCount + 1
-	local count = element.childCount
-
-	self.childCount = self.childCount + count
-	entry.firstChild = firstChild
-	entry.childCount = count
-
-	-- The children are one chain, and the run of child indices is filled in the order the
-	-- chain hands them over, which is the order they were added in.
-	local child = element.childFirst
-
-	for index = 1, count do
-			local childElement = pointers[child]
-			local childNode = self:build(childElement, entry.fgR, entry.fgG, entry.fgB, entry.fgA, entry.font,
-			entry.bright, entry.blur)
-
-			self.childIndices[firstChild + index - 2] = childNode
-			child = childElement.nextSibling
+		if slot ~= 0 then
+			childIndices[slot - 1] = node
+		else
+			root = node
 		end
 
-	return node
+		local made = refs[node]
+
+		-- Text properties are inherited; everything else is not, because a background belongs
+		-- to the box that has it rather than to everything inside it.
+		if made.fgA == 0 then
+			made.fgR, made.fgG, made.fgB, made.fgA = fgR or 0, fgG or 0, fgB or 0, fgA or 0
+		end
+
+		-- The font a line is drawn in is the one it was measured in. It is resolved from the
+		-- base style rather than the one the pointer picked, because that is the font the run
+		-- was measured with: a style that changes it would be drawing glyphs baked for
+		-- another one.
+		local base = styleRefs[entry.baseStyle]
+		local named = base.font ~= 0 and base.font or entry.fontId
+		made.font = (named ~= 0 and named or font or 0) + 1
+
+		-- Most elements draw no line at all, so the walk for one is only made when there is
+		-- one to find.
+		local measured = runs[entry.run]
+
+		if measured ~= nil then
+			sizeToRun(self, made, node, measured)
+		end
+
+		-- A field that is as tall as what is typed into it: the height its style gave it is not
+		-- what the box is, what has been typed into it is -- up to the lines it is held to, which
+		-- is the last of it that shows. The value was measured with everything else the frame
+		-- draws, in the font it is drawn in, so the box comes out exactly as tall as the text in it.
+		local valueRun = runs[entry.valueRun]
+
+		if valueRun ~= nil then
+			self.recordRefs[node].valueRunId = valueRun.id
+		end
+
+		if valueRun ~= nil and bit.band(entry.flags, GROWS) ~= 0 then
+			local lines = valueRun.lineCount
+			local most = entry.maxLines
+
+			if most > 0 and lines > most then
+				lines = most
+			end
+
+			made.heightUnit, made.wantHeight = ABS, valueRun.height * lines / valueRun.lineCount
+			+ made.paddingTop + made.paddingBottom + made.borderTop + made.borderBottom
+		end
+
+		local firstChild = self.childCount + 1
+		local count = entry.childCount
+
+		self.childCount = self.childCount + count
+		made.firstChild = firstChild
+		made.childCount = count
+
+		if count > 0 then
+			-- The children are one chain, and the run of child indices is filled in the order the
+			-- chain hands them over, which is the order they were added in. They are pushed back
+			-- to front so that they are added front to back, which is the order a recursive walk
+			-- would have added them in.
+			local child = entry.childFirst
+
+			for at = 1, count do
+				buildChild[at] = child
+				child = pointers[child].nextSibling
+			end
+
+			for at = count, 1, -1 do
+				local next = top + 1
+
+				buildElement[next] = buildChild[at]
+				buildParent[next] = node
+				buildSlot[next] = firstChild + at - 1
+				top = next
+			end
+		end
+	end
+
+	return root
 end
 
---- Solves a node into the space its parent gave it, laying its children out as it goes.
---- The arithmetic is the layout: sizes are the space a node asked for, and the children
---- are placed along and across the axis they are stacked on.
----@param index number
----@param parentWidth number
----@param parentHeight number
----@param mainOverride number? # Size to use along the axis the parent stacks on
----@param overrideIsRow boolean? # Which axis that is
-local function solveNode(screen, index, parentWidth, parentHeight, mainOverride, overrideIsRow)
-	local node = screen.nodes[index - 1]
+-- The phases a level of the solve goes through, in the order a node goes through them. A walk of
+-- the tree is the loop below over one of these a slot, rather than a call a node.
+local ENTER, ASK, SOLVE, SIZE, PLACE, NUB, NUDGE, SCROLL, SHIFT, DONE = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
 
-	if node.visible == 0 then
-		node.x, node.y, node.width, node.height = 0, 0, 0, 0
+--- Solves the screen, from the root down, with the tree as a stack of slots.
+---
+--- A tree a screen is laid out from is deeper than the recorder will unroll, and a recursive walk
+--- of it is a walk the recorder gives up on -- "register coalescing too complex", on a side trace
+--- that is still holding every level's numbers -- and one it gives up on runs in the interpreter,
+--- where every field of a node is a C call. So a level of the walk is a slot in an array and the
+--- walk is one loop. Every phase does the work of one node or one child of a node, so a node with
+--- a hundred children is still a hundred small steps of the same loop, and there is no loop
+--- inside the loop to give the recorder an inner loop it cannot trace.
+---
+--- The phases, in the order a node goes through them:
+---
+---   0  size it, and remember the box it was given        (a child of an invisible node stops here)
+---   1  add up what its children ask for along the main axis
+---   2  solve each child, in order
+---   3  add up what the children came out as, for the free space
+---   4  place each child
+---   5  place a slider's nub where the value says
+---   6  clamp the scroll, and work out how far the content moves
+---   7  move each child of a scrolling box by that much
+---   8  write the node's own box, and pop it
+local function solveTree(screen, root, width, height)
+	local refs = screen.refs
+	local childIndices = screen.childIndices
+	local bars = screen.bars
+	local sIndex = screen.solveIndex
+	local sPhase = screen.solvePhase
+	local sCursor = screen.solveCursor
+	local sParentWidth, sParentHeight = screen.solveParentWidth, screen.solveParentHeight
+	local sMain, sMainSet, sMainRow = screen.solveMain, screen.solveMainSet, screen.solveMainRow
+	local sRow = screen.solveRow
+	local sWidth, sHeight = screen.solveWidth, screen.solveHeight
+	local sContentWidth, sContentHeight = screen.solveContentWidth, screen.solveContentHeight
+	local sContainerMain, sContainerCross = screen.solveContainerMain, screen.solveContainerCross
+	local sAuto = screen.solveAuto
+	local sTotalMain = screen.solveTotalMain
+	local sVisible, sAutoCount = screen.solveVisible, screen.solveAutoCount
+	local sOffset, sSpacing, sPlaced = screen.solveOffset, screen.solveSpacing, screen.solvePlaced
+	local sAux = screen.solveAux
 
-		return
-	end
+	local top = 1
+	sIndex[1] = root
+	sPhase[1] = ENTER
+	sParentWidth[1] = width
+	sParentHeight[1] = height
+	sMainSet[1] = 0
+	sMainRow[1] = 0
 
-	local isRow = node.direction == 0
+	while top > 0 do
+		local phase = sPhase[top]
+		local index = sIndex[top]
+		local node = refs[index]
 
-	if mainOverride then
-		-- The size is given along the axis the parent stacks on, which is not necessarily
-		-- the axis this node stacks its own children on.
-		if overrideIsRow then
-			node.widthUnit, node.wantWidth = ABS, mainOverride
-		else
-			node.heightUnit, node.wantHeight = assert(ABS), assert(mainOverride)
-		end
-
-	end
-
-	local availableWidth = parentWidth - node.marginLeft - node.marginRight
-	local availableHeight = parentHeight - node.marginTop - node.marginBottom
-
-	local width = node.widthUnit == AUTO and availableWidth
-	or (node.widthUnit == REL and node.wantWidth * availableWidth)
-	or node.wantWidth
-
-	local height = node.heightUnit == AUTO and availableHeight
-	or (node.heightUnit == REL and node.wantHeight * availableHeight)
-	or node.wantHeight
-
-	local borderWidth = node.borderLeft + node.borderRight
-	local borderHeight = node.borderTop + node.borderBottom
-
-	local contentWidth = width - node.paddingLeft - node.paddingRight - borderWidth
-	local contentHeight = height - node.paddingTop - node.paddingBottom - borderHeight
-
-	local containerMain = isRow and contentWidth or contentHeight
-	local containerCross = isRow and contentHeight or contentWidth
-	local count = node.childCount
-	local first = node.firstChild
-
-	-- What the children ask for along the main axis, and how many of them want whatever
-	-- is left over.
-	local totalMain = 0
-	local visibleChildren = 0
-	local autoCount = 0
-
-	for at = 0, count - 1 do
-			local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
-
-			if child.position == 1 then
-				-- Placed by hand, so it takes no room in the flow.
+		if phase == ENTER then
+			if node.visible == 0 then
+				node.x, node.y, node.width, node.height = 0, 0, 0, 0
+				top = top - 1
 			else
+				local isRow = node.direction == 0
+
+				if sMainSet[top] ~= 0 then
+					-- The size is given along the axis the parent stacks on, which is not
+					-- necessarily the axis this node stacks its own children on.
+					local mainOverride = sMain[top] --[[@as number]]
+
+					if sMainRow[top] ~= 0 then
+						node.widthUnit, node.wantWidth = ABS, mainOverride
+					else
+						node.heightUnit, node.wantHeight = assert(ABS), assert(mainOverride)
+					end
+				end
+
+				local availableWidth = sParentWidth[top] - node.marginLeft - node.marginRight
+				local availableHeight = sParentHeight[top] - node.marginTop - node.marginBottom
+
+				local frameWidth = node.widthUnit == AUTO and availableWidth
+				or (node.widthUnit == REL and node.wantWidth * availableWidth)
+				or node.wantWidth
+
+				local frameHeight = node.heightUnit == AUTO and availableHeight
+				or (node.heightUnit == REL and node.wantHeight * availableHeight)
+				or node.wantHeight
+
+				local borderWidth = node.borderLeft + node.borderRight
+				local borderHeight = node.borderTop + node.borderBottom
+				local contentWidth = frameWidth - node.paddingLeft - node.paddingRight - borderWidth
+				local contentHeight = frameHeight - node.paddingTop - node.paddingBottom - borderHeight
+
+				sWidth[top], sHeight[top] = frameWidth, frameHeight
+				sContentWidth[top], sContentHeight[top] = contentWidth, contentHeight
+				sContainerMain[top] = isRow and contentWidth or contentHeight
+				sContainerCross[top] = isRow and contentHeight or contentWidth
+				sRow[top] = isRow and 1 or 0
+				sCursor[top] = 0
+				sTotalMain[top] = 0
+				sVisible[top] = 0
+				sAutoCount[top] = 0
+				sPhase[top] = ASK
+			end
+		elseif phase == ASK then
+			-- What the children ask for along the main axis, and how many of them want whatever
+			-- is left over.
+			local cursor = sCursor[top]
+			local count = node.childCount
+			local isRow = sRow[top] ~= 0
+
+			if cursor < count then
+				local child = refs[childIndices[node.firstChild + cursor - 1]]
+
+				if child.position ~= 1 then
+					local childUnit = isRow and child.widthUnit or child.heightUnit
+
+					if childUnit == 3 then
+						sAutoCount[top] = sAutoCount[top] + 1
+					else
+						local childWant = isRow and child.wantWidth or child.wantHeight
+						sTotalMain[top] = sTotalMain[top]
+						+ (childUnit == 2 and childWant * sContainerMain[top] or childWant)
+						sVisible[top] = sVisible[top] + 1
+					end
+				end
+
+				sCursor[top] = cursor + 1
+			else
+				local totalGaps = math.max(0, count - 1) * node.gap
+				local remaining = sContainerMain[top] - sTotalMain[top] - totalGaps
+				local autoCount = sAutoCount[top]
+
+				-- What is left for the children that asked for what is left is never less than
+				-- nothing: a box cannot be a negative number of pixels wide, and one that is comes
+				-- out drawn inside out -- the line after it is drawn on top of it, which is a screen
+				-- that reads as a rendering fault rather than as a box with no room in it. A row of
+				-- children that ask for more than the row has is a row with nothing left over, and
+				-- the ones that asked for a share of it get none.
+				sAuto[top] = autoCount > 0 and math.max(0, remaining / autoCount) or 0
+				sCursor[top] = 0
+				sPhase[top] = SOLVE
+			end
+		elseif phase == SOLVE then
+			local cursor = sCursor[top]
+			local count = node.childCount
+			local isRow = sRow[top] ~= 0
+
+			if cursor < count then
+				local childIndex = childIndices[node.firstChild + cursor - 1]
+				local child = refs[childIndex]
 				local childUnit = isRow and child.widthUnit or child.heightUnit
-				local childWant = isRow and child.wantWidth or child.wantHeight
+				local next = top + 1
 
-				if childUnit == 3 then
-					autoCount = autoCount + 1
+				sIndex[next] = childIndex
+				sPhase[next] = ENTER
+				sParentWidth[next] = sContentWidth[top]
+				sParentHeight[next] = sContentHeight[top]
+				sMainRow[next] = isRow and 1 or 0
+
+				if childUnit == AUTO then
+					sMain[next] = sAuto[top]
+					sMainSet[next] = 1
 				else
-					totalMain = totalMain + (childUnit == 2 and childWant * containerMain or childWant)
-					visibleChildren = visibleChildren + 1
+					sMainSet[next] = 0
 				end
+
+				sCursor[top] = cursor + 1
+				top = next
+			else
+				sTotalMain[top] = 0
+				sVisible[top] = 0
+				sCursor[top] = 0
+				sPhase[top] = SIZE
 			end
-		end
+		elseif phase == SIZE then
+			local cursor = sCursor[top]
+			local count = node.childCount
+			local isRow = sRow[top] ~= 0
 
-	local totalGaps = math.max(0, count - 1) * node.gap
-	local remaining = containerMain - totalMain - totalGaps
+			if cursor < count then
+				local child = refs[childIndices[node.firstChild + cursor - 1]]
 
-	-- What is left for the children that asked for what is left is never less than nothing: a box
-	-- cannot be a negative number of pixels wide, and one that is comes out drawn inside out -- the
-	-- line after it is drawn on top of it, which is a screen that reads as a rendering fault rather
-	-- than as a box with no room in it. A row of children that ask for more than the row has is a
-	-- row with nothing left over, and the ones that asked for a share of it get none.
-	local autoSpace = autoCount > 0 and math.max(0, remaining / autoCount) or 0
+				if (child.width > 0 or child.height > 0) and child.position ~= 1 then
+					local childMainMargin = isRow and (child.marginLeft + child.marginRight)
+					or (child.marginTop + child.marginBottom)
 
-	-- Solve the children, then place them.
-	for at = 0, count - 1 do
-			local childIndex = screen.childIndices[first + at - 1]
-			local child = screen.nodes[childIndex - 1]
-			local childUnit = isRow and child.widthUnit or child.heightUnit
+					sTotalMain[top] = sTotalMain[top]
+					+ (isRow and child.width or child.height) + childMainMargin
+					sVisible[top] = sVisible[top] + 1
+				end
 
-			solveNode(screen, childIndex, contentWidth, contentHeight, childUnit == AUTO and autoSpace or nil, isRow)
-		end
+				sCursor[top] = cursor + 1
+			else
+				local visibleChildren = sVisible[top]
+				local totalGaps = math.max(0, visibleChildren - 1) * node.gap
+				local freeSpace = sContainerMain[top] - (sTotalMain[top] + totalGaps)
+				local offset = 0
+				local spacing = node.gap
 
-	totalMain = 0
-	visibleChildren = 0
+				if node.justify == 1 then
+					offset = freeSpace / 2
+				elseif node.justify == 2 then
+					offset = freeSpace
+				elseif node.justify == 3 and count > 1 then
+					spacing = spacing + freeSpace / (count - 1)
+				elseif node.justify == 4 and count > 0 then
+					local unit = freeSpace / count
+					offset = unit / 2
+					spacing = spacing + unit
+				end
 
-	for at = 0, count - 1 do
-			local child = assert(screen.nodes[screen.childIndices[first + at - 1] - 1])
-
-			if (child.width > 0 or child.height > 0) and child.position ~= 1 then
-				local childMainMargin = isRow and (child.marginLeft + child.marginRight)
-				or (child.marginTop + child.marginBottom)
-
-				totalMain = totalMain + (isRow and child.width or child.height) + childMainMargin
-				visibleChildren = visibleChildren + 1
+				sOffset[top], sSpacing[top] = offset, spacing
+				sPlaced[top] = 0
+				sCursor[top] = 0
+				sPhase[top] = PLACE
 			end
-		end
+		elseif phase == PLACE then
+			local cursor = sCursor[top]
+			local count = node.childCount
+			local isRow = sRow[top] ~= 0
 
-	totalGaps = math.max(0, visibleChildren - 1) * node.gap
-	totalMain = totalMain + totalGaps
-	local freeSpace = containerMain - totalMain
+			if cursor < count then
+				local child = refs[childIndices[node.firstChild + cursor - 1]]
+				local shown = child.width > 0 or child.height > 0
 
-	local offset = 0
-	local spacing = node.gap
+				if shown and child.position == 1 then
+					-- At the parent's content origin, moved by its own offset.
+					if isRow then
+						child.x = snap(node.paddingLeft + child.x)
+						child.y = snap(node.paddingTop + child.y)
+					else
+						child.y = snap(node.paddingTop + child.y)
+						child.x = snap(node.paddingLeft + child.x)
+					end
+				elseif shown then
+					local placed = sPlaced[top] + 1
+					sPlaced[top] = placed
+					local last = placed == sVisible[top]
 
-	if node.justify == 1 then
-		offset = freeSpace / 2
-	elseif node.justify == 2 then
-		offset = freeSpace
-	elseif node.justify == 3 and count > 1 then
-		spacing = spacing + freeSpace / (count - 1)
-	elseif node.justify == 4 and count > 0 then
-		local unit = freeSpace / count
-		offset = unit / 2
-		spacing = spacing + unit
-	end
+					local offset = sOffset[top]
+					local mainPos = offset + (isRow and node.paddingLeft or node.paddingTop)
+					local childMain = (isRow and child.x or child.y) + mainPos
 
-	local placed = 0
+					if isRow then
+						child.x = snap(childMain)
+					else
+						child.y = snap(childMain)
+					end
 
-	for at = 0, count - 1 do
-			local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
-			local shown = child.width > 0 or child.height > 0
+					offset = offset + (isRow and child.width or child.height)
+					+ (last and 0 or sSpacing[top])
+					sOffset[top] = offset
 
-			if shown and child.position == 1 then
-				-- At the parent's content origin, moved by its own offset.
-				if isRow then
-					child.x = snap(node.paddingLeft + child.x)
-					child.y = snap(node.paddingTop + child.y)
-				else
-					child.y = snap(node.paddingTop + child.y)
-					child.x = snap(node.paddingLeft + child.x)
-				end
-			elseif shown then
-				placed = placed + 1
-				local last = placed == visibleChildren
+					local crossOffset = (isRow and node.paddingTop or node.paddingLeft)
+					+ (isRow and child.y or child.x)
+					local childCrossMargin = isRow and (child.marginTop + child.marginBottom)
+					or (child.marginLeft + child.marginRight)
+					local cross = crossOffset
 
-				local mainPos = offset + (isRow and node.paddingLeft or node.paddingTop)
-				local childMain = (isRow and child.x or child.y) + mainPos
+					if node.align == 1 then
+						cross = crossOffset
+						+ (sContainerCross[top] - (isRow and child.height or child.width) - childCrossMargin) / 2
+					elseif node.align == 2 then
+						cross = crossOffset + sContainerCross[top]
+						- (isRow and child.height or child.width) - childCrossMargin
+					end
 
-				if isRow then
-					child.x = snap(childMain)
-				else
-					child.y = snap(childMain)
-				end
-
-				offset = offset + (isRow and child.width or child.height) + (last and 0 or spacing)
-
-				local crossOffset = (isRow and node.paddingTop or node.paddingLeft)
-				+(isRow and child.y or child.x)
-				local childCrossMargin = isRow and (child.marginTop + child.marginBottom)
-				or (child.marginLeft + child.marginRight)
-				local cross = crossOffset
-
-				if node.align == 1 then
-					cross = crossOffset + (containerCross - (isRow and child.height or child.width) - childCrossMargin) / 2
-				elseif node.align == 2 then
-					cross = crossOffset + containerCross - (isRow and child.height or child.width) - childCrossMargin
+					if isRow then
+						child.y = snap(cross)
+					else
+						child.x = snap(cross)
+					end
 				end
 
-				if isRow then
-					child.y = snap(cross)
-				else
-					child.x = snap(cross)
-				end
-
+				sCursor[top] = cursor + 1
+			else
+				sCursor[top] = 0
+				sPhase[top] = NUB
 			end
+		elseif phase == NUB then
+			-- A slider's nub is a child of it, and is put where the value is rather than where the
+			-- layout stacked it: it travels across the box less its own size, which is what makes
+			-- the ends of the box the ends of the slider, and along the axis the slider stacks on
+			-- -- a slider that stacks down is one that is dragged up and down. The value is the
+			-- app's, so a nub whose value did not move stays where the last frame put it, and a
+			-- nub of a box that is not a slider stays where the layout put it.
+			local slid = pointers[node.element]
 
-		end
+			if slid ~= nil and bit.band(slid.flags, SLIDE) ~= 0 and node.childCount > 0 then
+				local range = slid.max - slid.min
+				local at1 = range ~= 0 and (slid.sliderValue - slid.min) / range or 0
 
-	-- A slider's nub is a child of it, and is put where the value is rather than where the layout
-	-- stacked it: it travels across the box less its own size, which is what makes the ends of the
-	-- box the ends of the slider, and along the axis the slider stacks on -- a slider that stacks
-	-- down is one that is dragged up and down. The value is the app's, so a nub whose value did not
-	-- move stays where the last frame put it, and a nub of a box that is not a slider stays where
-	-- the layout put it.
-	local slid = pointers[node.element]
+				sAux[top] = at1 < 0 and 0 or (at1 > 1 and 1 or at1)
+				sCursor[top] = 0
+				sPhase[top] = NUDGE
+			else
+				sPhase[top] = SCROLL
+			end
+		elseif phase == NUDGE then
+			local cursor = sCursor[top]
+			local count = node.childCount
+			local isRow = sRow[top] ~= 0
 
-	if slid ~= nil and bit.band(slid.flags, SLIDE) ~= 0 and count > 0 then
-		local range = slid.max - slid.min
-		local at1 = range ~= 0 and (slid.sliderValue - slid.min) / range or 0
-		local along = at1 < 0 and 0 or (at1 > 1 and 1 or at1)
-
-		for at = 0, count - 1 do
-				local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
+			if cursor < count then
+				local child = refs[childIndices[node.firstChild + cursor - 1]]
 
 				if child.thumb ~= 0 then
 					local size = isRow and child.width or child.height
-					local travel = containerMain - size
+					local travel = sContainerMain[top] - size
 
 					if travel < 0 then
 						travel = 0
 					end
 
 					if isRow then
-						child.x = snap(node.paddingLeft + along * travel)
+						child.x = snap(node.paddingLeft + sAux[top] * travel)
 					else
-						child.y = snap(node.paddingTop + along * travel)
+						child.y = snap(node.paddingTop + sAux[top] * travel)
 					end
+				end
+
+				sCursor[top] = cursor + 1
+			else
+				sPhase[top] = SCROLL
+			end
+		elseif phase == SCROLL then
+			-- What is scrolled is shifted, and its own children come with it: their places are
+			-- relative to it, so moving it moves the lot. How far it is shifted is what the
+			-- content came out to less what the box shows -- which is only known once every child
+			-- is placed -- so an offset past the end of the content draws the end rather than a
+			-- hole. What the app keeps is its own.
+			if node.scrolls == 1 then
+				local most = math.max(0, sOffset[top] - sContainerMain[top])
+
+				-- Both ends, not just the far one: an offset below the start would put the content
+				-- below the box and the thumb above it, and a thumb above its box is a bar that
+				-- walks out of the pane as it is scrolled -- which is what a bar that would not
+				-- stay put looked like.
+				local scroll = math.min(math.max(node.scroll, 0), most)
+
+				-- Kept, not just used: the bar is drawn from this, and an offset the app is still
+				-- holding would walk the thumb out of the box its content was correctly clamped
+				-- inside.
+				node.scroll = scroll
+				bars[index - 1].max = most
+
+				if scroll > 0 then
+					sAux[top] = scroll
+					sCursor[top] = 0
+					sPhase[top] = SHIFT
+				else
+					sPhase[top] = DONE
+				end
+			else
+				sPhase[top] = DONE
+			end
+		elseif phase == SHIFT then
+			local cursor = sCursor[top]
+			local count = node.childCount
+			local isRow = sRow[top] ~= 0
+
+			if cursor < count then
+				local child = refs[childIndices[node.firstChild + cursor - 1]]
+
+				if isRow then
+					child.x = child.x - sAux[top]
+				else
+					child.y = child.y - sAux[top]
+				end
+
+				sCursor[top] = cursor + 1
+			else
+				sPhase[top] = DONE
+			end
+		else
+			local x = node.marginLeft
+			local y = node.marginTop
+
+			if node.position == 1 then
+				if node.left ~= 0 then
+					x = x + node.left
+				elseif node.right ~= 0 then
+					x = x - node.right
+				end
+
+				if node.top ~= 0 then
+					y = y + node.top
+				elseif node.bottom ~= 0 then
+					y = y - node.bottom
 				end
 			end
-	end
 
-	-- What is scrolled is shifted, and its own children come with it: their places are relative to
-	-- it, so moving it moves the lot. How far it is shifted is what the content came out to less
-	-- what the box shows -- which is only known once every child is placed -- so an offset past
-	-- the end of the content draws the end rather than a hole. What the app keeps is its own.
-	if node.scrolls == 1 then
-		local most = math.max(0, offset - containerMain)
-
-		-- Both ends, not just the far one: an offset below the start would put the content below
-		-- the box and the thumb above it, and a thumb above its box is a bar that walks out of
-		-- the pane as it is scrolled -- which is what a bar that would not stay put looked like.
-		local scroll = math.min(math.max(node.scroll, 0), most)
-
-		-- Kept, not just used: the bar is drawn from this, and an offset the app is still holding
-		-- would walk the thumb out of the box its content was correctly clamped inside.
-		node.scroll = scroll
-		screen.bars[index - 1].max = most
-
-		if scroll > 0 then
-			for at = 0, count - 1 do
-					local child = screen.nodes[screen.childIndices[first + at - 1] - 1]
-
-					if isRow then
-						child.x = child.x - scroll
-					else
-						child.y = child.y - scroll
-					end
-				end
+			node.width, node.height = sWidth[top], sHeight[top]
+			node.x, node.y = snap(x), snap(y)
+			top = top - 1
 		end
 	end
-
-	local x = node.marginLeft
-	local y = node.marginTop
-
-	if node.position == 1 then
-		if node.left ~= 0 then
-			x = x + node.left
-		elseif node.right ~= 0 then
-			x = x - node.right
-		end
-
-		if node.top ~= 0 then
-			y = y + node.top
-		elseif node.bottom ~= 0 then
-			y = y - node.bottom
-		end
-	end
-
-	node.width, node.height = width, height
-	node.x, node.y = snap(x), snap(y)
 end
 
 --- What the pointer is doing, worked out from the boxes the solve produced: everything the
@@ -1012,39 +1307,61 @@ end
 ---@param parentY number
 ---@param pressed boolean
 local function markNode(screen, index, x, y, parentX, parentY, pressed)
-	local node = screen.nodes[index - 1]
-	local absX, absY = parentX + node.x, parentY + node.y
+	local refs = screen.refs
+	local childIndices = screen.childIndices
+	local markIndex, markX, markY = screen.markIndex, screen.markX, screen.markY
+
+	-- The walk is a stack of nodes rather than a call a level, for the same reason the solve is:
+	-- a call a node is a level the recorder unrolls, and a tree of an album is deeper than it
+	-- will. What a node marks is its own, so the order the nodes are visited in does not matter.
+	local top = 1
+	markIndex[1] = index
+	markX[1] = parentX
+	markY[1] = parentY
+
 	local marked = false
 
-	local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
+	while top > 0 do
+		local nodeIndex = markIndex[top]
+		local givenX, givenY = markX[top], markY[top]
+		top = top - 1
 
-	-- What a box that scrolls has scrolled out of it is not drawn, hovered, or pressed either.
-	if node.scrolls ~= 0 and not inside then
-		return marked
-	end
+		local node = refs[nodeIndex]
+		local absX, absY = givenX + node.x, givenY + node.y
 
-	for at = 0, node.childCount - 1 do
-			if markNode(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, pressed) then
-				marked = true
+		local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
+
+		-- What a box that scrolls has scrolled out of it is not drawn, hovered, or pressed either.
+		if node.scrolls == 0 or inside then
+			local count = node.childCount
+
+			if count > 0 then
+				local first = node.firstChild
+
+				for at = count - 1, 0, -1 do
+					top = top + 1
+					markIndex[top] = childIndices[first + at - 1]
+					markX[top] = absX
+					markY[top] = absY
+				end
+			end
+
+			if node.visible ~= 0 and inside then
+				local element = pointers[node.element]
+
+				-- The styles an element keeps for the pointer are its own, and whether one of them
+				-- is used for the state it is in is what a second build would change.
+				if element.hoverStyle ~= 0 or (pressed and element.activeStyle ~= 0) then
+					marked = true
+				end
+
+				wonderlandElement.hovering(element, true)
+
+				if pressed then
+					wonderlandElement.pressing(element, true)
+				end
 			end
 		end
-
-	if node.visible == 0 or not inside then
-		return marked
-	end
-
-	local element = pointers[node.element]
-
-	-- The styles an element keeps for the pointer are its own, and whether one of them is used
-	-- for the state it is in is what a second build would change.
-	if element.hoverStyle ~= 0 or (pressed and element.activeStyle ~= 0) then
-		marked = true
-	end
-
-	wonderlandElement.hovering(element, true)
-
-	if pressed then
-		wonderlandElement.pressing(element, true)
 	end
 
 	return marked
@@ -1069,7 +1386,9 @@ end
 ---@param provisional boolean? # A solve that is not the frame the gpu will be given
 ---@return wonderland.Layout.Screen
 function Screen:solve(width, height, provisional)
-	solveNode(self, self.root, width, height)
+	if self.root ~= 0 then
+		solveTree(self, self.root, width, height)
+	end
 
 	if provisional then
 		return self
@@ -1078,7 +1397,7 @@ function Screen:solve(width, height, provisional)
 	local bytes = self.count * RECORD_SIZE
 	local same = bytes > 0 and ffi.C.memcmp(self.lastRecords, self.records, bytes) == 0
 
-	if os.getenv("WL_DIFF_DEBUG") then
+	if DIFF_DEBUG then
 		print(string.format("solve: count %d/%d, %dx%d/%dx%d, %d bytes of records, same %s", self.count,
 		self.lastCount, width, height, self.lastWidth, self.lastHeight, bytes, tostring(same)))
 	end
@@ -1107,26 +1426,64 @@ end
 --- earlier frame and linked in again comes to -- it points at whatever the slot it is in holds now,
 --- and that element is one of this frame's. See the walk in `wonderland.plugin.Text`, which is where
 --- a tree of a frame that draws text is caught.
+---
+--- The walk is over a stack of elements rather than calls, since a count made a frame is one the
+--- recorder gives up on when it is a call a level. It carries no depth: an element is counted once
+--- and a tree of this frame's elements cannot hold more than the arena does, so a walk that passes
+--- the arena has gone round a tree that holds itself.
+local countStack, countStackCapacity = ffi.new("uint32_t[?]", 256), 256
+
 ---@param element wonderland.Element
----@param depth number
 ---@param limit number # The most elements the frame made, which is the most a tree can hold
 ---@return number
-local function countElements(element, depth, limit)
-	if depth > limit then
-		error("The element tree holds itself: an element was laid out in a frame later than the one "
-		.. "it was made in. An element is built by the view and used in the repaint it was built "
-		.. "for -- one kept from an earlier frame points at whatever the slot it is in holds now",
-		0)
+local function countElements(element, limit)
+	if countStackCapacity < limit * 2 + 8 then
+		local capacity = countStackCapacity
+
+		while capacity < limit * 2 + 8 do
+			capacity = capacity * 2
+		end
+
+		countStack = ffi.new("uint32_t[?]", capacity)
+		countStackCapacity = capacity
+	end
+
+	local stack = countStack
+	local top = 0
+
+	if element.childFirst ~= 0 then
+		top = 1
+		stack[1] = element.childFirst
 	end
 
 	local total = 1
-	local child = element.childFirst
 
-	while child ~= 0 do
-		local childElement = pointers[child]
+	while top > 0 do
+		local handle = stack[top]
+		top = top - 1
+		total = total + 1
 
-		total = total + countElements(childElement, depth + 1, limit)
-		child = childElement.nextSibling
+		if total > limit then
+			error("The element tree holds itself: an element was laid out in a frame later than the one "
+			.. "it was made in. An element is built by the view and used in the repaint it was built "
+			.. "for -- one kept from an earlier frame points at whatever the slot it is in holds now",
+			0)
+		end
+
+		local held = pointers[handle]
+		local sibling = held.nextSibling
+
+		if sibling ~= 0 then
+			top = top + 1
+			stack[top] = sibling
+		end
+
+		local child = held.childFirst
+
+		if child ~= 0 then
+			top = top + 1
+			stack[top] = child
+		end
 	end
 
 	return total
@@ -1138,10 +1495,11 @@ function Screen:fromElement(element)
 	-- The style array is taken again here, since a screen built a moment ago may have
 	-- interned a style it did not have and moved it.
 	styleArena = style.arena
+	styleRefs = style.refs
 
 	-- Room is taken before anything is written: growing the array moves it, and a node
 	-- held across the move would be written into memory that is no longer the screen.
-	self:reserve(countElements(element, 1, wonderlandElement.count()))
+	self:reserve(countElements(element, wonderlandElement.count()))
 
 	self.count = 0
 	self.childCount = 0
@@ -1165,16 +1523,16 @@ end
 ---@param index number
 ---@return wonderland.Node
 function Screen:node(index)
-	return self.nodes[index - 1]
+	return self.refs[index]
 end
 
 ---@param index number
 ---@param child number # Which child, from one
 ---@return wonderland.Node
 function Screen:child(index, child)
-	local node = self.nodes[index - 1]
+	local node = self.refs[index]
 
-	return self.nodes[self.childIndices[node.firstChild + child - 2] - 1]
+	return self.refs[self.childIndices[node.firstChild + child - 2]]
 end
 
 --- Lays a screen of elements out at a size, without a window or a gpu. Handy for

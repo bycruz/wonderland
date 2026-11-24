@@ -13,10 +13,12 @@ local backend = require("wonderland.backend")
 local shaderType = backend.shaderType
 local shaderExt = backend.shaderExt
 
--- The depth attachment, which is the one format a driver is allowed to not have: Vulkan's
--- X8_D24 is the packed one SwiftShader does not draw, while 32-bit float is. OpenGL draws the
--- 24-bit one and stores it in fewer bytes where the driver does, so each backend keeps its own.
-local DEPTH_FORMAT = backend.isVulkan and "depth32float" or "depth24plus"
+-- The depth attachment, in the order a format is tried. depth24plus carries a depth a frame can be
+-- ordered by at 24 bits, which is more than the millionth of the range a style's z comes to, and is
+-- what OpenGL has always drawn; Vulkan's X8_D24 is a packed format a driver is allowed not to have,
+-- which is why 32-bit float is beside it. The first one a device draws a pipeline with is the one
+-- every depth attachment of this plugin is made in.
+local DEPTH_FORMATS = backend.isVulkan and { "depth24plus", "depth32float" } or { "depth24plus" }
 
 ---@class wonderland.plugin.Render.Context
 ---@field window wonderland.RenderWindow
@@ -48,6 +50,8 @@ local DEPTH_FORMAT = backend.isVulkan and "depth32float" or "depth24plus"
 ---@field screen? wonderland.Layout.Screen
 ---@field root? number
 ---@field drawRetries number? # Frames asked for in a row with no texture to draw into
+---@field pass hood.RenderPassDescriptor? # What a frame's pass is described by, kept and written into: see `recordFrame`
+---@field copyDescriptor { source: hood.ImageCopyTexture, target: hood.ImageCopyBuffer, size: hood.Extent3D }? # And the shapes of a readback copy, for the same reason: see `recordCopy`
 
 --- The gpu's copy of a frame, for one of the frames a swapchain has in flight.
 ---
@@ -72,9 +76,9 @@ local DEPTH_FORMAT = backend.isVulkan and "depth32float" or "depth24plus"
 ---@class wonderland.plugin.Render.Capture
 ---@field texture hood.Texture
 ---@field view hood.TextureView
----@field depth hood.Texture
----@field depthView hood.TextureView
----@field buffer hood.Buffer
+---@field depth hood.Texture?
+---@field depthView hood.TextureView?
+---@field buffer hood.Buffer?
 ---@field width number
 ---@field height number
 
@@ -90,6 +94,7 @@ local DEPTH_FORMAT = backend.isVulkan and "depth32float" or "depth24plus"
 ---@field targets { surface: wonderland.Surface, draw: fun(encoder: hood.CommandEncoder, view: hood.TextureView, width: number, height: number), width: number, height: number }[] # The surfaces the app fills, in the order they were made
 ---@field sharedResources wonderland.plugin.Render.SharedResources?
 ---@field device hood.Device? # Made when a window is first registered: see `RenderPlugin:getDevice`
+---@field depthFormat string? # The depth format this device draws with, worked out with the first pipeline
 ---@field presentMode string # How frames reach the display
 ---@field draw fun(self: wonderland.plugin.Render, context: wonderland.plugin.Render.Context)
 ---@field getContext fun(self: wonderland.plugin.Render, window: wonderland.RenderWindow): wonderland.plugin.Render.Context
@@ -463,7 +468,7 @@ function RenderPlugin:createContext(window, swapchain)
 		targetFormat = (swapchain --[[@as { format: string }]]).format
 	end
 
-	local quadPipeline = self:getDevice():createPipeline(({
+	local descriptor = ({
 		layout = quadLayout,
 		vertex = {
 			module = { type = shaderType, source = require("wonderland.shaders.main.vert." .. shaderExt) },
@@ -482,9 +487,39 @@ function RenderPlugin:createContext(window, swapchain)
 		depthStencil = {
 			depthWriteEnabled = true,
 			depthCompare = "less-equal",
-			format = DEPTH_FORMAT
 		}
-	}) --[[@as hood.PipelineDescriptor]])
+	}) --[[@as hood.PipelineDescriptor]]
+
+	-- Which depth format this device draws with, worked out once by making the pipeline with the
+	-- first one it accepts: a driver that cannot draw a format refuses the pipeline that names
+	-- it. A plugin that has drawn a frame already knows, so every context after the first makes
+	-- its pipeline with the format the device answered with.
+	local depthFormat = self.depthFormat
+	local quadPipeline
+	local firstError
+
+	local device = self:getDevice()
+
+	if depthFormat ~= nil then
+		descriptor.depthStencil.format = depthFormat
+		quadPipeline = device:createPipeline(descriptor)
+	else
+		for _, candidate in ipairs(DEPTH_FORMATS) do
+			descriptor.depthStencil.format = candidate
+
+			local ok, made = pcall(device.createPipeline, device, descriptor)
+
+			if ok then
+				depthFormat, quadPipeline = candidate, made
+				self.depthFormat = candidate
+				break
+			end
+
+			firstError = firstError or made
+		end
+
+		assert(quadPipeline, firstError or "No depth format this device draws with")
+	end
 
 	-- The depth attachment is the size of what is drawn into, which is the swapchain and not always
 	-- the size the window says it is: an attachment of another size is a pass that cannot be made.
@@ -497,7 +532,7 @@ function RenderPlugin:createContext(window, swapchain)
 
 	local depthBuffer = self:getDevice():createTexture({
 		extents = { dim = "2d", width = depthWidth, height = depthHeight, count = 1 },
-		format = DEPTH_FORMAT,
+		format = assert(depthFormat),
 		usages = { "RENDER_ATTACHMENT" }
 	}) --[[@as hood.PipelineDescriptor]]
 
@@ -523,10 +558,6 @@ function RenderPlugin:createContext(window, swapchain)
 		targetHeight = window.height,
 	} --[[@as wonderland.plugin.Render.Context]]
 
-	if not swapchain then
-		ctx.capture = self:ensureCapture(ctx)
-	end
-
 	self.contexts[window] = ctx
 	self.mainCtx = self.mainCtx or ctx
 	return ctx
@@ -542,7 +573,8 @@ end
 local bytePointer = ffi.typeof("const uint8_t*")
 
 --- An offscreen target the size of the context's window, kept around because a
---- screenshot may be asked for more than once.
+--- screenshot may be asked for more than once, and made when one is asked for: a window that is
+--- never read back never holds a picture of itself.
 ---@param ctx wonderland.plugin.Render.Context
 ---@return wonderland.plugin.Render.Capture
 function RenderPlugin:ensureCapture(ctx)
@@ -556,9 +588,21 @@ function RenderPlugin:ensureCapture(ctx)
 	if capture then
 		capture.view:destroy()
 		capture.texture:destroy()
-		capture.depthView:destroy()
-		capture.depth:destroy()
-		capture.buffer:destroy()
+
+		if capture.depthView ~= nil then
+			capture.depthView:destroy()
+			capture.depthView = nil
+		end
+
+		if capture.depth ~= nil then
+			capture.depth:destroy()
+			capture.depth = nil
+		end
+
+		if capture.buffer ~= nil then
+			capture.buffer:destroy()
+			capture.buffer = nil
+		end
 	end
 
 	local texture = self:getDevice():createTexture({
@@ -567,26 +611,55 @@ function RenderPlugin:ensureCapture(ctx)
 		usages = { "RENDER_ATTACHMENT", "COPY_SRC" }
 	})
 
-	local depth = self:getDevice():createTexture({
-		extents = { dim = "2d", width = width, height = height, count = 1 },
-		format = DEPTH_FORMAT,
-		usages = { "RENDER_ATTACHMENT" }
-	})
-
 	---@type wonderland.plugin.Render.Capture
 	capture = {
 		texture = texture,
 		view = texture:createView({}),
-		depth = depth,
-		depthView = depth:createView({}),
-		buffer = self:getDevice():createBuffer({ size = width * height * 4, usages = { "MAP_READ" } }),
 		width = width,
 		height = height
 	}
 
 	ctx.capture = capture
+	-- The shapes of the copy are made again: they name the buffer, which this capture may not
+	-- have yet.
+	ctx.copyDescriptor = nil
 
 	return capture
+end
+
+--- The depth a screenshot's own pass tests against, made with the format the device draws with.
+--- A headless screen does not need it: its frames are drawn into the capture with the depth
+--- attachment of the context, and the capture's depth would only be a second buffer nobody reads.
+---@param capture wonderland.plugin.Render.Capture
+---@return hood.TextureView
+function RenderPlugin:ensureCaptureDepth(capture)
+	if capture.depth == nil then
+		local depth = self:getDevice():createTexture({
+			extents = { dim = "2d", width = capture.width, height = capture.height, count = 1 },
+			format = assert(self.depthFormat),
+			usages = { "RENDER_ATTACHMENT" }
+		})
+
+		capture.depth = depth
+		capture.depthView = depth:createView({})
+	end
+
+	return assert(capture.depthView)
+end
+
+--- Where a readback goes, made when a screenshot is asked for: the pixels of a frame that is
+--- never read back are never copied off the gpu either.
+---@param capture wonderland.plugin.Render.Capture
+---@return hood.Buffer
+function RenderPlugin:ensureReadback(capture)
+	if capture.buffer == nil then
+		capture.buffer = self:getDevice():createBuffer({
+			size = capture.width * capture.height * 4,
+			usages = { "MAP_READ" }
+		})
+	end
+
+	return capture.buffer
 end
 
 --- Records one frame of whatever the context was last told to draw.
@@ -619,18 +692,39 @@ function RenderPlugin:recordFrame(ctx, encoder, target, width, height, depthView
 		target_.draw(encoder, target_.surface.view, target_.width, target_.height)
 	end
 
-	encoder:beginRendering({
-		colorAttachments = {
-			{
-				op = { type = "clear", color = ctx.clear },
-				texture = target
+	-- What the pass is described by is kept and written into rather than made a table a frame: the
+	-- description is the same every frame but for the two views it draws into, and a frame that makes
+	-- it is a handful of tables the collector has to take back sixty times a second.
+	local pass = ctx.pass
+
+	if pass == nil then
+		pass = {
+			colorAttachments = {
+				{
+					op = { type = "clear", color = ctx.clear },
+					texture = target
+				}
+			},
+			depthStencilAttachment = {
+				op = { type = "clear", depth = 1 },
+				texture = depthView or ctx.depthBufferView
 			}
-		},
-		depthStencilAttachment = {
-			op = { type = "clear", depth = 1 },
-			texture = depthView or ctx.depthBufferView
-		}
-	})
+		} --[[@as hood.RenderPassDescriptor]]
+		ctx.pass = pass
+	else
+		local colour = pass.colorAttachments[1]
+		local depth = pass.depthStencilAttachment
+
+		if colour ~= nil then
+			colour.texture = target
+		end
+
+		if depth ~= nil then
+			depth.texture = depthView or ctx.depthBufferView
+		end
+	end
+
+	encoder:beginRendering(assert(pass))
 	encoder:setPipeline(ctx.quadPipeline)
 	encoder:setViewport(0, 0, width, height)
 	-- The copy of the frame this one was uploaded into: see `RenderPlugin:upload`.
@@ -750,7 +844,7 @@ function RenderPlugin:retarget(window)
 
 	ctx.drawRetries = 0
 	ctx.target = texture
-	ctx.targetView = texture:createView({})
+	ctx.targetView = texture:createView()
 	ctx.targetWidth, ctx.targetHeight = ctx.swapchain.width, ctx.swapchain.height
 
 	return true
@@ -792,7 +886,7 @@ function RenderPlugin:resize(ctx)
 	local oldBufferView, oldBuffer = ctx.depthBufferView, ctx.depthBuffer
 	ctx.depthBuffer = self:getDevice():createTexture({
 		extents = { dim = "2d", width = ctx.swapchain.width, height = ctx.swapchain.height, count = 1 },
-		format = DEPTH_FORMAT,
+		format = assert(self.depthFormat),
 		usages = { "RENDER_ATTACHMENT" }
 	})
 	ctx.depthBufferView = ctx.depthBuffer:createView({})
@@ -836,11 +930,13 @@ function RenderPlugin:draw(ctx)
 
 	local view, width, height
 
-	if not ctx.swapchain and ctx.capture then
+	if not ctx.swapchain then
 		-- A screen with no window behind it draws into the capture it is read back from, which is
-		-- the only thing it has to draw into. A windowed screen has a capture only once something
-		-- asked for a screenshot, and a screenshot is not a frame: what it draws is its swapchain.
-		view, width, height = ctx.capture.view, ctx.capture.width, ctx.capture.height
+		-- the only thing it has to draw into. The capture is made with the first frame rather than
+		-- with the context, so a screen that is never drawn -- a test that only builds its view --
+		-- holds no picture of itself.
+		local capture = self:ensureCapture(ctx)
+		view, width, height = capture.view, capture.width, capture.height
 	else
 		-- What the frame draws into, taken before the screen was built for it: see `retarget`, which
 		-- is what a frame that has not been through it yet is given here.
@@ -856,12 +952,12 @@ function RenderPlugin:draw(ctx)
 	self:upload(ctx)
 	self:recordFrame(ctx, encoder, view, width, height)
 
+	-- What a headless frame drew stays in the capture: a readback is the copy a screenshot asks
+	-- for, and a frame that nothing reads back copies nothing off the gpu.
+	self:getDevice().queue:submit(encoder:finish())
+
 	if ctx.swapchain then
-		self:getDevice().queue:submit(encoder:finish())
 		self:getDevice().queue:present(ctx.swapchain)
-	else
-		self:recordCopy(ctx, encoder)
-		self:getDevice().queue:submit(encoder:finish())
 	end
 
 	ctx.target, ctx.targetView = nil, nil
@@ -873,12 +969,27 @@ end
 ---@param encoder hood.CommandEncoder
 function RenderPlugin:recordCopy(ctx, encoder)
 	local capture = assert(ctx.capture)
+	local buffer = self:ensureReadback(capture)
 
-	encoder:copyTextureToBuffer(
-		{ texture = capture.texture },
-		{ buffer = capture.buffer, bytesPerRow = capture.width * 4 },
-		{ width = capture.width, height = capture.height }
-	)
+	-- The shapes of the copy are kept with the capture rather than made for every screenshot, the
+	-- same reason the pass's are.
+	local copy = ctx.copyDescriptor
+
+	if copy == nil then
+		copy = {
+			source = { texture = capture.texture },
+			target = { buffer = buffer, bytesPerRow = capture.width * 4 },
+			size = { width = capture.width, height = capture.height },
+		}
+		ctx.copyDescriptor = copy
+	else
+		copy.source.texture = capture.texture
+		copy.target.buffer = buffer
+		copy.target.bytesPerRow = capture.width * 4
+		copy.size.width, copy.size.height = capture.width, capture.height
+	end
+
+	encoder:copyTextureToBuffer(copy.source, copy.target, copy.size)
 end
 
 --- What the context last drew, as RGBA with the top row first. It costs a render, so
@@ -889,6 +1000,7 @@ end
 function RenderPlugin:getPixels(ctx)
 	if ctx.swapchain then
 		local capture = self:ensureCapture(ctx)
+		local depthView = self:ensureCaptureDepth(capture)
 		-- A command buffer of its own rather than the frame's: what is drawn here is drawn into the
 		-- capture and not into the swapchain, and a frame's buffer is one per swapchain image, which
 		-- is not free again until the frame that used it is presented -- so a screenshot taken twice
@@ -899,7 +1011,21 @@ function RenderPlugin:getPixels(ctx)
 		-- in flight are waited for, so the copy the swapchain is at is free to be written.
 		self:getDevice().queue:waitIdle()
 		self:upload(ctx)
-		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height, capture.depthView)
+		self:recordFrame(ctx, encoder, capture.view, capture.width, capture.height, depthView)
+		self:recordCopy(ctx, encoder)
+		self:getDevice().queue:submit(encoder:finish())
+	else
+		-- What the last frame drew is in the capture, which a headless frame is drawn into: only
+		-- the copy off the gpu is made here, with the buffer it reads into.
+		local capture = ctx.capture
+
+		if capture == nil then
+			return nil, "Nothing has been drawn to read back"
+		end
+
+		local encoder = self:getDevice():createCommandEncoder()
+
+		self:getDevice().queue:waitIdle()
 		self:recordCopy(ctx, encoder)
 		self:getDevice().queue:submit(encoder:finish())
 	end
@@ -909,7 +1035,7 @@ function RenderPlugin:getPixels(ctx)
 	-- The copy has to have finished before the buffer can be read.
 	self:getDevice().queue:waitIdle()
 
-	local buffer = capture.buffer
+	local buffer = assert(capture.buffer, "A screenshot reads back through a buffer")
 	buffer:mapAsync()
 	local raw = ffi.cast(bytePointer, buffer:getMappedRange())
 	local pixels = ffi.string(raw, capture.width * capture.height * 4)
@@ -963,7 +1089,10 @@ function RenderPlugin:destroy(window)
 	if ctx.capture then
 		ctx.capture.view:destroy()
 		ctx.capture.texture:destroy()
-		ctx.capture.buffer:destroy()
+
+		if ctx.capture.depthView ~= nil then ctx.capture.depthView:destroy() end
+		if ctx.capture.depth ~= nil then ctx.capture.depth:destroy() end
+		if ctx.capture.buffer ~= nil then ctx.capture.buffer:destroy() end
 	end
 
 	ctx.depthBufferView:destroy()

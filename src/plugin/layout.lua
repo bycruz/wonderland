@@ -1,4 +1,5 @@
 local bit = require("bit")
+local ffi = require("ffi")
 local UILayout = require("wonderland.layout")
 local style = require("wonderland.style")
 local utf8 = require("utf8")
@@ -435,6 +436,20 @@ end
 --- parent leaves it, and -- in a row -- what is left of that before the child after it, which is
 --- what a title beside a duration is. That is a question about where everything came out, so it is
 --- asked of the solve: see `Layout:cutLines`.
+---
+--- The walk is a stack of nodes rather than a call a level: a repaint cuts the lines of every
+--- screen it lays out, and a tree of an album is a call deeper than the recorder unrolls. What a
+--- node cuts is its own line, so the walk can visit a node before its children and keep their
+--- answers added up, rather than needing each answer to come back through a call.
+
+--- The stack a cut walk is worked on, one slot a node. It is kept because every repaint cuts a
+--- screen, and an array made for one is garbage the next frame has to collect.
+local cutStackIndex = ffi.new("uint32_t[?]", 256)
+local cutStackX = ffi.new("double[?]", 256)
+local cutStackY = ffi.new("double[?]", 256)
+local cutStackRight = ffi.new("double[?]", 256)
+local cutStackCapacity = 256
+
 ---@param screen wonderland.Layout.Screen
 ---@param index number
 ---@param parentX number
@@ -442,51 +457,90 @@ end
 ---@param right number # Where the room this node may use ends, absolute
 ---@param fontManager FontManager
 local function cutInto(screen, index, parentX, parentY, right, fontManager)
-	local node = screen:node(index)
-	local x, y = parentX + node.x, parentY + node.y
+	-- One slot a node, and a node can push all of its children at once, which is no more than the
+	-- nodes a screen has. The arrays are kept because a repaint cuts every frame.
+	local needed = screen.count + 1
+
+	if needed > cutStackCapacity then
+		local capacity = cutStackCapacity
+
+		while capacity < needed do
+			capacity = capacity * 2
+		end
+
+		cutStackIndex = ffi.new("uint32_t[?]", capacity)
+		cutStackX = ffi.new("double[?]", capacity)
+		cutStackY = ffi.new("double[?]", capacity)
+		cutStackRight = ffi.new("double[?]", capacity)
+		cutStackCapacity = capacity
+	end
+
+	local stackIndex, stackX = cutStackIndex, cutStackX
+	local stackY, stackRight = cutStackY, cutStackRight
+
+	local top = 1
+	stackIndex[1] = index
+	stackX[1] = parentX
+	stackY[1] = parentY
+	stackRight[1] = right
+
 	local cut = false
 
-	if node.run ~= 0 and bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0 then
-		local element = pointers[node.element]
-		local font = element.fontId ~= 0 and fontManager:get(element.fontId)
-		local text = element.text ~= 0 and strings[element.text]
-		local room = math.min(node.width, right - x) - node.paddingLeft - node.paddingRight
+	while top > 0 do
+		local at = stackIndex[top]
+		local givenX, givenY, room = stackX[top], stackY[top], stackRight[top]
+		top = top - 1
 
-		if font ~= nil and text ~= nil and room > 0 then
-			local run = font:getRun(text, room)
+		local node = screen:node(at)
+		local x, y = givenX + node.x, givenY + node.y
 
-			if run ~= screen.runs[node.run] then
-				screen.runs[node.run] = run
-				node.runId = run.id
-				cut = true
+		if node.run ~= 0 and bit.band(node.styleFlags, style.PRESENT.ellipsis) ~= 0 then
+			local element = pointers[node.element]
+			local font = element.fontId ~= 0 and fontManager:get(element.fontId)
+			local text = element.text ~= 0 and strings[element.text]
+			local width = math.min(node.width, room - x) - node.paddingLeft - node.paddingRight
 
-				-- A line that was cut is as wide as it was cut to, so that what comes after it is
-				-- placed against what is drawn rather than against what would not fit: the row is
-				-- solved again, and the duration beside a title moves to the title's new end.
-				if bit.band(node.styleFlags, style.PRESENT.width) == 0 then
-					node.widthUnit, node.wantWidth = style.ABS, run.width
+			if font ~= nil and text ~= nil and width > 0 then
+				local run = font:getRun(text, width)
+
+				if run ~= screen.runs[node.run] then
+					screen.runs[node.run] = run
+					node.runId = run.id
+					cut = true
+
+					-- A line that was cut is as wide as it was cut to, so that what comes after it
+					-- is placed against what is drawn rather than against what would not fit: the
+					-- row is solved again, and the duration beside a title moves to the title's new
+					-- end.
+					if bit.band(node.styleFlags, style.PRESENT.width) == 0 then
+						node.widthUnit, node.wantWidth = style.ABS, run.width
+					end
 				end
 			end
 		end
-	end
 
-	-- What is left for a child: the node's own content edge, and -- in a row -- the place the next
-	-- child was given, which is where this one stops being drawn over.
-	local contentRight = x + node.width - node.paddingRight
-	local isRow = node.direction == 0
+		-- What is left for a child: the node's own content edge, and -- in a row -- the place the
+		-- next child was given, which is where this one stops being drawn over.
+		local contentRight = x + node.width - node.paddingRight
+		local isRow = node.direction == 0
+		local count = node.childCount
+		local first = node.firstChild
 
-	for at = 0, node.childCount - 1 do
-			local child = screen.childIndices[node.firstChild + at - 1]
+		for childAt = count - 1, 0, -1 do
+			local child = screen.childIndices[first + childAt - 1]
 			local limit = contentRight
 
-			if isRow and at < node.childCount - 1 then
-				limit = math.min(contentRight, x + screen:node(screen.childIndices[node.firstChild + at]).x)
+			if isRow and childAt < count - 1 then
+				limit = math.min(contentRight, x + screen:node(screen.childIndices[first + childAt]).x)
 			end
 
-			if cutInto(screen, child, x, y, math.min(right, limit), fontManager) then
-				cut = true
-			end
+			top = top + 1
+			stackIndex[top] = child
+			stackX[top] = x
+			stackY[top] = y
+			stackRight[top] = math.min(room, limit)
 		end
+	end
 
 	return cut
 end
@@ -911,7 +965,7 @@ end
 --- padding and its borders, which is the space a slider stacks its own children in, and less the
 --- nub as well when there is one, since the nub's own ends are the ends of the slider. The nub is
 --- the child the layout put where the value is, so the two agree on where a value is by both
---- being worked out the same way: see the nub in `solveNode`.
+--- being worked out the same way: see the nub in `solveTree`.
 ---@param screen wonderland.Layout.Screen
 ---@param hit wonderland.plugin.Layout.Hit
 ---@param element wonderland.Element
@@ -925,7 +979,7 @@ local function dragFor(screen, hit, element)
 	local nub = 0
 
 	for at = 0, node.childCount - 1 do
-			local child = screen.nodes[screen.childIndices[node.firstChild + at - 1] - 1]
+			local child = screen.refs[screen.childIndices[node.firstChild + at - 1]]
 
 			if child.thumb ~= 0 then
 				nub = across and child.width or child.height

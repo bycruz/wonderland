@@ -39,7 +39,7 @@ ffi.cdef [[
 		int32_t marginTop, marginRight, marginBottom, marginLeft;
 		int32_t top, left, right, bottom;
 		int32_t borderTop, borderRight, borderBottom, borderLeft;
-		uint32_t fgR, fgG, fgB, fgA;
+		uint8_t fgR, fgG, fgB, fgA;   // the colour text inside it is drawn in, a byte a channel
 		uint32_t texture, font;
 		float bright;     // a multiplier on the colours, 1.0 for not one
 		float radius;     // how round the corners are, in pixels, 0 for square ones
@@ -908,6 +908,12 @@ local arena = ffi.new("wl_style[?]", CAPACITY)
 local buckets = ffi.new("uint32_t[?]", BUCKETS)
 local slots = 0
 
+-- The styles handed out as references rather than made ones: a slot read out of the array is a
+-- reference the collector has to keep, and a repaint reads one per element. Kept, a slot read is
+-- a table index, and what is kept is refreshed when the array is copied to a bigger one.
+---@type table<number, wonderland.StyleSlot>
+local refs = {}
+
 -- What each slot hashed to when it was interned, kept beside it so that growing the table is looking
 -- at numbers rather than hashing every style again: see `rehash`.
 local hashes = ffi.new("uint32_t[?]", CAPACITY)
@@ -1239,9 +1245,19 @@ local function grow(count)
 	arena = bigger
 	style.arena = arena
 
+	-- The references of the slots already held are the new array's now: a kept one points into the
+	-- array it was read from, which nothing reads after this.
+	for at = 0, slots - 1 do
+		refs[at] = arena[at]
+	end
+
 	local moves = ffi.new("uint32_t[?]", capacity)
 	ffi.copy(moves, hashes, slots * ffi.sizeof("uint32_t"))
 	hashes = moves
+
+	-- Without this the next style past the old capacity copies the whole arena again: every new
+	-- style once there are more than the first capacity's worth is a reallocation of all of them.
+	CAPACITY = capacity
 end
 
 --- More buckets, with every slot put back where it now belongs.
@@ -1325,6 +1341,7 @@ local function intern(fields)
 			ffi.copy(arena[slot], scratch, SIZE)
 			hashes[slot] = hash
 			buckets[at] = slot + 1
+			refs[slot] = arena[slot]
 
 			return slot
 		end
@@ -1342,6 +1359,10 @@ end
 -- rather than behind a call because a node reads one: a repaint is one array index per
 -- element, not one call.
 style.arena = arena
+
+-- The same slots, as references: what reads a style per element reads these rather than the array,
+-- which makes a reference for a slot each time it is indexed. See `refs`.
+style.refs = refs
 
 --- A style, once it is what the arena holds: what an element keeps is the slot, and this
 --- is what that slot says. Mostly here for reading a style back in a test.

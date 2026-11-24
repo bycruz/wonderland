@@ -34,6 +34,13 @@ local embedded = require("wonderland.font.embedded")
 local DEFAULT_PIXEL_HEIGHT = 16
 local DEFAULT_WEIGHT = 400
 
+-- How many frames a font may go without a line measured in it before its pictures are given back.
+-- Ten seconds at sixty frames: long enough that a page a screen returns to keeps its sheets, short
+-- enough that a session which asks for a size once does not hold it for the rest of the day. A font
+-- asked for again packs what it draws and keeps its place among the fonts, so nothing that holds it
+-- by number has to be resolved again.
+local UNUSED_FRAMES = 600
+
 
 -- What fonts a machine has is a question about the machine, not about an app: what one scan finds
 -- is kept here and shared by every manager in the process, so that two windows -- or a test that
@@ -78,6 +85,7 @@ end
 ---@field defaultSpec wonderland.FontSpec? # What it was resolved from, for a style to change one part of
 ---@field byKey table<string, wonderland.font.Font> # A spec, resolved once
 ---@field faces table<string, wonderland.font.Face | false> # Files read, by where they are
+---@field frame number? # How many frames have been flushed, which is how long a font has been idle
 local FontManager = {}
 FontManager.__index = FontManager
 
@@ -194,17 +202,6 @@ end
 --- The font a spec asks for, made now if this is the first thing to ask for it. Every size of a
 --- family is a font of its own and every kind of anything else is shared: the fonts an app has
 --- asked for are kept, so a repaint asks by number and resolves nothing.
---- The side of a glyph atlas, in pixels. A sheet is a texture and a CPU buffer of its pixels;
---- a 512 square holds a megabyte each, which is more than a line of 12 px text can fill. Small
---- sizes take small sheets and add another rather than reserving a screenful they never use.
----@param pixelHeight number
----@return number
-local function sheetSide(pixelHeight)
-	if pixelHeight <= 16 then return 128 end
-	if pixelHeight <= 32 then return 256 end
-	return 512
-end
-
 ---@param spec wonderland.FontSpec
 ---@return wonderland.font.Font? font
 ---@return string? err
@@ -264,7 +261,6 @@ function FontManager:resolve(spec)
 	local primary = Atlas.new(face, pixelHeight, {
 		pictures = self.textureManager,
 		characters = spec.characters,
-		size = sheetSide(pixelHeight),
 	})
 
 	local manager = self
@@ -342,9 +338,18 @@ end
 
 --- What has been packed since the last frame, put into the pictures the screen samples: a glyph
 --- an app's text needed is in the frame that follows the one it was measured in.
+---
+--- The same walk gives back the pictures of a font that no screen has drawn in for a while: a
+--- session that visits many pages of many sizes does not keep every atlas it ever made, and the
+--- fonts themselves stay so that a style that names one still resolves to the number it held.
 function FontManager:flush()
-	for _, font in ipairs(self.fonts) do
-		font:flush()
+	local frame = (self.frame or 0) + 1
+	local fonts = self.fonts
+
+	self.frame = frame
+
+	for index = 1, #fonts do
+		fonts[index]:flush(frame, UNUSED_FRAMES)
 	end
 end
 

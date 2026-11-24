@@ -1,6 +1,9 @@
 local bit = require("bit")
 local Canvas = require("wonderland.canvas")
+local ffi = require("ffi")
 local QuadBatch = require("wonderland.util.quad_batch")
+---@type wonderland.QuadBatch.Request
+local request = assert(QuadBatch.request)
 local style = require("wonderland.style")
 local wonderlandElement = require("wonderland.element")
 local time = require("wonderland.time")
@@ -41,6 +44,7 @@ local now = time.now
 ---@field renderPlugin wonderland.plugin.Render
 ---@field batch wonderland.QuadBatch
 ---@field tickers wonderland.plugin.UI.Ticker[] # What the app asked to be called back on
+---@field frameClip wonderland.plugin.UI.Clip? # The clip of a frame being walked: see `UI:walk`
 ---@field frame (fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow))?
 ---@field present fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow)
 ---@field requestRedraw fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)
@@ -217,6 +221,34 @@ local PAST_THE_LINE = 1 << 24
 ---@field boxRight number?
 ---@field boxBottom number?
 
+--- Whether a point is inside the rounded box of a clip: the corners are the only part of it a
+--- rectangle does not say, so this is the rectangle first and the arcs after it.
+---
+--- A function rather than a closure made for the question, because the question is asked for every
+--- quad that reaches into a rounded pane: a closure is a function made every time, and one made in
+--- the middle of a frame is memory the frame did not need and a trace the recorder gives up on.
+---@param clip wonderland.plugin.UI.Clip
+---@param x number
+---@param y number
+---@param radius number
+---@return boolean
+local function insideRoundedCorner(clip, x, y, radius)
+	local boxLeft = clip.boxLeft or clip.left
+	local boxTop = clip.boxTop or clip.top
+	local boxRight = clip.boxRight or clip.right
+	local boxBottom = clip.boxBottom or clip.bottom
+	local innerLeft, innerTop = boxLeft + radius, boxTop + radius
+	local innerRight, innerBottom = boxRight - radius, boxBottom - radius
+	local limit = radius * radius + 0.001
+
+	if x < boxLeft or x > boxRight or y < boxTop or y > boxBottom then return false end
+	local nearestX = x < innerLeft and innerLeft or (x > innerRight and innerRight or x)
+	local nearestY = y < innerTop and innerTop or (y > innerBottom and innerBottom or y)
+	local dx, dy = x - nearestX, y - nearestY
+
+	return dx * dx + dy * dy <= limit
+end
+
 --- Whether a rectangle is wholly inside a rounded clip. The clip's rectangle cuts first; its
 --- rounded box cuts the corners, and a child that reaches into one has to use the parent's shape
 --- rather than its own.
@@ -230,45 +262,32 @@ local function insideRoundedClip(clip, left, top, right, bottom)
 	local radius = clip.radius
 	if radius == nil or radius <= 0 then return true end
 
-	local boxLeft = clip.boxLeft or clip.left
-	local boxTop = clip.boxTop or clip.top
-	local boxRight = clip.boxRight or clip.right
-	local boxBottom = clip.boxBottom or clip.bottom
-	local innerLeft, innerTop = boxLeft + radius, boxTop + radius
-	local innerRight, innerBottom = boxRight - radius, boxBottom - radius
-	local limit = radius * radius + 0.001
-
-	local function inside(x, y)
-		if x < boxLeft or x > boxRight or y < boxTop or y > boxBottom then return false end
-		local nearestX = x < innerLeft and innerLeft or (x > innerRight and innerRight or x)
-		local nearestY = y < innerTop and innerTop or (y > innerBottom and innerBottom or y)
-		local dx, dy = x - nearestX, y - nearestY
-
-		return dx * dx + dy * dy <= limit
-	end
-
-	return inside(left, top) and inside(right, top) and inside(left, bottom) and inside(right, bottom)
+	return insideRoundedCorner(clip, left, top, radius)
+	and insideRoundedCorner(clip, right, top, radius)
+	and insideRoundedCorner(clip, left, bottom, radius)
+	and insideRoundedCorner(clip, right, bottom, radius)
 end
 
+--- Draws the quad the request describes, cut to the clip it is drawn in. What the quad is, where
+--- it goes and what is round about it all come from `request` rather than from the call: a call of
+--- fifteen values is one the recorder keeps every one of alive across, and that is the register
+--- coalescing it gives up on. Writing the request first is a store a value, and what the batch is
+--- handed is one pointer whose fields it reads back.
 ---@param batch wonderland.QuadBatch
 ---@param clip wonderland.plugin.UI.Clip
----@param left number
----@param top number
----@param right number
----@param bottom number
----@param z number
----@param colour number # The colour as its four bytes: see `QuadBatch`'s `colour` and `rgba`
----@param texture number
----@param uv0 number? # The part of the picture the box is, as its corners: see `QuadBatch`'s `uv`
----@param uv1 number?
----@param radius number? # How round the box's corners are, in pixels, nothing for square ones
----@param band number? # How sharp the edge of it is, one pixel either side by default
----@param grow number? # How far past the box the quad is drawn: a shadow is its own blur
----@param own number? # Whether the picture is drawn as it is rather than through the colour
----@param blur number? # How far what the box draws is spread, in pixels, nothing for not at all
-local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, texture, uv0, uv1, radius, band,
-	grow, own, blur, border)
-	if blur ~= nil and blur > 0 then
+---@param request wonderland.QuadBatch.Request
+local function clippedQuad(batch, clip, request)
+	local left, top, right, bottom = request.left, request.top, request.right, request.bottom
+	local radius, band = request.radius, request.band
+	local own, blur, border = request.own, request.blur, request.border
+	local banded = request.hasBand ~= 0
+	local grow = request.spread
+
+	if not banded then
+		band = 1
+	end
+
+	if blur > 0 then
 		-- What a blur spreads has to be drawn somewhere, so the quad is grown by the room the taps
 		-- read in: twice the blur, which is as far as the furthest of them reaches.
 		grow = blur * 2
@@ -277,17 +296,19 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 		-- -- spread over the blur rather than over the one pixel it is antialiased by. Everything
 		-- else is its own picture, and what the taps read past the part of it that is there is what
 		-- fades its edge out.
-		if radius ~= nil and radius > 0 then
+		if radius > 0 then
 			band = 1 / (2 * blur)
 		else
 			band = 0
 		end
+
+		banded = true
 	end
 
 	-- A quad that is drawn past its box is one whose edge is spread out, so what is drawn is the
 	-- box and the space the spreading needs; the box itself is what the corner arithmetic is about.
-	local drawnLeft, drawnTop = left - (grow or 0), top - (grow or 0)
-	local drawnRight, drawnBottom = right + (grow or 0), bottom + (grow or 0)
+	local drawnLeft, drawnTop = left - grow, top - grow
+	local drawnRight, drawnBottom = right + grow, bottom + grow
 	-- The quad the box asked for, when all of it shows. Most quads are inside the clip -- only the
 	-- ones at the edge of a pane that scrolls are not -- and working out where a quad is cut costs
 	-- a pair of divisions, so the ones that need nothing are the ones that get nothing.
@@ -307,20 +328,32 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 		-- a call among the arguments of a call is one the recorder has to keep the arguments it has
 		-- already worked out alive across -- see `putBox` in `wonderland.util.quad_batch`.
 		local scaleX, scaleY = frameScaleX, frameScaleY
-		local ndcLeft, ndcTop = left * scaleX - 1.0, 1.0 - top * scaleY
-		local ndcRight, ndcBottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
+		request.left, request.top = left * scaleX - 1.0, 1.0 - top * scaleY
+		request.right, request.bottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
 
-		if band or (radius and radius > 0) or (border and border > 0) then
-			if grow then
-				batch:roundQuad(drawnLeft * scaleX - 1.0, 1.0 - drawnTop * scaleY, drawnRight * scaleX - 1.0,
-				1.0 - drawnBottom * scaleY, z, colour, texture, uv0, uv1, radius or 0, band, own, blur,
-				ndcLeft, ndcTop, ndcRight, ndcBottom, border)
+		-- Everything about the cut is written before the branch on it, so that the values the
+		-- branch needs are the box and the spread rather than the cut of every kind of quad too:
+		-- a square quad reads none of them -- but `own` is one both calls read.
+		request.radius, request.band, request.hasBand = radius, band, banded and 1 or 0
+		request.own, request.blur, request.border = own, blur, border
+
+		if banded or radius > 0 or border > 0 then
+			if grow ~= 0 then
+				-- The box the corners belong to is the one asked for, and what is drawn is that
+				-- box and the room the spreading needs: both sets of corners are already fields of
+				-- the request, and the box is read back from them.
+				request.hasBox = 1
+				request.boxLeft, request.boxTop = request.left, request.top
+				request.boxRight, request.boxBottom = request.right, request.bottom
+				request.left, request.top = drawnLeft * scaleX - 1.0, 1.0 - drawnTop * scaleY
+				request.right, request.bottom = drawnRight * scaleX - 1.0, 1.0 - drawnBottom * scaleY
 			else
-				batch:roundQuad(ndcLeft, ndcTop, ndcRight, ndcBottom, z, colour, texture, uv0, uv1,
-				radius or 0, band, own, blur, nil, nil, nil, nil, border)
+				request.hasBox = 0
 			end
+
+			batch:roundQuadFrom()
 		else
-			batch:quad(ndcLeft, ndcTop, ndcRight, ndcBottom, z, colour, texture, uv0, uv1, own)
+			batch:quadFrom()
 		end
 
 		return
@@ -351,7 +384,7 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 	local ndcRight, ndcBottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
 	local shownLeft, shownTop = atLeft * scaleX - 1.0, 1.0 - atTop * scaleY
 	local shownRight, shownBottom = atRight * scaleX - 1.0, 1.0 - atBottom * scaleY
-	local cutRadius, cutBand = radius or 0, band
+	local cutRadius, cutBand = radius, banded and band or (radius > 0 and 1 or 0)
 
 	if cutRound then
 		cutRadius, cutBand = clip.radius or 0, 1
@@ -361,15 +394,17 @@ local function clippedQuad(batch, clip, left, top, right, bottom, z, colour, tex
 		ndcBottom = 1.0 - (clip.boxBottom or clip.bottom) * scaleY
 	end
 
-	if cutBand or cutRadius > 0 then
-		batch:roundQuad(shownLeft, shownTop, shownRight, shownBottom, z, colour, texture, uv0, uv1,
-		cutRadius, cutBand, own, blur, ndcLeft, ndcTop, ndcRight, ndcBottom, border)
+	-- The box the corners belong to is in the request beside the corners, and a cut that names no
+	-- band is one pixel either side of a round edge and a hard one on a square.
+	request.radius, request.band, request.hasBand = cutRadius, cutBand, 1
+	request.own, request.blur, request.border = own, blur, border
+	request.hasBox = 1
+	request.boxLeft, request.boxTop = ndcLeft, ndcTop
+	request.boxRight, request.boxBottom = ndcRight, ndcBottom
+	request.left, request.top = shownLeft, shownTop
+	request.right, request.bottom = shownRight, shownBottom
 
-		return
-	end
-
-	batch:roundQuad(shownLeft, shownTop, shownRight, shownBottom, z, colour, texture, uv0, uv1, 0, 0, own, blur,
-	ndcLeft, ndcTop, ndcRight, ndcBottom)
+	batch:roundQuadFrom()
 end
 
 ---@param batch wonderland.QuadBatch
@@ -382,8 +417,6 @@ end
 ---@param b number
 ---@param a number
 ---@param z number
----@param windowWidth number
----@param windowHeight number
 ---@param blur number? # How far the line is spread, in pixels, which is the blur of the box it is on
 ---@param batch wonderland.QuadBatch
 ---@param clip wonderland.plugin.UI.Clip
@@ -391,39 +424,76 @@ end
 ---@param g number
 ---@param b number
 ---@param a number
-local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, windowWidth, windowHeight, blur)
+local function addBorderQuad(batch, clip, bx, by, bw, bh, r, g, b, a, z, blur)
 	if bw <= 0 or bh <= 0 then
 		return
 	end
 
-	clippedQuad(batch, clip, bx, by, bx + bw, by + bh, convertZ(z + 1), QuadBatch.colour(r, g, b, a), 0, nil, nil,
-	nil, nil, nil, nil, blur)
+	local colour = QuadBatch.colour(r, g, b, a)
+
+	request.left, request.top, request.right, request.bottom = bx, by, bx + bw, by + bh
+	request.z, request.colour, request.texture = convertZ(z + 1), colour, 0
+	request.uv0, request.uv1 = 0, 0xFFFFFFFF
+	request.radius, request.band, request.hasBand = 0, 0, 0
+	request.own, request.blur, request.border, request.spread = 0, blur or 0, 0, 0
+
+	clippedQuad(batch, clip, request)
+end
+
+-- The glyphs a tight loop cannot write: their index, the line origin they are placed from and the
+-- colour they are drawn in, in tables kept between frames, so that a glyph crossing the edge of its
+-- pane is drawn by the general path without the loop that draws the rest carrying those branches.
+local glyphEdge, glyphEdgeOrigins, glyphEdgeColours = {}, {}, {}
+
+-- Where each line of a run is drawn and from which byte its selection is counted, worked out before
+-- the glyphs are: the loop that draws the glyphs walks the lines with them rather than around them.
+-- Only the lines that have a glyph in them are kept, in order, so stepping to the next one is a
+-- comparison rather than a search.
+local walkLineOrigins, walkLineEnds, walkLineBases = {}, {}, {}
+
+--- One glyph drawn the general way: what one crossing the edge of its pane needs, and what every
+--- glyph of a line is drawn with where the clip is round or the box is blurred.
+---@param batch wonderland.QuadBatch
+---@param clip wonderland.plugin.UI.Clip
+---@param glyph wonderland.font.PlacedGlyph
+---@param left number
+---@param top number
+---@param zIndex number
+---@param colour number
+---@param picture number
+---@param blur number
+local function clippedGlyph(batch, clip, glyph, left, top, zIndex, colour, picture, blur)
+	request.left, request.top = left, top
+	request.right, request.bottom = left + glyph.width, top + glyph.height
+	request.z, request.colour, request.texture = zIndex, colour, picture
+	request.uv0, request.uv1 = glyph.uv0, glyph.uv1
+	request.radius, request.band, request.hasBand = 0, 0, 0
+	request.own, request.blur, request.border, request.spread = glyph.own, blur, 0, 0
+
+	clippedQuad(batch, clip, request)
 end
 
 --- A line is drawn from the run it measured into, which is where its glyphs are. A run of
 --- several lines is drawn line by line, each of them placed in the box on its own: a line that
 --- is not as wide as the box is aligned by its own width, not by the widest one in the run.
 ---@param batch wonderland.QuadBatch
+---@param clip wonderland.plugin.UI.Clip
 ---@param run wonderland.font.Run
 ---@param node wonderland.Node
 ---@param x number # Absolute, so the glyphs land on whole pixels
 ---@param y number
 ---@param z number
 ---@param fontManager FontManager
----@param windowWidth number
----@param windowHeight number
 ---@param value string? # What the run was measured from, where a selection is counted in its bytes
 ---@param from number? # The first byte of it a selection covers, where there is one
 ---@param to number?
-local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, windowWidth, windowHeight,
-	value, from, to)
+local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, value, from, to)
 	-- What a glyph is drawn in is the same for every glyph of the line, so it is packed once here
 	-- rather than four numbers narrowed into a colour per glyph: the colour of the text, and the one
 	-- that reads on the highlight for a glyph the selection covers.
 	local ink = QuadBatch.rgba(node.fgR, node.fgG, node.fgB, node.fgA)
 	local marked = QuadBatch.rgba(SELECTION_TEXT_R, SELECTION_TEXT_G, SELECTION_TEXT_B, node.fgA)
 	local selecting = value ~= nil and from ~= nil and to ~= nil and from < to
-	local lineBase = 0
 
 	-- The picture a glyph is drawn from is the one it was measured in, because a line may be drawn
 	-- by more than one face: a character the font an app named has no glyph for is drawn from the
@@ -448,65 +518,250 @@ local function generateTextQuads(batch, clip, run, node, x, y, z, fontManager, w
 		return
 	end
 
+	-- A run that is wholly outside the pane it is in draws nothing: every glyph of it is clipped
+	-- away, so none of them is written. What it may reach past its box by is the bearing of a
+	-- glyph, which is no more than a line is tall, so a run a line outside the pane is one that
+	-- cannot put a pixel in it -- and a list of a hundred rows drawn under a pane that shows eight
+	-- is a hundred runs walked for nothing.
+	--
+	-- It is the walk of one node, not of its children: a child placed against the outside of its
+	-- parent is a box of its own, and it is the child that says whether it is in the pane.
+	-- How far past the pane the run reaches is one number rather than four tests: the greatest of
+	-- the distances past each edge of it, which is a maximum and not a branch. A run that scrolls
+	-- into the pane is a guard exiting every frame otherwise, and each exit is a side trace the
+	-- recorder compiles for a run that is drawn the same way as the one before it.
+	local reachX, reachY = run.width + run.height, run.height * 2
+	local margin = math.max(clip.left - (x + reachX), (x - reachX) - clip.right, clip.top - (y + reachY),
+		(y - reachY) - clip.bottom)
+
+	if margin > 0 then
+		return
+	end
+
 	local zIndex = convertZ(z)
+
+	-- What is the same for every glyph of the run is read once: a field of the node read in a loop
+	-- is a load the recorder has to keep alive across every call the loop makes.
+	local blur = node.blur
+	local justify, width = node.justify, node.width
+
+	-- A line is drawn by the tight loops below unless something about it needs the general path: a
+	-- clip with round corners cuts every glyph of it, and a blurred box spreads every one.
+	local tight = blur == 0 and (clip.radius or 0) <= 0
 
 	-- One array of glyphs and one of lines, read by index: the run was measured as structs, so
 	-- drawing a line costs a handful of loads rather than a table lookup per glyph.
-	for lineIndex = 0, run.lineCount - 1 do
-			local line = run.lines[lineIndex]
+	--
+	-- A field of a line is read where it is wanted rather than a line held to read it from: the
+	-- array is of structs, so reading one out is a reference made for the reading, and one kept
+	-- across the glyph loop is a reference that cannot be given back before the loop needs it --
+	-- which is a reference a line per frame, for what is three numbers.
+	local lines = run.lines
+	local lineCount = run.lineCount
+	local lineBase = 0
 
-			-- A line may be given more room than it needs, and then it says where in that room it sits.
+	-- A rounded clip or a blurred box needs the general path for every glyph of the line, which is
+	-- rare: it keeps the walk of one line at a time it always had.
+	if not tight then
+		for lineIndex = 0, lineCount - 1 do
+			local lineWidth = lines[lineIndex].width
 			local offset = 0
-			if node.justify == 1 then
-				offset = math.floor((node.width - line.width) / 2 + 0.5)
-			elseif node.justify == 2 then
-				offset = node.width - line.width
+
+			if justify == 1 then
+				offset = math.floor((width - lineWidth) / 2 + 0.5)
+			elseif justify == 2 then
+				offset = width - lineWidth
 			end
 
 			local originX = x + offset
-
-			for at = 0, line.count - 1 do
-					local glyph = glyphs[line.first + at]
-					local picture = glyph.texture ~= 0 and glyph.texture or fallback
-					local colour = ink
-
-					-- A glyph the selection covers is drawn in the colour that reads on the highlight rather
-					-- than in the colour of the text: what a glyph came from is the byte it kept, so which
-					-- side of the selection it is on is a comparison of bytes.
-					if selecting then
-						local byte = lineBase + glyph.cluster
-
-						if byte >= from and byte < to then
-							colour = marked
-						end
-					end
-
-					-- A glyph that is a picture of its own -- an emoji -- is drawn as the picture rather
-					-- than through the text's colour: what the colour is of it is how opaque the element is.
-					-- A line inside a blurred element is drawn with every glyph of it spread by the same
-					-- blur, which is what makes the text of one soft rather than its box alone.
-					--
-					-- Its ink is put on whole pixels. A glyph is rasterised onto the pixel grid, and a pen
-					-- is fractional -- a shaper's advances are, and so is a box that is centred, scrolled
-					-- or slid -- so a glyph drawn where the pen is falls between pixels and is sampled
-					-- across two of them: one letter crisp, the next smeared and fainter, which is a word
-					-- that looks misspaced. Each glyph is rounded to the nearest pixel on its own, so the
-					-- line keeps the spacing the font gave it to within half a pixel and never drifts.
-					local left = math.floor(originX + glyph.x + 0.5)
-					local top = math.floor(y + glyph.y + 0.5)
-
-					clippedQuad(batch, clip, left, top, left + glyph.width, top + glyph.height, zIndex, colour, picture,
-					glyph.uv0, glyph.uv1, nil, nil, nil, glyph.own, node.blur)
-				end
+			local first, count = lines[lineIndex].first, lines[lineIndex].count
 
 			if selecting then
-				local break_ = value:find("\n", lineBase + 1, true)
+				local selFrom, selTo = assert(from), assert(to)
+
+				for at = 0, count - 1 do
+					local glyph = glyphs[first + at]
+					local colour = ink
+
+					if lineBase + glyph.cluster >= selFrom and lineBase + glyph.cluster < selTo then
+						colour = marked
+					end
+
+					clippedGlyph(batch, clip, glyph, math.floor(originX + glyph.x + 0.5),
+						math.floor(y + glyph.y + 0.5), zIndex, colour,
+						glyph.texture ~= 0 and glyph.texture or fallback, blur)
+				end
+
+				local break_ = assert(value):find("\n", lineBase + 1, true)
 
 				if break_ ~= nil then
 					lineBase = break_
 				end
+			else
+				for at = 0, count - 1 do
+					local glyph = glyphs[first + at]
+
+					clippedGlyph(batch, clip, glyph, math.floor(originX + glyph.x + 0.5),
+						math.floor(y + glyph.y + 0.5), zIndex, ink,
+						glyph.texture ~= 0 and glyph.texture or fallback, blur)
+				end
 			end
 		end
+
+		return
+	end
+
+	-- Where each line that has a glyph in it is drawn, and from which byte its selection is counted:
+	-- what the loop below would otherwise work out per line, from a loop around the glyphs that the
+	-- recorder cannot follow -- which is the per-line prologue and its request stores running in the
+	-- interpreter while the glyphs are compiled.
+	local origins, ends, bases = walkLineOrigins, walkLineEnds, walkLineBases
+	local kept = 0
+
+	for lineIndex = 0, lineCount - 1 do
+		local lineWidth = lines[lineIndex].width
+		local offset = 0
+
+		if justify == 1 then
+			offset = math.floor((width - lineWidth) / 2 + 0.5)
+		elseif justify == 2 then
+			offset = width - lineWidth
+		end
+
+		local first, count = lines[lineIndex].first, lines[lineIndex].count
+
+		if count > 0 then
+			kept = kept + 1
+			origins[kept] = x + offset
+			ends[kept] = first + count
+			bases[kept] = lineBase
+		end
+
+		if selecting then
+			local break_ = assert(value):find("\n", lineBase + 1, true)
+
+			if break_ ~= nil then
+				lineBase = break_
+			end
+		end
+	end
+
+	-- One loop over every glyph of the run, with the line it is on stepped along inside it: the
+	-- lines with glyphs in them are in order and each is non-empty, so one comparison moves to the
+	-- next. A glyph that is not wholly inside the clip is left for the pass after this one.
+	local edges, edgeOrigins, edgeColours = glyphEdge, glyphEdgeOrigins, glyphEdgeColours
+	local edgeCount = 0
+	local lineAt = 1
+	local lineEnd = ends[1]
+	local originX = origins[1]
+	local base = bases[1]
+	local scaleX, scaleY = frameScaleX, frameScaleY
+	local clipLeft, clipTop, clipRight, clipBottom = clip.left, clip.top, clip.right, clip.bottom
+	local total = run.count
+
+	batch:reserve(batch.quads + total)
+
+	if selecting then
+		local selFrom, selTo = assert(from), assert(to)
+
+		for at = 0, total - 1 do
+			if at == lineEnd then
+				lineAt = lineAt + 1
+				lineEnd = ends[lineAt]
+				originX = origins[lineAt]
+				base = bases[lineAt]
+			end
+
+			local glyph = glyphs[at]
+			local left = math.floor(originX + glyph.x + 0.5)
+			local top = math.floor(y + glyph.y + 0.5)
+			local right, bottom = left + glyph.width, top + glyph.height
+			local colour = ink
+
+			if base + glyph.cluster >= selFrom and base + glyph.cluster < selTo then
+				colour = marked
+			end
+
+			-- One comparison for the four edges of the clip: the largest of how far the box goes
+			-- past each of them is a maximum rather than four branches, and it is nought or less
+			-- for a glyph that is wholly inside.
+			if math.max(clipLeft - left, clipTop - top, right - clipRight, bottom - clipBottom) <= 0 then
+				local picture = glyph.texture ~= 0 and glyph.texture or fallback
+
+				if picture ~= batch.texture then
+					local runIndex = batch.runCount * QuadBatch.RUN_NUMBERS
+
+					batch.runs[runIndex + QuadBatch.RUN_TEXTURE] = picture
+					batch.runs[runIndex + QuadBatch.RUN_FIRST] = batch.quads
+					batch.runCount = batch.runCount + 1
+					batch.texture = picture
+				end
+
+				request.left, request.top = left * scaleX - 1.0, 1.0 - top * scaleY
+				request.right, request.bottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
+				request.z, request.colour, request.texture = zIndex, colour, picture
+				request.uv0, request.uv1 = glyph.uv0, glyph.uv1
+				request.own = glyph.own
+
+				batch:glyphFrom()
+			else
+				edgeCount = edgeCount + 1
+				edges[edgeCount] = at
+				edgeOrigins[edgeCount] = originX
+				edgeColours[edgeCount] = colour
+			end
+		end
+	else
+		for at = 0, total - 1 do
+			if at == lineEnd then
+				lineAt = lineAt + 1
+				lineEnd = ends[lineAt]
+				originX = origins[lineAt]
+			end
+
+			local glyph = glyphs[at]
+			local left = math.floor(originX + glyph.x + 0.5)
+			local top = math.floor(y + glyph.y + 0.5)
+			local right, bottom = left + glyph.width, top + glyph.height
+
+			if math.max(clipLeft - left, clipTop - top, right - clipRight, bottom - clipBottom) <= 0 then
+				local picture = glyph.texture ~= 0 and glyph.texture or fallback
+
+				if picture ~= batch.texture then
+					local runIndex = batch.runCount * QuadBatch.RUN_NUMBERS
+
+					batch.runs[runIndex + QuadBatch.RUN_TEXTURE] = picture
+					batch.runs[runIndex + QuadBatch.RUN_FIRST] = batch.quads
+					batch.runCount = batch.runCount + 1
+					batch.texture = picture
+				end
+
+				request.left, request.top = left * scaleX - 1.0, 1.0 - top * scaleY
+				request.right, request.bottom = right * scaleX - 1.0, 1.0 - bottom * scaleY
+				request.z, request.colour, request.texture = zIndex, ink, picture
+				request.uv0, request.uv1 = glyph.uv0, glyph.uv1
+				request.own = glyph.own
+
+				batch:glyphFrom()
+			else
+				edgeCount = edgeCount + 1
+				edges[edgeCount] = at
+				edgeOrigins[edgeCount] = originX
+			end
+		end
+	end
+
+	-- The glyphs that cross the edge of their pane, drawn after the rest: a glyph at the edge is
+	-- rare, and a branch for it inside the loop is a side exit taken once per line that meets one.
+	if edgeCount > 0 then
+		for edge = 1, edgeCount do
+			local glyph = glyphs[edges[edge]]
+
+			clippedGlyph(batch, clip, glyph, math.floor(edgeOrigins[edge] + glyph.x + 0.5),
+				math.floor(y + glyph.y + 0.5), zIndex, selecting and edgeColours[edge] or ink,
+				glyph.texture ~= 0 and glyph.texture or fallback, blur)
+		end
+	end
 end
 
 --- Where the caret is, as the pen it sits at, given the byte of the line it is at.
@@ -704,9 +959,16 @@ local function selectionQuads(batch, clip, caret, element, node, x, y, z, fontMa
 					right = inkedRight
 				end
 
-				clippedQuad(batch, clip, x + offset + left, y + line * lineStep, x + offset + right,
-				y + line * lineStep + lineStep, zIndex,
-				QuadBatch.colour(SELECTION_R, SELECTION_G, SELECTION_B, 1.0), 0, nil, nil)
+				local colour = QuadBatch.colour(SELECTION_R, SELECTION_G, SELECTION_B, 1.0)
+
+				request.left, request.top = x + offset + left, y + line * lineStep
+				request.right, request.bottom = x + offset + right, y + line * lineStep + lineStep
+				request.z, request.colour, request.texture = zIndex, colour, 0
+				request.uv0, request.uv1 = 0, 0xFFFFFFFF
+				request.radius, request.band, request.hasBand = 0, 0, 0
+				request.own, request.blur, request.border, request.spread = 0, 0, 0, 0
+
+				clippedQuad(batch, clip, request)
 			end
 
 			start = lineTo + 2
@@ -743,7 +1005,20 @@ local function placeCaret(caret, element, node, x, y, z, clip, fontManager)
 	caret.right = caret.left + CARET_WIDTH
 	caret.bottom = caret.top + (height > 0 and height or lineStep)
 	caret.z = z + 2
-	caret.clip = clip
+
+	-- A copy rather than the walk's own clip: the walk reuses its clip tables every frame, and a
+	-- blink rebuilds the caret's quad from this one without a walk.
+	local kept = caret.clip
+
+	if kept == nil then
+		kept = {}
+		caret.clip = kept
+	end
+
+	kept.left, kept.top, kept.right, kept.bottom = clip.left, clip.top, clip.right, clip.bottom
+	kept.radius, kept.boxLeft, kept.boxTop = clip.radius, clip.boxLeft, clip.boxTop
+	kept.boxRight, kept.boxBottom = clip.boxRight, clip.boxBottom
+
 	caret.placed = true
 end
 
@@ -853,209 +1128,505 @@ local function addCaretQuad(batch, caret, windowWidth, windowHeight)
 		return
 	end
 
-	clippedQuad(batch, assert(caret.clip), assert(caret.left), assert(caret.top), assert(caret.right), assert(caret.bottom),
-	convertZ(caret.z), QuadBatch.rgba(assert(caret.r), assert(caret.g), assert(caret.b), assert(caret.a)), 0, nil, nil)
+	local colour = QuadBatch.rgba(assert(caret.r), assert(caret.g), assert(caret.b), assert(caret.a))
+
+	request.left, request.top = assert(caret.left), assert(caret.top)
+	request.right, request.bottom = assert(caret.right), assert(caret.bottom)
+	request.z, request.colour, request.texture = convertZ(caret.z), colour, 0
+	request.uv0, request.uv1 = 0, 0xFFFFFFFF
+	request.radius, request.band, request.hasBand = 0, 0, 0
+	request.own, request.blur, request.border, request.spread = 0, 0, 0, 0
+
+	clippedQuad(batch, assert(caret.clip), request)
 end
 
---- Walks the laid out screen, which is an array of nodes: a walk is an index and an
---- offset, and children are reached through the runs of child indices.
----@param batch wonderland.QuadBatch
----@param screen wonderland.Layout.Screen
+-- What a walk is drawn with, kept here rather than handed down every level of it: the walk is a
+-- loop over a stack of its own, and every node of it reads what it draws with from here.
+---@type wonderland.QuadBatch
+local walkBatch
+---@type wonderland.Layout.Screen?
+local walkScreen
+---@type number
+local walkWidth, walkHeight
+---@type FontManager
+local walkFontManager
+---@type wonderland.plugin.UI.Caret?
+local walkCaret
+---@type wonderland.Canvas?
+local walkCanvas
+
+-- The walk's stack, which is what makes the walk a loop rather than a call into itself: a recursive
+-- walk is one LuaJIT stops inlining at a handful of levels, and the trace it gives up on is the
+-- whole screen drawn in the interpreter, where every field of every node is a call. The arrays are
+-- kept between frames and grown for a screen bigger than the last one, so a frame's stack allocates
+-- nothing.
+--
+-- An entry is the node it is at, which of its children is next, where that node sits, the clip it
+-- is drawn in and whether it is inside the caret's field. A node is drawn when it is first reached
+-- and then put back on the stack with the ordinal of its next child: its children are drawn over
+-- it, and when the ordinal runs out it is finished -- the caret's fallback and a scroll bar are
+-- drawn then.
+local walkStackIndex, walkStackChild, walkStackX, walkStackY, walkStackZ, walkStackInside
+---@type wonderland.plugin.UI.Clip[]
+local walkStackClips = {}
+local walkStackSize = 0
+
+-- The clips a walk narrows for the boxes that scroll, one table each reused every frame: a frame
+-- that made one is a frame that left a table for the collector, and the boxes a page scrolls are
+-- the same ones every frame. What is drawn from one after the walk -- the caret's clip, which a
+-- blink rebuilds its quad from -- is copied onto the caret for that reason.
+---@type wonderland.plugin.UI.Clip[]
+local walkClipPool = {}
+local walkClipCount = 0
+
+---@param nodes number
+local function walkStackReserve(nodes)
+	if nodes <= walkStackSize then
+		return
+	end
+
+	local size = walkStackSize > 0 and walkStackSize or 256
+
+	while size < nodes do
+		size = size * 2
+	end
+
+	walkStackIndex = ffi.new("int32_t[?]", size)
+	walkStackChild = ffi.new("int32_t[?]", size)
+	walkStackX = ffi.new("double[?]", size)
+	walkStackY = ffi.new("double[?]", size)
+	walkStackZ = ffi.new("double[?]", size)
+	walkStackInside = ffi.new("uint8_t[?]", size)
+	walkStackSize = size
+end
+
+--- The shadow a box is drawn with, before the box itself so the box lands over it: the box moved
+--- and drawn with its edge spread out, which is what fades out of the shape the shader cuts.
+---@param node wonderland.Node
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function shadowQuads(node, x, y, z, clip)
+	local blur = node.shadowBlur
+	local band = blur > 0 and (1 / (2 * blur)) or 1
+
+	request.left, request.top = x + node.shadowX, y + node.shadowY
+	request.right, request.bottom = x + node.shadowX + node.width, y + node.shadowY + node.height
+	request.z, request.colour, request.texture = convertZ(z),
+		QuadBatch.rgba(node.shadowR, node.shadowG, node.shadowB, node.shadowA), 0
+	request.uv0, request.uv1 = 0, 0xFFFFFFFF
+	request.radius, request.band, request.hasBand = node.radius, band, 1
+	request.own, request.blur, request.border = 0, 0, 0
+	request.spread = blur + 1
+
+	clippedQuad(walkBatch, clip, request)
+end
+
+--- The box itself: the colour it came out with, or the picture it shows, over what is under it.
+---@param node wonderland.Node
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function backgroundQuads(node, x, y, z, clip)
+	-- The colours the node came out with, whatever said them: a box with a picture and no colour of
+	-- its own was given white by its style, and one that named a colour of its own is drawn in it
+	-- however dark that colour is.
+	request.left, request.top = x, y
+	request.right, request.bottom = x + node.width, y + node.height
+	request.z, request.colour, request.texture = convertZ(z),
+		QuadBatch.rgba(node.bgR, node.bgG, node.bgB, node.bgA), node.texture
+	request.uv0, request.uv1 = node.u0 + node.v0 * 65536, node.u1 + node.v1 * 65536
+	request.radius, request.band, request.hasBand = node.radius, 0, 0
+	request.own, request.blur, request.border, request.spread = 0, node.blur, 0, 0
+
+	clippedQuad(walkBatch, clip, request)
+end
+
+--- What the element draws itself, in the room its padding and its border leave -- which is the room
+--- a child of it would get -- and at the depth everything of this element is drawn at.
+---@param here wonderland.Element
+---@param node wonderland.Node
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function canvasQuads(here, node, x, y, z, clip)
+	local draw = callbacks[here.oncanvas]
+
+	if draw ~= nil then
+		local canvas = walkCanvas --[[@as wonderland.Canvas]]
+		local left = x + node.paddingLeft
+		local top = y + node.paddingTop
+		local roomWidth = node.width - node.paddingLeft - node.paddingRight - node.borderLeft - node.borderRight
+		local roomHeight = node.height - node.paddingTop - node.paddingBottom - node.borderTop - node.borderBottom
+
+		draw(canvas:draw(walkBatch, clip, walkWidth, walkHeight, left, top, roomWidth, roomHeight, convertZ(z),
+			WHITE_TEXTURE))
+	end
+end
+
+--- The text a box draws, and the selection behind it. A selection is drawn at the depth of the text
+--- it covers, before the text, because the batch draws in the order it was written; the node it is
+--- drawn on is the node the caret is placed from, which is the first one inside the field.
+---@param node wonderland.Node
+---@param element wonderland.Element?
+---@param inside boolean # Whether this node is inside the caret's field
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function textQuads(node, element, inside, x, y, z, clip)
+	local value, from, to = nil, nil, nil
+
+	if walkCaret ~= nil and inside and not walkCaret.covered then
+		local caret = walkCaret --[[@as wonderland.plugin.UI.Caret]]
+
+		caret.covered = true
+		selectionQuads(walkBatch, clip, caret, assert(element), node, x, y, z, walkFontManager, walkWidth,
+			walkHeight)
+		value, from, to = strings[caret.value], caret.from, caret.to
+	end
+
+	local screen = walkScreen --[[@as wonderland.Layout.Screen]]
+
+	generateTextQuads(walkBatch, clip, assert(screen.runs[node.run]), node, x, y, z, walkFontManager, value, from,
+		to)
+end
+
+--- The border of a box, drawn after the box it is on so it lands on top of it. A uniform border on a
+--- rounded box is one ring quad rather than four rectangles: the shader cuts both the outer and the
+--- inner edge, so the ring follows the corners instead of crossing them.
+---@param node wonderland.Node
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function borderQuads(node, x, y, z, clip)
+	local r, g, b, a = node.borderR / 255, node.borderG / 255, node.borderB / 255, node.borderA / 255
+	local width, height = node.width, node.height
+	local uniform = node.borderTop > 0
+	and node.borderTop == node.borderRight and node.borderTop == node.borderBottom
+	and node.borderTop == node.borderLeft
+
+	if uniform then
+		request.left, request.top = x, y
+		request.right, request.bottom = x + width, y + height
+		request.z, request.colour, request.texture = z + 1, QuadBatch.colour(r, g, b, a), 0
+		request.uv0, request.uv1 = 0, 0xFFFFFFFF
+		request.radius, request.band, request.hasBand = node.radius, 1, 1
+		request.own, request.blur, request.border, request.spread = 0, 0, node.borderTop, 0
+
+		clippedQuad(walkBatch, clip, request)
+
+		return
+	end
+
+	if node.borderTop > 0 then
+		addBorderQuad(walkBatch, clip, x, y, width, node.borderTop, r, g, b, a, z, node.blur)
+	end
+
+	if node.borderBottom > 0 then
+		addBorderQuad(walkBatch, clip, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
+			node.blur)
+	end
+
+	if node.borderLeft > 0 then
+		addBorderQuad(walkBatch, clip, x, y, node.borderLeft, height, r, g, b, a, z, node.blur)
+	end
+
+	if node.borderRight > 0 then
+		addBorderQuad(walkBatch, clip, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
+			node.blur)
+	end
+end
+
+--- The track and the thumb of a box that scrolls, drawn inside the pane it reserved and over the
+--- content: the track is the colour it was given made fainter, and the thumb is as much of the
+--- track as the box shows of the content.
+---@param node wonderland.Node
+---@param bar { max: number, width: number, least: number, r: number, g: number, b: number, a: number } # The `wl_bar` of the node, only there for a box that scrolls
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function scrollBarQuads(node, bar, x, y, z, clip)
+	local left = x + node.width - bar.width
+	local thumb = node.height * (node.height / (node.height + bar.max))
+
+	if thumb < bar.least then
+		thumb = bar.least
+	end
+
+	if thumb > node.height then
+		thumb = node.height
+	end
+
+	-- Where the thumb may travel is what is left of the box once the thumb is in it, so the end of
+	-- the list puts the thumb's end at the end of the box rather than past it.
+	local span = node.height - thumb
+	local at = math.min(math.max(node.scroll / bar.max, 0), 1)
+	local top = y + (span > 0 and at * span or 0)
+
+	request.left, request.top = left, y
+	request.right, request.bottom = left + bar.width, y + node.height
+	request.z, request.colour, request.texture = convertZ(z), QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a * 0.25), 0
+	request.uv0, request.uv1 = 0, 0xFFFFFFFF
+	request.radius, request.band, request.hasBand = 0, 0, 0
+	request.own, request.blur, request.border, request.spread = 0, 0, 0, 0
+
+	clippedQuad(walkBatch, clip, request)
+
+	request.left, request.top = left, top
+	request.right, request.bottom = left + bar.width, top + thumb
+	request.z, request.colour = convertZ(z + 1), QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a)
+
+	clippedQuad(walkBatch, clip, request)
+end
+
+--- What a box that scrolls shows of its children is what is inside it: the clip narrowed to it, and
+--- the box its rounded corners belong to. It is a call of its own because it is rare -- most boxes
+--- do not scroll -- and because it is the one thing a node does that makes a table.
+---@param clip wonderland.plugin.UI.Clip
+---@param node wonderland.Node
+---@param x number
+---@param y number
+---@return wonderland.plugin.UI.Clip
+local function scrollClip(clip, node, x, y)
+	local left = clip.left > x and clip.left or x
+	local top = clip.top > y and clip.top or y
+	local right = x + node.width
+	local bottom = y + node.height
+
+	if right > clip.right then
+		right = clip.right
+	end
+
+	if bottom > clip.bottom then
+		bottom = clip.bottom
+	end
+
+	walkClipCount = walkClipCount + 1
+	local below = walkClipPool[walkClipCount]
+
+	if below == nil then
+		below = {}
+		walkClipPool[walkClipCount] = below
+	end
+
+	below.left, below.top, below.right, below.bottom = left, top, right, bottom
+
+	-- A box that does not round its corners must not inherit them from the frame before this.
+	below.radius = nil
+	below.boxLeft, below.boxTop, below.boxRight, below.boxBottom = nil, nil, nil, nil
+
+	if node.radius > 0 then
+		below.radius = node.radius
+		below.boxLeft, below.boxTop = x, y
+		below.boxRight, below.boxBottom = x + node.width, y + node.height
+	end
+
+	return below
+end
+
+--- A node finishing after its children: the caret is placed from it if the field draws no line of
+--- its own, and the scroll bar is drawn over the strip it reserved. Both are drawn here because
+--- both are drawn over what the node's children drew.
 ---@param index number
----@param parentX number
----@param parentY number
----@param windowWidth number
----@param windowHeight number
----@param parentZ number?
----@param fontManager FontManager
----@param caret wonderland.plugin.UI.Caret? # The caret of the field that has the keyboard, if one has it
----@param inField boolean? # Whether this node is inside that field, which is where the caret is
----@param canvas wonderland.Canvas # What an element that draws its own shapes draws them with
-local function generateNodeQuads(batch, screen, clip, index, parentX, parentY, windowWidth, windowHeight, parentZ,
-	fontManager, caret, inField, canvas)
-	local node = screen:node(index)
-	local x, y = parentX + node.x, parentY + node.y
-	local z = math.max(node.zIndex, parentZ or 0)
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+local function finishNode(index, x, y, z, clip)
+	local screen = walkScreen --[[@as wonderland.Layout.Screen]]
+	local node = screen.refs[index]
+	local here = pointers[node.element]
+
+	if walkCaret ~= nil and here ~= nil and here == walkCaret.element and node.visible ~= 0
+	and not walkCaret.placed then
+		placeCaret(walkCaret, here, node, x + node.paddingLeft, y + node.paddingTop, z, clip, walkFontManager)
+	end
+
+	-- It is only there when there is something to scroll, which is what "shows up" means -- a list
+	-- that fits has no bar.
+	local bar = node.scrolls == 1 and screen.bars[index - 1] or nil
+
+	if node.visible ~= 0 and bar ~= nil and bar.width > 0 and bar.max > 0 then
+		scrollBarQuads(node, bar, x, y, z, clip)
+	end
+end
+
+--- One node of the walk: what it draws over its parent, and the stack it leaves its children on. Its
+--- children are pushed in the order the layout gave them, with the node's finishing entry below
+--- them, so they are drawn before it is finished.
+---@param index number
+---@param x number
+---@param y number
+---@param z number
+---@param clip wonderland.plugin.UI.Clip
+---@param inside number # Whether the parent is inside the caret's field, as the stack kept it
+---@param top number # The stack top to push from
+local function enterNode(index, x, y, z, clip, inside, top)
+	local screen = walkScreen --[[@as wonderland.Layout.Screen]]
+	local node = screen.refs[index]
+	local nodeX, nodeY = x + node.x, y + node.y
+	local nodeZ = z
+
+	if node.zIndex > nodeZ then
+		nodeZ = node.zIndex
+	end
 
 	-- The element behind this node, which is what says whether it has a canvas of its own to draw
 	-- and which field it belongs to. The caret's half of that is only looked at when there is a
 	-- caret to place: a screen with no field focused has nothing to compare against.
 	local here = pointers[node.element]
-	local element = caret and here or nil
-	local inside = inField or (caret ~= nil and element ~= nil and element == caret.element)
+	local element = walkCaret ~= nil and here or nil
+	local wasInside = inside ~= 0
+	local isInside = wasInside or (walkCaret ~= nil and element ~= nil and element == walkCaret.element)
+	local visible = node.visible ~= 0
 
 	-- The colour of a caret is the field's, wherever in it the caret turns out to be placed from:
 	-- one nothing named a colour for is drawn white, since a field whose text cannot be seen is one
 	-- whose caret should at least be there.
-	if caret ~= nil and inside and not inField and element ~= nil and element == caret.element then
-		local field = node
-
-		if field.fgA == 0 then
-			caret.r, caret.g, caret.b, caret.a = WHITE_R, WHITE_G, WHITE_B, WHITE_A
+	if not wasInside and walkCaret ~= nil and element ~= nil and element == walkCaret.element then
+		if node.fgA == 0 then
+			walkCaret.r, walkCaret.g, walkCaret.b, walkCaret.a = WHITE_R, WHITE_G, WHITE_B, WHITE_A
 		else
-			caret.r, caret.g, caret.b, caret.a = field.fgR, field.fgG, field.fgB, field.fgA
+			walkCaret.r, walkCaret.g, walkCaret.b, walkCaret.a = node.fgR, node.fgG, node.fgB, node.fgA
 		end
 	end
 
-	-- The shadow first, so the box is drawn over it. It is the box itself, moved and drawn with
-	-- its edge spread out: the quad it is drawn as is the box grown by that spreading, and the
-	-- cut the shader makes is of the box, so what shows is the box's own shape going soft.
-	if node.visible ~= 0 and node.shadowA > 0 then
-		local blur = node.shadowBlur
-		local band = blur > 0 and (1 / (2 * blur)) or 1
-
-		clippedQuad(batch, clip, x + node.shadowX, y + node.shadowY, x + node.shadowX + node.width,
-		y + node.shadowY + node.height, convertZ(z),
-		QuadBatch.rgba(node.shadowR, node.shadowG, node.shadowB, node.shadowA), 0, nil, nil, node.radius,
-		band, blur + 1)
-	end
-
-	if node.visible ~= 0 and node.paint ~= 0 then
-		-- The colours the node came out with, whatever said them: a box with a picture and no colour
-		-- of its own was given white by its style, and one that named a colour of its own is drawn in
-		-- it however dark that colour is.
-		clippedQuad(batch, clip, x, y, x + node.width, y + node.height, convertZ(z),
-		QuadBatch.rgba(node.bgR, node.bgG, node.bgB, node.bgA), node.texture,
-		node.u0 + node.v0 * 65536, node.u1 + node.v1 * 65536, node.radius, nil, nil, nil, node.blur)
-	end
-
-	-- What the element draws itself goes where its own text goes: over what is under it -- the
-	-- background is drawn already -- and under its children, which are drawn after.
-	if node.visible ~= 0 and here ~= nil and here.oncanvas ~= 0 then
-		local draw = callbacks[here.oncanvas]
-
-		if draw ~= nil then
-			-- The room the padding and the border leave, which is the room a child of this element
-			-- would get, and the depth everything of this element is drawn at.
-			local left = x + node.paddingLeft
-			local top = y + node.paddingTop
-			local roomWidth = node.width - node.paddingLeft - node.paddingRight
-			-node.borderLeft - node.borderRight
-			local roomHeight = node.height - node.paddingTop - node.paddingBottom
-			-node.borderTop - node.borderBottom
-
-			draw(canvas:draw(batch, clip, windowWidth, windowHeight, left, top, roomWidth, roomHeight,
-			convertZ(z), WHITE_TEXTURE))
-		end
-	end
-
-	if node.visible ~= 0 and node.run ~= 0 then
-		local value, from, to = nil, nil, nil
-
-		-- A selection is drawn behind the text it covers, at the same depth: the batch is drawn in the
-		-- order it was written, and what is written after is what shows. The node it is drawn on is
-		-- the node the caret is placed from -- the first one inside the field, which is where the
-		-- value is drawn -- so the highlight, the caret and the text are all about the same line.
-		if caret ~= nil and inside and element ~= nil and not caret.covered then
-			caret.covered = true
-			selectionQuads(batch, clip, caret, element, node, x, y, z, fontManager, windowWidth, windowHeight)
-			value, from, to = strings[caret.value], caret.from, caret.to
+	-- Each kind of thing a node draws is a call of its own: the loop that walks the screen is the
+	-- hot trace, and what only some nodes have -- a shadow, a canvas, a text run, a border -- is
+	-- reached only for the nodes that have it rather than every kind merged into the one loop.
+	if visible then
+		if node.shadowA > 0 then
+			shadowQuads(node, nodeX, nodeY, nodeZ, clip)
 		end
 
-		generateTextQuads(batch, clip, assert(screen.runs[node.run]), node, x, y, z, fontManager, windowWidth,
-		windowHeight, value, from, to)
-	end
-
-	-- Borders come after the box they are on, so they land on top of it. A uniform border on a
-	-- rounded box is one ring quad rather than four rectangles: the shader cuts both the outer
-	-- and the inner edge, so the ring follows the corners instead of crossing them.
-	if node.visible ~= 0 then
-		local r, g, b, a = node.borderR / 255, node.borderG / 255, node.borderB / 255, node.borderA / 255
-		local width, height = node.width, node.height
-		local uniform = node.borderTop > 0
-		and node.borderTop == node.borderRight and node.borderTop == node.borderBottom
-		and node.borderTop == node.borderLeft
-
-		if uniform then
-			clippedQuad(batch, clip, x, y, x + width, y + height, z + 1, QuadBatch.colour(r, g, b, a), 0, nil, nil,
-			node.radius, 1, nil, nil, nil, node.borderTop)
-		else
-			if node.borderTop > 0 then
-				addBorderQuad(batch, clip, x, y, width, node.borderTop, r, g, b, a, z, windowWidth, windowHeight,
-				node.blur)
-			end
-
-			if node.borderBottom > 0 then
-				addBorderQuad(batch, clip, x, y + height - node.borderBottom, width, node.borderBottom, r, g, b, a, z,
-				windowWidth, windowHeight, node.blur)
-			end
-
-			if node.borderLeft > 0 then
-				addBorderQuad(batch, clip, x, y, node.borderLeft, height, r, g, b, a, z, windowWidth, windowHeight,
-				node.blur)
-			end
-
-			if node.borderRight > 0 then
-				addBorderQuad(batch, clip, x + width - node.borderRight, y, node.borderRight, height, r, g, b, a, z,
-				windowWidth, windowHeight, node.blur)
-			end
+		if node.paint ~= 0 then
+			backgroundQuads(node, nodeX, nodeY, nodeZ, clip)
 		end
+
+		if here ~= nil and here.oncanvas ~= 0 then
+			canvasQuads(here, node, nodeX, nodeY, nodeZ, clip)
+		end
+
+		if node.run ~= 0 then
+			textQuads(node, element, isInside, nodeX, nodeY, nodeZ, clip)
+		end
+
+		borderQuads(node, nodeX, nodeY, nodeZ, clip)
 	end
 
-	-- What a box that scrolls shows of its children is what is inside it: the clip is narrowed to
-	-- it, and stays narrowed for everything below.
 	local below = clip
 
 	if node.scrolls ~= 0 then
-		below = {
-		left = math.max(clip.left, x),
-		top = math.max(clip.top, y),
-		right = math.min(clip.right, x + node.width),
-		bottom = math.min(clip.bottom, y + node.height),
-		}
-		if node.radius > 0 then
-			below.radius = node.radius
-			below.boxLeft, below.boxTop = x, y
-			below.boxRight, below.boxBottom = x + node.width, y + node.height
-		end
+		below = scrollClip(clip, node, nodeX, nodeY)
 	end
 
 	-- The caret is placed from the line of text a field draws, which is the first one inside it --
 	-- what a caret is beside is the text, and where the app put the text is where it goes. A field
-	-- that draws none is placed from its own content origin, which is the fallback below.
-	if caret ~= nil and inside and node.run ~= 0 and node.visible ~= 0 and not caret.placed then
-		placeCaret(caret, assert(element), node, x, y, z, below, fontManager)
+	-- that draws none is placed from its own content origin, which is what `finishNode` does.
+	if isInside and visible and node.run ~= 0 and walkCaret ~= nil and not walkCaret.placed then
+		placeCaret(walkCaret, assert(element), node, nodeX, nodeY, nodeZ, below, walkFontManager)
 	end
 
-	for at = 0, node.childCount - 1 do
-			generateNodeQuads(batch, screen, below, screen.childIndices[node.firstChild + at - 1], x, y, windowWidth,
-			windowHeight, z, fontManager, caret, inside, canvas)
-		end
+	-- What is left of the node is drawn after its children, so the stack holds the node again
+	-- with the ordinal of the next child to draw: the child itself is pushed over it. There is no
+	-- loop over the children here -- a loop inside the one the screen is walked by is a loop the
+	-- recorder cannot follow, which is a walk that runs in the interpreter.
+	local count = node.childCount
+	local pushed = top
 
-	if caret ~= nil and element ~= nil and element == caret.element and node.visible ~= 0 and not caret.placed then
-		placeCaret(caret, element, node, x + node.paddingLeft, y + node.paddingTop, z, below, fontManager)
+	if count > 0 then
+		local childIndices = screen.childIndices
+
+		pushed = pushed + 1
+		walkStackIndex[pushed] = index
+		walkStackChild[pushed] = 1
+		walkStackX[pushed], walkStackY[pushed], walkStackZ[pushed] = nodeX, nodeY, nodeZ
+		walkStackInside[pushed] = isInside and 1 or 0
+		walkStackClips[pushed] = below
+
+		pushed = pushed + 1
+		walkStackIndex[pushed] = childIndices[node.firstChild - 1]
+		walkStackChild[pushed] = 0
+		walkStackX[pushed], walkStackY[pushed], walkStackZ[pushed] = nodeX, nodeY, nodeZ
+		walkStackInside[pushed] = isInside and 1 or 0
+		walkStackClips[pushed] = below
+	else
+		finishNode(index, nodeX, nodeY, nodeZ, below)
 	end
 
-	-- A scroll bar is drawn over the strip it reserved, once the content is down: the track is the
-	-- colour it was given made fainter, and the thumb is as much of the track as the box shows of
-	-- the content. It is only there when there is something to scroll, which is what "shows up"
-	-- means -- a list that fits has no bar.
-	local bar = node.scrolls == 1 and screen.bars[index - 1]
+	return pushed
+end
 
-	if node.visible ~= 0 and bar and bar.width > 0 and bar.max > 0 then
-		local left = x + node.width - bar.width
-		local thumb = node.height * (node.height / (node.height + bar.max))
+--- Walks the laid out screen, which is an array of nodes: a walk is an index and an offset, and
+--- children are reached through the runs of child indices.
+---
+--- It is one loop over a stack rather than a call into itself: LuaJIT stops inlining a recursive
+--- call at a handful of levels and gives up on the trace, which leaves the whole screen drawn in
+--- the interpreter. One loop is one trace, whatever the depth of the screen, and each kind of work
+--- it reaches is a call of its own so that the loop itself stays small enough to compile.
+---@param clip wonderland.plugin.UI.Clip
+---@param index number
+---@param parentX number
+---@param parentY number
+---@param parentZ number?
+---@param inField boolean? # Whether this node is inside the caret's field, which is where the caret is
+local function generateNodeQuads(clip, index, parentX, parentY, parentZ, inField)
+	local screen = walkScreen --[[@as wonderland.Layout.Screen]]
+	walkStackReserve(screen.count + 2)
 
-		if thumb < bar.least then
-			thumb = bar.least
+	local indexStack, xStack, yStack = walkStackIndex, walkStackX, walkStackY
+	local childStack = walkStackChild
+	local zStack, insideStack, clips = walkStackZ, walkStackInside, walkStackClips
+
+	indexStack[1] = index
+	childStack[1] = 0
+	xStack[1], yStack[1], zStack[1] = parentX, parentY, parentZ or 0
+	insideStack[1] = inField and 1 or 0
+	clips[1] = clip
+
+	walkClipCount = 0
+
+	local top = 1
+
+	while top > 0 do
+		local entry = indexStack[top]
+		local child = childStack[top]
+		local entryX, entryY, entryZ = xStack[top], yStack[top], zStack[top]
+		local entryInside, entryClip = insideStack[top], clips[top]
+
+		top = top - 1
+
+		if child == 0 then
+			top = enterNode(entry, entryX, entryY, entryZ, entryClip, entryInside, top)
+		else
+			local node = screen.refs[entry]
+
+			if child < node.childCount then
+				-- This node is drawn already and has a child left: it goes back on the stack for
+				-- after that child's own subtree, and the child goes over it.
+				top = top + 1
+				indexStack[top] = entry
+				childStack[top] = child + 1
+				xStack[top], yStack[top], zStack[top] = entryX, entryY, entryZ
+				insideStack[top] = entryInside
+				clips[top] = entryClip
+
+				top = top + 1
+				indexStack[top] = screen.childIndices[node.firstChild + child - 1]
+				childStack[top] = 0
+				xStack[top], yStack[top], zStack[top] = entryX, entryY, entryZ
+				insideStack[top] = entryInside
+				clips[top] = entryClip
+			else
+				finishNode(entry, entryX, entryY, entryZ, entryClip)
+			end
 		end
-
-		if thumb > node.height then
-			thumb = node.height
-		end
-
-		-- Where the thumb may travel is what is left of the box once the thumb is in it, so the
-		-- end of the list puts the thumb's end at the end of the box rather than past it.
-		local span = node.height - thumb
-		local at = math.min(math.max(node.scroll / bar.max, 0), 1)
-		local top = y + (span > 0 and at * span or 0)
-
-		-- Drawn inside its own pane rather than the clip it is under, so a bar cannot come out of
-		-- the box it belongs to and over whatever is beside it.
-		clippedQuad(batch, below, left, y, left + bar.width, y + node.height, convertZ(z),
-		QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a * 0.25), 0, nil, nil)
-		clippedQuad(batch, below, left, top, left + bar.width, top + thumb, convertZ(z + 1),
-		QuadBatch.rgba(bar.r, bar.g, bar.b, bar.a), 0, nil, nil)
 	end
 end
 
@@ -1516,8 +2087,27 @@ function UI:walk(window, ctx, key)
 	-- `toNDCX`, which is a multiply because of these two.
 	frameScaleX, frameScaleY = 2 / width, 2 / height
 
-	generateNodeQuads(batch, assert(ctx.screen), { left = 0, top = 0, right = width,
-	bottom = height}, assert(ctx.root), 0, 0, width, height, nil, fontManager, caret, nil, self.canvas)
+	-- What the walk is drawn with, put where each level of it reads it: see `generateNodeQuads`.
+	walkBatch, walkScreen = batch, assert(ctx.screen)
+	walkWidth, walkHeight = width, height
+	walkFontManager, walkCaret, walkCanvas = fontManager, caret, self.canvas
+
+	-- The clip the screen is drawn in is the frame itself, and one table of it serves every frame:
+	-- a walk narrows a clip of its own where a box scrolls, but the frame's own is the same one.
+	local frameClip = self.frameClip
+
+	if frameClip == nil then
+		frameClip = { left = 0, top = 0, right = width, bottom = height }
+		self.frameClip = frameClip
+	else
+		frameClip.right, frameClip.bottom = width, height
+	end
+
+	generateNodeQuads(frameClip, assert(ctx.root), 0, 0, nil, nil)
+
+	-- What the walk was handed is let go of once it is over, so a frame does not keep the screen
+	-- before it alive through the walk's own names.
+	walkScreen, walkCaret, walkCanvas = nil, nil, nil
 
 	-- What the caret's quad is added to: the frame is the quads of the screen and then it, so a
 	-- blink is this many of them and no more. A selection hides the caret, though its own highlight

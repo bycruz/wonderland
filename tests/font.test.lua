@@ -295,11 +295,12 @@ test.it("makes another picture when one fills up", function()
 	test.truthy(#atlas.sheets <= 16, "and there is an end to how many a face and size may come to")
 end)
 
-test.it("draws a character too large for a picture as the room it takes", function()
+test.it("grows the picture for a character taller than it", function()
 	local atlas = Atlas.new(aFace({ [0x41] = true }, 8, 40), 16, { size = 16 })
 	local glyph = atlas:glyph(0x41)
 
-	test.equal(glyph.width, 0, "there is no ink")
+	test.greater(glyph.width, 0, "the glyph bigger than the sheet it started with is packed")
+	test.equal(atlas.sheets[1].width, 64, "in a sheet grown to hold it")
 	test.equal(glyph.advance, 8, "and the line still flows")
 end)
 
@@ -566,8 +567,8 @@ test.skipIf(fontPath == nil)("packs a glyph of a real font, and draws it", funct
 	test.greater(glyph.width, 0, "the ink of a letter is real")
 	test.greater(glyph.height, 0)
 	test.greater(glyph.advance, 0, "and moves the pen along")
-	test.equal(atlas.sheets[1].image.width, 512, "in a picture of the size an atlas is")
-	test.equal(atlas.sheets[1].image.channels, 4, "with the coverage in its alpha")
+	test.equal(atlas.sheets[1].image.width, 64, "in a picture two glyphs across and two down, not a screenful")
+	test.equal(atlas.sheets[1].image.channels, 1, "with the coverage in one channel")
 end)
 
 test.skipIf(fontPath == nil)("packs a character the atlas was never told about", function()

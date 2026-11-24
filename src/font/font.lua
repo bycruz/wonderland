@@ -125,10 +125,16 @@ end
 ---@field runCount number
 ---@field load fun(path: string, index: number?): wonderland.font.Face?
 ---@field pending { string, number? }[] # The fallbacks not read yet, in order
+---@field pendingSources { string, number? }[] # And what the chain was made with, to put it back to
 ---@field recent table<number, string> # The last lines measured, oldest first
 ---@field recentAt number
 ---@field pieces wonderland.font.Piece[] # Where a line is cut into what one face draws of it
 ---@field piecesAt number # How many of them the line being measured came to
+---@field pictures TextureManager? # Where a sheet is put, kept to make one again after a release
+---@field baseSize number # The side a sheet started at
+---@field characters string? # What the atlas was told to bake when it was made
+---@field lastUsed number # The frame this font was last asked to measure something in
+---@field used boolean? # Whether it has been asked since the last frame was flushed
 local Font = {}
 Font.__index = Font
 
@@ -160,12 +166,22 @@ function Font.new(primary, opts)
 	pending = {},
 	pieces = {},
 	piecesAt = 0,
+	-- What an atlas is made from again when the font's pictures are given back after a long idle:
+	-- the face, the side its sheets start at, what it bakes and where its pictures are put.
+	pictures = primary.pictures,
+	baseSize = primary.baseSize,
+	characters = opts.spec and opts.spec.characters or nil,
+	fallbacks = {},
+	pendingSources = {},
+	lastUsed = 0,
 	}, Font)
 
 	-- Copied rather than held: the list belongs to the registry that made it, and a chain that
-	-- read a fallback takes it off this one.
+	-- read a fallback takes it off this one. Two copies of what the chain was made with are kept:
+	-- one is worked through as fallbacks are read, and one is what it is put back to.
 	for _, fallback in ipairs(opts.fallbacks or {}) do
 			font.pending[#font.pending + 1] = { fallback[1], fallback[2]}
+			font.pendingSources[#font.pendingSources + 1] = { fallback[1], fallback[2]}
 		end
 
 	return font
@@ -278,7 +294,12 @@ local function shapeLine(self, text, from, to, line)
 			local shaped = piece.shaped
 
 			if shaped == nil and reader.shapes(piece.atlas.face) then
-				shaped = reader.shape(piece.atlas.face, text:sub(piece.from, piece.to), self.pixelHeight)
+				-- The whole of a line is shaped as the string it is rather than as a copy of it: a
+				-- line in one face is the common case, and it is a string the collector does not
+				-- pay for on every line of new text.
+				local whole = piece.from == 1 and piece.to == #text
+				shaped = reader.shape(piece.atlas.face, whole and text or text:sub(piece.from, piece.to),
+					self.pixelHeight)
 				piece.shaped = shaped
 			end
 
@@ -294,6 +315,10 @@ end
 ---@param maxWidth number?
 ---@return wonderland.font.Run
 function Font:getRun(text, maxWidth)
+	-- A font a screen has drawn in is one whose pictures are worth keeping: what is given back is
+	-- the pictures of a font no screen has measured a line in for a long time.
+	self.used = true
+
 	-- A line that fits the width it is cut to is the line with no width at all: measuring it again
 	-- would be a second cache entry for every width a window was ever drawn at.
 	if maxWidth ~= nil then
@@ -573,11 +598,72 @@ function Font:picture()
 	return sheet ~= nil and sheet.texture or 0
 end
 
---- What has been packed since the last frame, put into the pictures the screen samples.
-function Font:flush()
-	for _, atlas in ipairs(self.atlases) do
-			atlas:flush()
+--- Gives the font's pictures back, and everything measured into them: the sheets and their textures,
+--- the glyphs packed in them, and the lines measured against those glyphs. What is left is the face
+--- and the size, so a screen that draws in this font again packs it afresh rather than reading a
+--- font file again.
+function Font:releaseAtlases()
+	local atlases = self.atlases
+	local primary = atlases[1]
+
+	for index = 1, #atlases do
+		atlases[index]:release()
+	end
+
+	self.atlases = {
+		Atlas.new(primary.face, self.pixelHeight, {
+			pictures = self.pictures,
+			size = self.baseSize,
+		}),
+	}
+
+	-- The fallbacks are read as they are needed again: what was read for this chain is given back
+	-- with the pictures, and a line that needs one reads it once more.
+	self.pending = {}
+
+	for _, source in ipairs(self.pendingSources) do
+		self.pending[#self.pending + 1] = { source[1], source[2] }
+	end
+
+	self.glyphs = {}
+	self.runs = {}
+	self.runCount = 0
+	self.recent = nil
+	self.recentAt = nil
+	self.pieces = {}
+	self.piecesAt = 0
+end
+
+--- What has been packed since the last frame, put into the pictures the screen samples, and the
+--- pictures of a font that no screen has drawn in for a while given back.
+---
+--- `frame` is the manager's count of the frames it has flushed, and `unusedFor` how many of them a
+--- font may go without a line measured in it before its pictures are given back: a session that
+--- asks for a size once pays for it while it shows it, and not for the rest of the day. Without a
+--- frame, which is a test asking what a font packed, nothing is given back.
+---@param frame number?
+---@param unusedFor number?
+function Font:flush(frame, unusedFor)
+	if frame ~= nil then
+		if self.used then
+			self.used = false
+			self.lastUsed = frame
+		elseif frame - self.lastUsed > assert(unusedFor) then
+			-- A font that has nothing packed is already as small as a release would make it: what
+			-- it is asked for is the frame it is given back, not one every time it is idle.
+			if #self.atlases > 1 or #self.atlases[1].sheets > 0 or self.runCount > 0 then
+				self:releaseAtlases()
+			end
+
+			self.lastUsed = frame
 		end
+	end
+
+	local atlases = self.atlases
+
+	for index = 1, #atlases do
+		atlases[index]:flush()
+	end
 end
 
 return Font

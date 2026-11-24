@@ -13,6 +13,10 @@ local wonderlandElement = require("wonderland.element")
 local pointers, strings = wonderlandElement.pointers, wonderlandElement.strings
 local TEXT_INPUT, GROWS = wonderlandElement.TEXT_INPUT, wonderlandElement.GROWS
 
+-- The styles a slot is read from, as references: a slot read out of the array is a reference made
+-- for the reading, and a measure reads one per element. See `refs` in `wonderland.style`.
+local styleRefs = style.refs
+
 -- The bits of a style that are about the font its contents are drawn in: a style that names any
 -- of them is a font its elements are drawn in, made from the font they already inherit.
 local TYPOGRAPHY = style.PRESENT.fontFamily | style.PRESENT.fontSize | style.PRESENT.fontWeight
@@ -98,10 +102,10 @@ local function measureInto(self, element, inherited, depth, limit)
 			0)
 	end
 
-	-- Taken per call rather than kept: what a tree is built with can intern a style, and
-	-- interning is what moves the array it is read from.
-	local arena = style.arena
-	local base = arena[element.baseStyle]
+	-- The slot as a reference rather than as an indexing: the references are kept beside the
+	-- array, and refreshed when it is copied to a bigger one -- which is a build, and a measure
+	-- comes after it. See `refs` in `wonderland.style`.
+	local base = styleRefs[element.baseStyle]
 	local font = inherited
 
 	-- A font an element was handed by number is one an app wired up itself, and one it named by

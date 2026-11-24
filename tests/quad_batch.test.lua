@@ -103,6 +103,7 @@ test.it("a quad that is neither round nor spread writes noughts", function()
 	local quads = batch.new()
 
 	quads:setViewport(100, 100)
+
 	quads:roundQuad(0, 0, 0.5, 0.5, 1, 0xffffffff, 7, batch.uv(0.5, 0.5), batch.uv(1, 1), 8, 0.5)
 	quads:quad(0, 0, 0.5, 0.5, 1, 0xffffffff, 7, batch.uv(0.5, 0.5), batch.uv(1, 1))
 

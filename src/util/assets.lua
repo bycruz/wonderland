@@ -356,22 +356,41 @@ end
 
 --- One picture, uploaded into a texture of its own. A picture the app drew itself goes through here
 --- as well, and is not remembered by anything: what a path came to is, and this is what it came to.
+---
+--- The decoded pixels are given back once the gpu has them: an upload copies them into the staging
+--- memory the copy into the texture reads from, so the buffer they were decoded into is done with
+--- and holding it would be a picture's worth of memory the picture on screen does not need. A
+--- caller that owns the image should not read it after this, which is what `image.Image:close`
+--- says; a plain picture table with no `close` is left to whoever owns its buffer.
 ---@param decoded image.Image
 ---@return wonderland.Asset
 function Assets:upload(decoded)
 	-- Widened here rather than by the texture, because what the gpu holds is four channels and a
 	-- copy of a picture that already has four is a copy nothing needs.
 	local source = decoded.channels ~= 4 and decoded:convert(4) or decoded
+	local width, height = source.width, source.height
+	local texture = self.textureManager:upload({
+		width = width,
+		height = height,
+		channels = 4,
+		pixels = source.pixels,
+	})
+
+	-- The copy is in the staging buffer before the upload returns, so nothing reads these pixels
+	-- again. An image that shares its buffer with the frames of an animation drops its own
+	-- reference and nothing else; the animation still owns what it owns.
+	if type(source.close) == "function" then
+		source:close()
+	end
+
+	if source ~= decoded and type(decoded.close) == "function" then
+		decoded:close()
+	end
 
 	return {
-		width = source.width,
-		height = source.height,
-		texture = self.textureManager:upload({
-			width = source.width,
-			height = source.height,
-			channels = 4,
-			pixels = source.pixels,
-		}),
+		width = width,
+		height = height,
+		texture = texture,
 		uv = FULL,
 	}
 end
@@ -399,11 +418,9 @@ function Assets:image(path)
 	local decoded, err = image().load(path)
 	assert(decoded, err)
 
+	-- The upload gives the buffer the pixels were decoded into back, so what a path is remembered
+	-- by is the picture on the gpu and not the bytes it came from.
 	local asset = self:upload(decoded)
-
-	-- The texture has the pixels now: the buffer they were decoded into is let go of rather than
-	-- kept for the life of the app.
-	decoded:close()
 
 	self.images[path] = asset
 

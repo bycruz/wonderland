@@ -2,20 +2,52 @@
 -- when a character is first drawn rather than when the atlas is made, so any string an app hands
 -- over is drawable.
 --
--- A picture is 512 pixels a side and more of them are made as a face and a size come to need, rather
--- than one picture that grows: growing one would move every glyph already packed in it, and a line
--- measured against the old positions is drawn from the wrong place. Which sheet a glyph is in is
--- written into the glyph, so nothing is measured twice.
+-- A sheet is small and more of them are made as a face and a size come to need, rather than one
+-- picture that grows: growing one would move every glyph already packed in it, and a line measured
+-- against the old positions is drawn from the wrong place. Which sheet a glyph is in is written into
+-- the glyph, so nothing is measured twice.
+--
+-- The side of a sheet comes from what is packed in it rather than from the size of the text: a face
+-- draws glyphs no taller than its pixel height, so a sheet two glyphs across and two down is enough
+-- room to start with, and an icon face that draws a dozen marks at sixty pixels keeps a sheet of 128
+-- rather than reserving half a megabyte of picture it never fills. A glyph bigger than the sheet --
+-- an emoji a fallback face draws, which is taller than the line -- grows the side for the sheets
+-- made after it. What a sheet is, is a picture a glyph is sampled from and not a size the text is
+-- drawn at: the same glyphs, packed into a sheet of another side, read the same.
 local ffi = require("ffi")
 local reader = require("wonderland.font.reader")
 local utf8 = require("utf8")
 
-local DEFAULT_SIZE = 512
+--- How many bytes a pixel of a sheet takes: one where the sheet is coverage only, which is what a
+--- glyph of a shape is, and four where it is a picture's own colours.
+local COVERAGE_BYTES = 1
+local COLOUR_BYTES = 4
 
--- How many sheets one face and one size may come to: a sheet is a megabyte of pixels on the gpu
--- and in memory, sixteen of them is every glyph of a language the size of Japanese drawn at one
--- size on one screen, and past that a character is drawn as the advance it takes and no ink.
-local MAX_SHEETS = 16
+--- The smallest side a sheet is made at, which is room for a handful of small glyphs. A sheet this
+--- small is sixteen kilobytes of coverage, so a face that draws one character costs that and no
+--- more.
+local MIN_SIDE = 64
+
+--- The side a sheet of a font at this pixel height starts at: room for two glyphs across and two
+--- down, rounded up to the next power of two so that a sheet's rows are whole words of memory and a
+--- shader can find a glyph in it by dividing by its side.
+---@param pixelHeight number
+---@return number
+local function sheetSide(pixelHeight)
+	local side = MIN_SIDE
+
+	while side < pixelHeight * 2 do
+		side = side * 2
+	end
+
+	return side
+end
+
+-- How much ink one face and one size may pack, in pixels: sixteen 512 squares, which is every glyph
+-- of a language the size of Japanese drawn at one size on one screen. A smaller sheet holds fewer
+-- glyphs and takes more of them, so that the room a font has does not depend on the side of the sheet
+-- it happens to pack into. Past the room a character is drawn as the advance it takes and no ink.
+local MAX_SHEET_PIXELS = 16 * 512 * 512
 
 -- How much room is left around a glyph. Sampling is linear, so a glyph a fraction of a pixel off the
 -- grid of its sheet would blend with its neighbour: the padding is what keeps that from reaching it.
@@ -48,7 +80,8 @@ local PHASES = 4
 ---@class wonderland.font.Sheet
 ---@field image Image
 ---@field texture number # 0 where there is no gpu to upload it to
----@field pixels ffi.cdata* # The RGBA bytes `image.pixels` is, written in place
+---@field pixels ffi.cdata* # The sheet's own bytes, one or four a pixel, written in place
+---@field channels number # One where the sheet is coverage only, four where it is a picture
 ---@field width number
 ---@field height number
 ---@field dirty boolean # Whether a glyph has been packed since it was last written
@@ -69,7 +102,10 @@ local PHASES = 4
 ---@field phases number # How many fractions of a pixel a glyph is kept at: one where the reader cannot
 ---@field sheets wonderland.font.Sheet[]
 ---@field pictures TextureManager? # Where a packed sheet is put, where there is one
----@field size number # What a sheet is, a side
+---@field size number # The side a sheet is made at now, which grows when a glyph needs more
+---@field baseSize number # And the side it started at, restored when the atlases are given back
+---@field usedPixels number # How much room sheets have taken, which is what the budget counts
+---@field coverageChannels number # One where coverage is packed in one channel, four where it is in alpha
 local Atlas = {}
 Atlas.__index = Atlas
 
@@ -86,6 +122,7 @@ function Atlas.new(face, pixelHeight, opts)
 	local ascent, descent = face:metrics(pixelHeight)
 	assert(ascent and descent)
 	local pictures = opts and opts.pictures
+	local size = (opts and opts.size) or sheetSide(pixelHeight)
 
 	---@type wonderland.font.Atlas
 	local atlas = setmetatable({
@@ -99,7 +136,13 @@ function Atlas.new(face, pixelHeight, opts)
 		phases = reader.subpixel() and PHASES or 1,
 		sheets = {},
 		pictures = pictures,
-		size = (opts and opts.size) or DEFAULT_SIZE,
+		size = size,
+		baseSize = size,
+		usedPixels = 0,
+		-- A texture manager that draws coverage from one channel says so; one that does not --
+		-- the OpenGL backend, whose textures are all four channels -- keeps the coverage in the
+		-- alpha of a white sheet.
+		coverageChannels = pictures ~= nil and pictures.coverageChannels or COVERAGE_BYTES,
 	}, Atlas)
 
 	-- What an app said it would draw is baked now rather than on the first line that draws it,
@@ -107,8 +150,6 @@ function Atlas.new(face, pixelHeight, opts)
 	local characters = opts and opts.characters
 
 	if characters ~= nil then
-		atlas:sheet()
-
 		for at = 1, #characters do
 			atlas:glyph(characters:byte(at))
 		end
@@ -168,44 +209,75 @@ function Atlas.isValid(content)
 	return reader.isValid(content)
 end
 
+--- Moves a sheet's cursor past room for a glyph of this size, and answers whether it had that room.
+--- The cursor is advanced only when the glyph fits, so a sheet that is too small for this one is
+--- left where it was for the next glyph that does fit.
+---@param sheet wonderland.font.Sheet
+---@param width number
+---@param height number
+---@return boolean
+local function takeRoom(sheet, width, height)
+	if sheet.nextX + width + PADDING > sheet.width then
+		sheet.nextX = PADDING
+		sheet.nextY = sheet.nextY + sheet.rowHeight + PADDING
+		sheet.rowHeight = 0
+	end
+
+	if sheet.nextY + height + PADDING > sheet.height then
+		return false
+	end
+
+	sheet.rowHeight = math.max(sheet.rowHeight, height)
+
+	return true
+end
+
 --- A sheet with room for a glyph of this size, or a new one: what a full sheet is, and what
 --- running out of them is, are both answered here rather than by the caller.
+---
+--- A glyph bigger than the sheets this atlas makes grows the side the ones after it are made at.
+--- Glyphs already packed keep the picture they were packed into: what a glyph records is where in
+--- its own sheet it is, so a sheet of another side reads the same.
 ---@param width number
 ---@param height number
 ---@param colour boolean? # Whether the glyph is a picture rather than a shape
 ---@return wonderland.font.Sheet? sheet
 function Atlas:room(width, height, colour)
 	if width + PADDING * 2 > self.size or height + PADDING * 2 > self.size then
-		return nil
+		local needed = math.max(width, height) + PADDING * 2
+		local size = self.size
+
+		while size < needed do
+			size = size * 2
+		end
+
+		self.size = size
 	end
 
-	local last = self.sheets[#self.sheets]
+	local wantColour = colour == true
+	local sheets = self.sheets
 
 	-- A sheet of one kind is not room for a glyph of the other: what holds a shape is white where
 	-- nothing is packed, and what holds a picture is nothing.
-	if last ~= nil and last.colour ~= (colour == true) then
-		last = nil
-	end
+	for index = #sheets, 1, -1 do
+		local sheet = sheets[index]
 
-	if last ~= nil then
-		if last.nextX + width + PADDING > last.width then
-			last.nextX = PADDING
-			last.nextY = last.nextY + last.rowHeight + PADDING
-			last.rowHeight = 0
-		end
-
-		if last.nextY + height + PADDING <= last.height then
-			return last
+		if sheet.colour == wantColour and takeRoom(sheet, width, height) then
+			return sheet
 		end
 	end
 
-	if #self.sheets >= MAX_SHEETS then
+	-- What is left of the room this face and size may pack, counted in pixels whatever the side of
+	-- the sheet it is packed into: a smaller sheet holds fewer glyphs and takes more of them.
+	local pixels = self.size * self.size
+
+	if self.usedPixels + pixels > MAX_SHEET_PIXELS then
 		return nil
 	end
 
 	local sheet = self:sheet(colour)
 
-	if sheet.nextY + height + PADDING > sheet.height then
+	if not takeRoom(sheet, width, height) then
 		return nil
 	end
 
@@ -214,17 +286,22 @@ end
 
 --- Makes one more sheet.
 ---
---- A sheet of a shape is white everywhere with the coverage in alpha, so what is drawn is the text
---- colour where there is ink and nothing where there is not. A glyph a font draws as a picture of its
---- own -- an emoji -- goes in a sheet of the other kind: nothing where there is no ink and the
---- picture's own colours where there is. The two kinds cannot share a sheet.
+--- A sheet of a shape holds coverage: one byte a pixel where the texture manager can sample one
+--- channel, so a sheet is a quarter of the memory a white picture with the coverage in its alpha
+--- would be and the shader reads the same value out of it. Where the backend has only four channel
+--- pictures the sheet is white everywhere and the coverage is its alpha; either way what is drawn is
+--- the text colour where there is ink and nothing where there is not. A glyph a font draws as a
+--- picture of its own -- an emoji -- goes in a sheet of the other kind: nothing where there is no
+--- ink and the picture's own colours where there is. The two kinds cannot share a sheet.
 ---@param colour boolean? # Whether the sheet is for pictures rather than for shapes
 ---@return wonderland.font.Sheet
 function Atlas:sheet(colour)
 	local size = self.size
-	local pixels = ffi.new("uint8_t[?]", size * size * 4)
+	local isColour = colour == true
+	local channels = isColour and COLOUR_BYTES or self.coverageChannels
+	local pixels = ffi.new("uint8_t[?]", size * size * channels)
 
-	if not colour then
+	if not isColour and channels == COLOUR_BYTES then
 		-- What the shader multiplies by the text colour is white, so the sheet is white everywhere
 		-- and the alpha is what says where there is ink: a pixel with no ink is not drawn at all.
 		local white = ffi.new("uint8_t[?]", size * 4)
@@ -239,22 +316,24 @@ function Atlas:sheet(colour)
 	end
 
 	---@type Image
-	local image = { width = size, height = size, channels = 4, pixels = pixels }
+	local image = { width = size, height = size, channels = channels, pixels = pixels }
 
 	---@type wonderland.font.Sheet
 	local sheet = {
 		image = image,
 		texture = self.pictures ~= nil and self.pictures:upload(image) or 0,
 		pixels = pixels,
+		channels = channels,
 		width = size,
 		height = size,
 		dirty = false,
-		colour = colour == true,
+		colour = isColour,
 		nextX = PADDING,
 		nextY = PADDING,
 		rowHeight = 0,
 	}
 
+	self.usedPixels = self.usedPixels + size * size
 	self.sheets[#self.sheets + 1] = sheet
 
 	return sheet
@@ -379,8 +458,8 @@ function Atlas:pack(ink, advance)
 		local x, y = sheet.nextX, sheet.nextY
 		local width, height = ink.width, ink.height
 
-		-- A shape writes one channel: the sheet is white already and the coverage is what says where
-		-- the glyph is -- the shader multiplies the two.
+		-- A shape writes the sheet's coverage channel: one byte a pixel, or the alpha of a white
+		-- picture where the backend has only four channel textures.
 		--
 		-- A picture -- an emoji -- writes all four: the platform's order, each byte already
 		-- multiplied by the alpha, which is divided back out here because the shader blends by it.
@@ -407,6 +486,15 @@ function Atlas:pack(ink, advance)
 					end
 				end
 			end
+		elseif sheet.channels == COVERAGE_BYTES then
+			for row = 0, height - 1 do
+				local from = ink.pixels + row * width
+				local into = sheet.pixels + (y + row) * sheet.width + x
+
+				for column = 0, width - 1 do
+					into[column] = from[column]
+				end
+			end
 		else
 			for row = 0, height - 1 do
 				local from = ink.pixels + row * width
@@ -419,11 +507,6 @@ function Atlas:pack(ink, advance)
 		end
 
 		sheet.nextX = sheet.nextX + width + PADDING
-
-		if height > sheet.rowHeight then
-			sheet.rowHeight = height
-		end
-
 		sheet.dirty = true
 
 		glyph.texture = sheet.texture
@@ -450,19 +533,48 @@ end
 
 --- What has been packed since the last frame, written into the pictures the screen samples. A
 --- sheet is written whole because a texture is written in bands here, and a patch of one is not
---- what that call takes: a sheet that gained a glyph is a megabyte of copy, on the frame after
---- the glyph was packed and no frame at all after it.
+--- what that call takes: a sheet that gained a glyph is one small copy of itself, on the frame
+--- after the glyph was packed and no frame at all after it. A sheet is small enough that writing
+--- it whole is cheaper than tracking which rows of it a glyph landed in.
 function Atlas:flush()
 	if self.pictures == nil then
 		return
 	end
 
-	for _, sheet in ipairs(self.sheets) do
+	local sheets = self.sheets
+
+	for index = 1, #sheets do
+		local sheet = sheets[index]
+
 		if sheet.dirty then
 			self.pictures:writeLayer(sheet.texture, sheet.image)
 			sheet.dirty = false
 		end
 	end
+end
+
+--- Gives the pictures back, and everything packed into them. What is kept is the face and the
+--- size, so a line drawn again packs into a new sheet of the same side rather than reading a font
+--- file again: the caller rebuilds the atlas with `Atlas.new` from the same face.
+function Atlas:release()
+	local pictures = self.pictures
+
+	if pictures ~= nil then
+		for index = 1, #self.sheets do
+			local sheet = self.sheets[index]
+
+			if sheet.texture ~= 0 then
+				pictures:release({ slot = sheet.texture })
+				sheet.texture = 0
+			end
+		end
+	end
+
+	self.sheets = {}
+	self.glyphs = {}
+	self.glyphIds = {}
+	self.usedPixels = 0
+	self.size = self.baseSize
 end
 
 return Atlas
