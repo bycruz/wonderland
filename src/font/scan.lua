@@ -1,8 +1,8 @@
 -- Where the fonts on a machine are, and the walk that reads what they are called.
 --
 --   local scan = require("wonderland.font.scan")
---   local dirs = scan.dirs({})                 -- this machine's own font directories
---   local faces = scan.faces(dirs)             -- one record a font, by the name it is found by
+--   local dirs = scan.dirs()                    -- this machine's own font directories
+--   local faces = scan.faces(dirs)              -- one record a font, by the name it is found by
 --
 -- A font is megabytes of outlines behind a two-kilobyte header, so the header is what is read: a walk
 -- of a machine's font directories is a few hundred seeks rather than a few hundred megabytes.
@@ -54,17 +54,29 @@ local MAX_DEPTH = 12
 -- What a font file is called, which is all there is to go on before its header is read.
 local FONT_FILES = { [".ttf"] = true, [".otf"] = true, [".ttc"] = true, [".otc"] = true }
 
+--- A variable of the environment a scan reads, or of this process's own where the caller named no
+--- environment: a test hands a table rather than moving the machine it runs on.
+---@param env { [string]: string? }?
+---@param name string
+---@return string?
+local function variable(env, name)
+	if env ~= nil then return env[name] end
+
+	return os.getenv(name)
+end
+
 --- Where each platform keeps fonts, the system's own and the user's. What a registry is handed when
 --- the caller did not say where to look.
-local function platformDirs()
+---@param env { [string]: string? }?
+local function platformDirs(env)
 	---@type string
-	local home = os.getenv("HOME") or ""
+	local home = variable(env, "HOME") or ""
 
 	-- A font a user installed without being an administrator goes to a directory of theirs rather
 	-- than into the system's.
 	if isWindows then
-		local root = os.getenv("SystemRoot") or "C:\\Windows"
-		local appData = os.getenv("LOCALAPPDATA")
+		local root = variable(env, "SystemRoot") or "C:\\Windows"
+		local appData = variable(env, "LOCALAPPDATA")
 
 		return appData ~= nil
 			? { root .. "\\Fonts", appData .. "\\Microsoft\\Windows\\Fonts" }
@@ -84,13 +96,16 @@ local function platformDirs()
 	end
 
 	---@type string
-	local data = os.getenv("XDG_DATA_HOME") or (home .. "/.local/share/fonts")
+	local data = variable(env, "XDG_DATA_HOME") or (home .. "/.local/share")
+	-- A data directory is icons, themes and applications as well as fonts, and it is the fonts
+	-- directory of it that holds fonts: a walk of the whole of one finds no font in the rest and
+	-- spends seconds of startup on a desktop's hundred thousand directories.
 	local dirs = { "/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/X11/fonts",
-		data, home .. "/.fonts" }
+		data .. "/fonts", home .. "/.fonts" }
 
 	-- A sandboxed app -- a flatpak, a snap -- sees the machine's filesystem under /run/host and not
 	-- at the root, so the machine's own fonts are at none of the paths above.
-	if listDir("/run/host/fonts") ~= nil then dirs[#dirs + 1] = "/run/host/fonts" end
+	if env == nil and listDir("/run/host/fonts") ~= nil then dirs[#dirs + 1] = "/run/host/fonts" end
 
 	return dirs
 end
@@ -120,12 +135,14 @@ local function addUnder(root, dirs)
 end
 
 --- Where a registry looks, given what it was made with. Directories of its own replace the
---- platform's, which is the whole of what makes a scan something a test can depend on.
----@param opts { dirs: string[]?, roots: string[]? }?
+--- platform's, which is the whole of what makes a scan something a test can depend on. An
+--- environment given in place of this process's is what makes the platform's own answer one a test
+--- can depend on too.
+---@param opts { dirs: string[]?, roots: string[]?, env: { [string]: string? }? }?
 ---@return string[] dirs
 ---@return boolean isPlatform
 function scan.dirs(opts)
-	if opts == nil or (opts.dirs == nil and opts.roots == nil) then return platformDirs(), true end
+	if opts == nil or (opts.dirs == nil and opts.roots == nil) then return platformDirs(opts and opts.env), true end
 
 	local dirs = {}
 
@@ -175,12 +192,20 @@ local function indexFile(path, faces)
 	file:close()
 end
 
+-- What a data directory keeps beside its fonts, and that no font of a machine is under: a walk that
+-- starts at a filesystem root -- which is what a root with none of the platform's font paths comes
+-- to -- stops at these rather than reading every icon theme and translation a machine has.
+local NOT_FONTS = {
+	icons = true, themes = true, applications = true, backgrounds = true, sounds = true,
+	locale = true, mime = true, pixmaps = true,
+}
+
 --- Walks a directory and everything under it, indexing every font file. A listing that was handed in
 --- is used rather than made again: a directory is listed once, and what comes back says both what is
 --- in it and that it is a directory at all.
 ---@param dir string
 ---@param faces wonderland.font.Face[]
----@param entries string[]?
+---@param entries fs.DirEntry[]?
 ---@param level number
 local function walk(dir, faces, entries, level)
 	local listing = entries ?? listDir(dir)
@@ -189,14 +214,14 @@ local function walk(dir, faces, entries, level)
 
 	for _, entry in ipairs(listing) do
 		local path = dir .. SEP .. entry.name
-		local inside
+		local isDirectory = entry.type == "dir" or (entry.type ~= "file" and fs.isdir(path))
 
-		if entry.type == "dir" or (entry.type ~= "file" and fs.isdir(path)) then
-			inside = listDir(path)
-		end
+		if isDirectory then
+			if NOT_FONTS[entry.name:lower()] == nil then
+				local inside = listDir(path)
 
-		if inside ~= nil then
-			walk(path, faces, inside, level + 1)
+				if inside ~= nil then walk(path, faces, inside, level + 1) end
+			end
 		elseif FONT_FILES[((entry.name:match("%.[^%.]+$") or ""):lower())] then
 			indexFile(path, faces)
 		end

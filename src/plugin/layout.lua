@@ -211,7 +211,16 @@ end
 ---@field framedAt number? # When the last frame of this window went out, on the clock frames are paced by
 ---@field caretOn boolean? # Whether the caret is drawn in this frame, which is what it blinks
 ---@field caretAt number? # And when it last came or went
----@field frameKey string? # What the caret was when the gpu was last given a frame: where it is, not whether it shows
+---@field hoverKey number? # The hovered set the frame the gpu has was built with: see `Screen:markPointer`
+---@field hoverTag number? # And the other half of it, so two sets that agree on one still differ
+---@field hoverChanged boolean? # Whether the last pointer event changed what is hovered, which owes a frame
+---@field pointerDraw boolean? # Whether an element under the pointer draws there, which is a frame without a rebuild
+---@field frameCaret boolean? # Whether the frame the gpu was last given drew a caret
+---@field frameCaretName string? # The field it was for, and where in it: what says a caret moved
+---@field frameCaretLine number?
+---@field frameCaretColumn number?
+---@field frameCaretFrom number?
+---@field frameCaretTo number?
 ---@field caretBase number? # How many quads the frame's screen is, which is what the caret's is added to
 ---@field caret wonderland.plugin.UI.Caret? # Where the caret was last placed, and what it is drawn as
 ---@field presented boolean? # And whether the gpu has drawn one for it
@@ -408,9 +417,15 @@ function Layout:refreshView(window)
 
 		screen:solve(width, height, true)
 
-		if screen:markPointer(pointer.x, pointer.y, pointer.pressed) then
+		local marked, hoverKey, hoverTag = screen:markPointer(pointer.x, pointer.y, pointer.pressed)
+
+		ctx.hoverKey, ctx.hoverTag = hoverKey, hoverTag
+
+		if marked then
 			ctx.root = screen:fromElement(ctx.ui)
 		end
+	else
+		ctx.hoverKey, ctx.hoverTag = 0, 0
 	end
 
 	local width, height = self:size(ctx.window)
@@ -999,13 +1014,20 @@ local function dragFor(screen, hit, element)
 end
 
 --- What a value typed into a field is made of: one line until a break is typed into it.
+---
+--- The break is looked for backwards from the caret rather than by finding it in a copy of the part
+--- of the value before it: the copy is a string made every time a caret is read, and a caret is
+--- read several times a frame.
 ---@param value string
 ---@param at number # Where the caret is: from nought, before the first byte, to its length
 local function lineStart(value, at)
-	local before = value:sub(1, at)
-	local break_ = before:find("\n[^\n]*$")
+	for index = at, 1, -1 do
+		if value:byte(index) == 10 then
+			return index + 1
+		end
+	end
 
-	return break_ and break_ + 1 or 1
+	return 1
 end
 
 ---@param value string
@@ -1208,7 +1230,14 @@ function Layout:getCaret(window)
 	local value = wonderlandElement.inputOf(element)
 	local cursor = caretOf(ctx, element)
 	local start = lineStart(value, cursor)
-	local line = lineCount(value:sub(1, start - 1)) - 1
+	local line = 0
+	local break_ = value:find("\n", 1, true)
+
+	while break_ ~= nil and break_ < start do
+		line = line + 1
+		break_ = value:find("\n", break_ + 1, true)
+	end
+
 	local limit = #value
 	local anchor = math.min(math.max(ctx.anchorPos or cursor, 0), limit)
 	local at = math.min(math.max(cursor, 0), limit)
@@ -1762,6 +1791,11 @@ function Layout:event(event)
 		if ctx then
 			ctx.pointer = nil
 
+			-- Nothing is hovered now, so a frame is owed only if something was: the frame the
+			-- gpu has is the one drawn with the boxes the pointer left. See `UI:event`.
+			ctx.hoverChanged = (ctx.hoverKey or 0) ~= 0 or (ctx.hoverTag or 0) ~= 0
+			ctx.pointerDraw = false
+
 			-- What the pointer asked the window to draw it with goes with it: a hand or an
 			-- I-beam left over something nobody is over is the same lie as the hover.
 			setShape(ctx, nil)
@@ -1771,6 +1805,11 @@ function Layout:event(event)
 		if not ctx then return end
 
 		setPointer(ctx, event.x, event.y)
+
+		-- What a move leaves behind is worked out as the event goes by, and what did not change
+		-- is not a frame: see `UI:event`, which is what asks for one. A drag is a frame by
+		-- itself, whatever is hovered.
+		ctx.hoverChanged, ctx.pointerDraw = false, false
 
 		if ctx.barDrag ~= nil then
 			local drag = ctx.barDrag
@@ -1798,6 +1837,25 @@ function Layout:event(event)
 		---@type table<wonderland.Element, wonderland.plugin.Layout.Hit>
 		local hoveredElements = {}
 		findElementsAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hoveredElements)
+
+		-- The set the pointer is over, in the numbers `Screen:markPointer` gives the frame it
+		-- built: two moves that agree on them are over the same boxes, which is no frame at all.
+		-- A count, a sum and a mix of the element indices, because two different sets that agree
+		-- on all three are not a set this screen can hold.
+		local hoverCount, hoverSum, hoverTag = 0, 0, 0
+
+		for _, hit in pairs(hoveredElements) do
+			if hit.node.visible ~= 0 then
+				local elementIndex = hit.node.element
+
+				hoverCount = hoverCount + 1
+				hoverSum = hoverSum + elementIndex
+				hoverTag = bit.bxor(hoverTag, elementIndex)
+			end
+		end
+
+		ctx.hoverChanged = hoverCount * 0x100000000 + hoverSum ~= (ctx.hoverKey or 0)
+		or hoverTag ~= (ctx.hoverTag or 0)
 
 		local anyWithMouseDown = false
 		local anyTextInput = false
@@ -1828,6 +1886,10 @@ function Layout:event(event)
 				local handler = callbacks[el.onmousemove]
 
 				if handler then
+					-- An element that answers the pointer draws where it is, which is a frame of
+					-- the screen already built: `UI:event` walks it again and does not build it.
+					ctx.pointerDraw = true
+
 					local relX = event.x - layout.absX
 					local relY = event.y - layout.absY
 					return handler(relX, relY, layout.node.width, layout.node.height, ctx.modifiers)

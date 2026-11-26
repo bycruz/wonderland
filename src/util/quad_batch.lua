@@ -498,22 +498,41 @@ local function putCorners(instance, r)
 	instance.own = r.own
 end
 
+-- The box a cut of a quad is measured against, for the request whose quad a clip cut down: the
+-- corners of a box are still the corners of the whole box. It is read in a function of its own
+-- because it is the rare case -- a quad that is its own box is nearly every round box -- and four
+-- values read here are four values the path every cut is written on does not carry. See `putCut`.
+---@param r wonderland.QuadBatch.Request
+---@return number left
+---@return number top
+---@return number right
+---@return number bottom
+local function clippedBox(r)
+	return r.boxLeft, r.boxTop, r.boxRight, r.boxBottom
+end
+
 --- The middle of the box and how far its corners are cut: the half of it either way, the radius
 --- and the band, and the blur a spread-out edge is drawn with. It is written after the corners so
 --- that at the guards below only the box and the cut are live.
+---
+--- A value that is nought is written as a half of nought rather than through `toHalf`: nought is
+--- nought in a half too, and the call would be answered by that function's first guard every time.
+--- A guard taken for every quad of a frame is an exit the recorder starts a side trace from, and
+--- that side trace carries everything after it in the frame -- which is longer than a trace may be.
+--- A cut is written for every round box of every frame, so that exit was taken for every one of
+--- them and this path was never compiled: it ran interpreted, every frame. The band is the same
+--- story: the one pixel a cut with no band of its own is is the half 0x3c00, and a band of a half
+--- is narrowed as rarely as a radius is.
 ---@param instance wonderland.ffi.wl_instance
 ---@param r wonderland.QuadBatch.Request
 ---@param scaleX number
 ---@param scaleY number
 local function putCut(instance, r, scaleX, scaleY)
-	-- The box the corners belong to is the quad itself unless the request names another one: a quad
-	-- a clip cut down is still the whole box, and its corners are the corners of that box.
-	local boxLeft, boxTop, boxRight, boxBottom
+	-- The box the corners belong to is the quad itself unless the request names another one.
+	local boxLeft, boxTop, boxRight, boxBottom = r.left, r.top, r.right, r.bottom
 
 	if r.hasBox ~= 0 then
-		boxLeft, boxTop, boxRight, boxBottom = r.boxLeft, r.boxTop, r.boxRight, r.boxBottom
-	else
-		boxLeft, boxTop, boxRight, boxBottom = r.left, r.top, r.right, r.bottom
+		boxLeft, boxTop, boxRight, boxBottom = clippedBox(r)
 	end
 
 	local halfX = math.abs(boxRight - boxLeft) * scaleX * 0.5
@@ -536,8 +555,29 @@ local function putCut(instance, r, scaleX, scaleY)
 	end
 
 	instance.innerX, instance.innerY = halfX - radius, halfY - radius
-	instance.radius, instance.band = toHalf(radius), toHalf(band)
-	instance.blur = toHalf(r.blur)
+
+	if radius > 0 then
+		instance.radius = toHalf(radius)
+	else
+		instance.radius = 0
+	end
+
+	if band == 1 then
+		instance.band = 0x3c00
+	elseif band > 0 then
+		instance.band = toHalf(band)
+	else
+		instance.band = 0
+	end
+
+	local blur = r.blur
+
+	if blur > 0 then
+		instance.blur = toHalf(blur)
+	else
+		instance.blur = 0
+	end
+
 	instance.border = math.max(0, math.min(255, math.floor(r.border + 0.5)))
 end
 

@@ -1554,8 +1554,10 @@ end)
 
 -- A frame is built once for the frame rather than once for every event behind it, so what an
 -- event asks for is a frame and not a screen: the frame itself is what comes out the same as the
--- one already drawn. A frame the *window* asks for -- what an expose is -- is drawn whatever it
--- comes out to, because what it is for is a window that lost what it was showing.
+-- one already drawn. A pointer moving within what it is already over asks for nothing at all,
+-- because what it picks is a style per element and the set of elements it is over is unchanged.
+-- A frame the *window* asks for -- what an expose is -- is drawn whatever it comes out to,
+-- because what it is for is a window that lost what it was showing.
 test.skipIf(not canRender)("a frame that comes out the same is not drawn", function()
 	local screen = withButton()
 
@@ -1591,13 +1593,13 @@ test.skipIf(not canRender)("a frame that comes out the same is not drawn", funct
 
 	screen.window.shouldRedraw = false
 	screen:event({ name = "mouseMove", window = screen.window, x = 110, y = 62 })
-	test.truthy(screen.window.shouldRedraw, "moving about on it asks for one too")
-	frame()
-	test.equal(drawn, 1, "which comes out the same, so it is not drawn")
+	test.falsy(screen.window.shouldRedraw,
+		"moving about within the same element asks for no frame at all")
 
 	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 190 })
+	test.truthy(screen.window.shouldRedraw, "while leaving it asks for one")
 	frame()
-	test.equal(drawn, 2, "while leaving it is")
+	test.equal(drawn, 2)
 
 	screen.window.shouldRedraw = false
 	frame()
@@ -1613,12 +1615,13 @@ test.skipIf(not canRender)("a frame that comes out the same is not drawn", funct
 	test.truthy(screen.window.shouldRedraw, "a frame asks for the one after it")
 
 	screen.window.shouldRedraw = false
-	screen:event({ name = "mouseMove", window = screen.window, x = 90, y = 58 })
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 190 })
 	test.falsy(screen.window.shouldRedraw, "while one that comes too soon waits for the display")
 
 	screen.window.frameAsked = true
-	screen:event({ name = "mouseMove", window = screen.window, x = 80, y = 56 })
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 60 })
 	test.truthy(screen.window.shouldRedraw, "and is drawn when the window manager asks for it")
+	screen.window.frameAsked = nil
 
 	-- A resize is the window's own, so it is not held back: a window left at the size before the
 	-- last one is a window that looks frozen.

@@ -1298,7 +1298,9 @@ end
 ---
 --- Returns whether any of them is drawn differently for it, which is what says the screen has
 --- to be built again: a style that only changes what an element looks like still changes the
---- frame, and the frame is what the gpu is given or not given.
+--- frame, and the frame is what the gpu is given or not given. Along with it comes what the set
+--- is, as numbers that change when the set does: a pointer moving within one element hovers the
+--- same boxes, which is what says a frame is not owed for it.
 ---@param screen wonderland.Layout.Screen
 ---@param index number
 ---@param x number
@@ -1306,6 +1308,9 @@ end
 ---@param parentX number
 ---@param parentY number
 ---@param pressed boolean
+---@return boolean marked
+---@return number hoverKey
+---@return number hoverTag
 local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	local refs = screen.refs
 	local childIndices = screen.childIndices
@@ -1320,6 +1325,10 @@ local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	markY[1] = parentY
 
 	local marked = false
+
+	-- The set the pointer hovers, as numbers rather than a table of elements: what says the next
+	-- move is a move within the same boxes is a comparison of these, which costs nothing a frame.
+	local hoverCount, hoverSum, hoverTag = 0, 0, 0
 
 	while top > 0 do
 		local nodeIndex = markIndex[top]
@@ -1360,11 +1369,15 @@ local function markNode(screen, index, x, y, parentX, parentY, pressed)
 				if pressed then
 					wonderlandElement.pressing(element, true)
 				end
+
+				hoverCount = hoverCount + 1
+				hoverSum = hoverSum + node.element
+				hoverTag = bit.bxor(hoverTag, node.element)
 			end
 		end
 	end
 
-	return marked
+	return marked, hoverCount * 0x100000000 + hoverSum, hoverTag
 end
 
 --- Solves the screen, and works out whether anything about it actually changed.
@@ -1515,9 +1528,15 @@ end
 ---@param x number
 ---@param y number
 ---@param pressed boolean
----@return boolean # Whether any element it marked has a style for that state
+---@return boolean marked # Whether any element it marked has a style for that state
+---@return number hoverKey # Which elements it marked, as numbers that change when the set does
+---@return number hoverTag
 function Screen:markPointer(x, y, pressed)
-	return self.count > 0 and markNode(self, self.root, x, y, 0, 0, pressed) or false
+	if self.count == 0 then
+		return false, 0, 0
+	end
+
+	return markNode(self, self.root, x, y, 0, 0, pressed)
 end
 
 ---@param index number

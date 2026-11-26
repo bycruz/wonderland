@@ -428,6 +428,13 @@ function app.run(self)
 	-- event that changed nothing is one the loop should wait out rather than take more of.
 	local flowed = false
 
+	-- What each window was last known to be on screen, because a window that comes back is a
+	-- window whose frame is out of date by however long it was away: it is asked for one as soon
+	-- as it is visible again rather than waiting for something else to happen to it. A window no
+	-- backend tracks the visibility of is one that is shown, as it is below.
+	---@type table<winit.Window, boolean>
+	local hiddenWindows = {}
+
 	eventLoop:run(function(event, handler)
 		---@cast event winit.Event
 		---@cast handler winit.EventManager
@@ -456,6 +463,8 @@ function app.run(self)
 					if task.kind then w.kind = task.kind end
 					eventLoop:register(w)
 				elseif task.type == "closeWindow" and event.window then
+					hiddenWindows[event.window] = nil
+
 					local closeWindow = handler.close --[[@as fun(self: winit.EventManager, window: winit.Window)]]
 					closeWindow(handler, event.window)
 				end
@@ -471,6 +480,22 @@ function app.run(self)
 
 			for _, window in pairs(eventLoop.windows) do
 				---@cast window winit.Window
+				local isHidden = window.visible == false
+				local wasHidden = hiddenWindows[window]
+
+				if wasHidden == nil then
+					hiddenWindows[window] = isHidden
+				elseif wasHidden ~= isHidden then
+					hiddenWindows[window] = isHidden
+
+					-- Back on screen with the frame it was left with: a frame of what is there now
+					-- is asked for once, as a screen presented rather than a window the manager
+					-- asked for -- nothing else may happen to it to ask for one.
+					if not isHidden then
+						self:present(window)
+					end
+				end
+
 				if self.uiPlugin then
 					-- A repeated key is a key: what it edited is the app's, so the message that comes
 					-- of it goes to the app the way an event's does, and the frame that shows what it

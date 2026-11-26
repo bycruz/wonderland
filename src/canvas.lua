@@ -43,6 +43,13 @@ local NAMED = {
 ---@type table<string, number>
 local colourCache = {}
 
+--- What each colour handed over as a table last came to, beside the channels it came from: a bar of
+--- a spectrum or a meter of a screen is the same table every frame, with the channel that moved set
+--- on it, so a colour that did not change costs four compares rather than four narrowings.
+--- Weak keys, because a colour table a caller made for one shape is collected with it.
+---@type table<wonderland.Color, number[]>
+local tableColours = setmetatable({}, { __mode = "k" })
+
 --- One channel of a hex string, as the fraction of one the packed colour is made of.
 ---@param hex string
 ---@param step number
@@ -53,11 +60,56 @@ local function part(hex, step, index)
 	return step == 1 and byte / 15 or byte / 255
 end
 
+--- The four channels of a colour handed over as a table: a colour is a table of `r, g, b, a` or one
+--- of four numbers in the order they are written in, and a channel that is not there is nought --
+--- but for the alpha, which is one.
+---@param colour wonderland.Color
+---@return number r
+---@return number g
+---@return number b
+---@return number a
+local function channelsOf(colour)
+	return colour.r or colour[1] or 0, colour.g or colour[2] or 0, colour.b or colour[3] or 0,
+		colour.a or colour[4] or 1
+end
+
+--- The packed colour of a colour table seen for the first time: the entry kept for it is made here
+--- rather than in the caller, so that the trace of a drawing loop carries nothing of what happens
+--- once.
+---@param colour wonderland.Color
+---@param r number
+---@param g number
+---@param b number
+---@param a number
+local function packNew(colour, r, g, b, a)
+	local packed = Quads.colour(r, g, b, a)
+
+	tableColours[colour] = { r, g, b, a, packed }
+
+	return packed
+end
+
 ---@param colour string|wonderland.Color
 local function colourOf(colour)
 	if type(colour) == "table" then
-		return Quads.colour(colour.r or colour[1] or 0, colour.g or colour[2] or 0, colour.b or colour[3] or 0,
-			colour.a or colour[4] or 1)
+		local r, g, b, a = channelsOf(colour)
+		local entry = tableColours[colour]
+
+		if entry == nil then
+			return packNew(colour, r, g, b, a)
+		end
+
+		if entry[1] == r and entry[2] == g and entry[3] == b and entry[4] == a then
+			return entry[5]
+		end
+
+		-- A channel moved -- a bar of a spectrum sets its alpha before every shape it draws -- so the
+		-- colour is packed again and kept for the next shape.
+		local packed = Quads.colour(r, g, b, a)
+
+		entry[1], entry[2], entry[3], entry[4], entry[5] = r, g, b, a, packed
+
+		return packed
 	end
 
 	if type(colour) == "string" then

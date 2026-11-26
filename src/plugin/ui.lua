@@ -1714,6 +1714,30 @@ function UI:event(event, _handler)
 
 	if name == "resize" or name == "mouseMove" or name == "mouseLeave" or name == "mousePress"
 	or name == "mouseRelease" or name == "focusOut" then
+		-- A pointer that moved within what it was already over is not a frame: what the pointer
+		-- picks is a style per element, and what the frame was built from is the set of elements it
+		-- is over -- which the layout says it recorded as unchanged. The cursor shape is the
+		-- window's own and is set as the event goes by, so it needs no frame either. A drag in
+		-- progress, and an element that draws at the pointer, are the two that still want one: the
+		-- first changes the screen on every event, the second is one frame of the screen already
+		-- built with the walk gone over again.
+		if name == "mouseMove" or name == "mouseLeave" then
+			local ctx = self.layoutPlugin.contexts[event.window]
+
+			if ctx ~= nil then
+				if ctx.hoverChanged or ctx.barDrag ~= nil or ctx.dragging ~= nil or ctx.selecting
+				or (ctx.pointer ~= nil and ctx.pointer.pressed) then
+					local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
+					requestRedraw(self, event.window)
+				elseif ctx.pointerDraw then
+					ctx.mustDraw = true
+					event.window.shouldRedraw = true
+				end
+
+				return
+			end
+		end
+
 		if name == "resize" then -- Resize should actually invalidate layouts
 			local ctx = self.layoutPlugin.contexts[event.window]
 			if ctx then
@@ -1735,17 +1759,45 @@ end
 --- there. A caret that moved is a frame to build again and one that only blinked is not -- and a
 --- selection that grew without the caret moving, which is what shift and an arrow key does at the
 --- end of a line, is a frame of its own as well.
+---
+--- Compared field by field against what the frame the gpu has was walked with rather than as a key
+--- built for the comparing: a key is a table and strings made every frame, which is memory the
+--- collector has to take back while the screen is drawn.
 ---@param ctx wonderland.plugin.Layout.Context
 ---@param window wonderland.RenderWindow
 ---@param layoutPlugin wonderland.plugin.Layout
-local function caretKey(ctx, window, layoutPlugin)
+---@return boolean
+local function caretMoved(ctx, window, layoutPlugin)
 	local element, line, column, from, to = layoutPlugin:getCaret(window)
 
 	if element == nil then
-		return nil
+		return ctx.frameCaret == true
 	end
 
-	return table.concat({ tostring(ctx.focusedName), assert(line), assert(column), from or "", to or ""}, ":")
+	return ctx.frameCaret ~= true
+	or ctx.frameCaretName ~= ctx.focusedName
+	or ctx.frameCaretLine ~= line
+	or ctx.frameCaretColumn ~= column
+	or ctx.frameCaretFrom ~= from
+	or ctx.frameCaretTo ~= to
+end
+
+--- The caret a frame was walked with, kept as the numbers the next frame is compared against. It is
+--- the field the caret is for rather than the element: an element is built again every frame, and
+--- only its name says it is the same caret.
+---@param ctx wonderland.plugin.Layout.Context
+---@param caret wonderland.plugin.UI.Caret?
+local function rememberCaret(ctx, caret)
+	ctx.frameCaret = caret ~= nil
+	ctx.frameCaretName = ctx.focusedName
+
+	if caret ~= nil then
+		ctx.frameCaretLine, ctx.frameCaretColumn = caret.line, caret.column
+		ctx.frameCaretFrom, ctx.frameCaretTo = caret.from, caret.to
+	else
+		ctx.frameCaretLine, ctx.frameCaretColumn = nil, nil
+		ctx.frameCaretFrom, ctx.frameCaretTo = nil, nil
+	end
 end
 
 --- The caret as this frame has it: which field it is for, where in it, and what is selected in it,
@@ -1911,6 +1963,12 @@ function UI:tick(window, handler)
 	local due = nil ---@type number?
 	local message = nil
 
+	-- A window that is not on screen draws nothing, so nothing that is only a drawing has to run
+	-- for it: a caret that blinks and a gif that moves on are frames, and a hidden window is not
+	-- given one. What the app asked to be called back for still runs -- a player in the tray keeps
+	-- playing on the tick below.
+	local isHidden = window.visible == false
+
 	if ctx.repeatKey ~= nil and layout.keyRepeatInterval > 0 then
 		if ctx.repeatAt == nil then
 			-- A key that has just gone down, which is what having no next repeat yet means: what comes
@@ -1943,18 +2001,20 @@ function UI:tick(window, handler)
 	-- keyboard is not always a caret: a thing the keyboard was tabbed to that answers a click is
 	-- a keyboard with nothing blinking under it, and a selection hides the caret it covers. A frame
 	-- every half second for a caret that is not there is a screen drawing itself for nothing.
-	if self.caretBlink > 0 then
+	if not isHidden and self.caretBlink > 0 then
 		local element, _, _, from, to = self.layoutPlugin:getCaret(window)
 
 		if caretShown(element, from, to) then
 			local blink = (ctx.caretAt or at) + self.caretBlink
 
 			if at >= blink then
-				-- What is due is a frame, and it is the caret's own clock that has kept it rather than the
-				-- frame's: the frame's time is what holds a frame back, so it is not asked through it. The
-				-- caret's coming or going is `UI:blink`, which the frame that comes of this runs.
-				local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]
-				requestRedraw(self, window, true)
+				-- What is due is a frame, and it is the caret's own clock that has kept it rather
+				-- than the frame's: the frame's time is what holds a frame back, so it is not asked
+				-- through it. What comes of it is one quad of the frame the gpu already has -- see
+				-- `UI:toggle` -- so the screen is not owed a rebuild for it: the frame is asked for
+				-- and `UI:frame` toggles the quad the walk already placed.
+				ctx.asked = true
+				window.shouldRedraw = true
 				blink = at + self.caretBlink
 			end
 
@@ -1970,7 +2030,7 @@ function UI:tick(window, handler)
 	local shared = self.renderPlugin.sharedResources
 	local assets = shared and shared.assets
 
-	if assets ~= nil then
+	if not isHidden and assets ~= nil then
 		if assets:advance(at) then
 			ctx.owed = true
 		end
@@ -2039,8 +2099,8 @@ function UI:tick(window, handler)
 	-- is a screen left showing what was typed before it, which is what a keystroke that landed on the
 	-- heels of another frame would be. So the ask is made again here, where nothing has to arrive for
 	-- the loop to be woken: the ration is the same one, so this is a frame at the rate of a frame and
-	-- no faster.
-	if ctx.owed then
+	-- no faster. A hidden window is not asked for one: what it owes is still owed when it is shown.
+	if ctx.owed and not isHidden then
 		local ready = (ctx.framedAt or 0) + self:intervalOf(window)
 
 		if at >= ready then
@@ -2068,9 +2128,8 @@ end
 --- the same frame with that last quad in or out -- which is what `UI:frame` tells apart.
 ---@param window wonderland.RenderWindow
 ---@param ctx wonderland.plugin.Layout.Context
----@param key string? # The caret as this frame draws it, for the next one to tell it changed
 ---@param self wonderland.plugin.UI
-function UI:walk(window, ctx, key)
+function UI:walk(window, ctx)
 	local fontManager = assert(self.renderPlugin.sharedResources).fontManager
 	local batch = self.batch
 	local caret = self:caretFor(window)
@@ -2128,7 +2187,8 @@ function UI:walk(window, ctx, key)
 
 	self.renderPlugin:setRenderData(window, batch)
 	ctx.uploaded = true
-	ctx.frameKey = key
+
+	rememberCaret(ctx, caret)
 end
 
 --- The caret coming or going: the last quad of the frame the gpu has is the caret's, so this is
@@ -2242,9 +2302,9 @@ function UI:frame(window)
 
 	-- Where the caret is, which the frame's quads are remembered by as well as the screen: a caret
 	-- that moved is a frame to build again, and one that only blinked is not.
-	local key = caretKey(ctx, window, self.layoutPlugin)
+	local moved = caretMoved(ctx, window, self.layoutPlugin)
 
-	if key ~= ctx.frameKey then
+	if moved then
 		-- A caret that moved is drawn from the start of its blink, which is what an editor does
 		-- while you type: one that happened to be out at the moment of the typing would be a caret
 		-- that goes away exactly when it is looked at. The clock starts again *now* rather than
@@ -2260,7 +2320,7 @@ function UI:frame(window)
 		-- The screen that came out, the first frame of a window, and the caret that moved in a screen
 		-- that did not: any of them is a frame the gpu does not have. A solve that came out the same,
 		-- with a caret that stayed where it was, is not -- and that frame costs the view and no more.
-		if assert(ctx.screen).changed or not ctx.uploaded or key ~= ctx.frameKey then
+		if assert(ctx.screen).changed or not ctx.uploaded or moved then
 			built = true
 		end
 	end
@@ -2271,8 +2331,8 @@ function UI:frame(window)
 	-- the solve that came out the same is the same one it is built from.
 	if built or (mustDraw and ctx.uploaded) then
 		built = true
-		local walk = self.walk --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context, key: string?)]]
-		walk(self, window, ctx, key)
+		local walk = self.walk --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context)]]
+		walk(self, window, ctx)
 	end
 
 	-- The caret coming or going is one quad of the frame the gpu already has -- which is a frame
@@ -2314,24 +2374,16 @@ function UI:refreshView(window)
 	---@cast ctx wonderland.plugin.Layout.Context
 	ctx.owed = false
 
-	local key = caretKey(ctx, window, self.layoutPlugin)
 	-- What the frame is asked for by, which is what the gpu does not already have: the screen that
 	-- came out, the first frame of a window, and the caret that moved in a screen that did not.
 	local changed = assert(ctx.screen).changed
-	local frameKey = ctx.frameKey
-	local sameKey
-	if key == nil then
-		sameKey = frameKey == nil
-	else
-		sameKey = key == frameKey
-	end
-	local wanted = changed or not ctx.uploaded or not sameKey
+	local wanted = changed or not ctx.uploaded or caretMoved(ctx, window, self.layoutPlugin)
 
 	-- Built whatever the solve came out to: what an element draws into a frame of its own -- the
 	-- shapes of a canvas, a texture another renderer has just filled -- reads the app's state, and a
 	-- solve that came out the same is not a frame that has nothing new in it.
-	local walk = self.walk --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context, key: string?)]]
-	walk(self, window, ctx, key)
+	local walk = self.walk --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, ctx: wonderland.plugin.Layout.Context)]]
+	walk(self, window, ctx)
 
 	if wanted then
 		local requestRedraw = self.requestRedraw --[[@as fun(self: wonderland.plugin.UI, window: wonderland.RenderWindow, forced: boolean?)]]

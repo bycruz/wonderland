@@ -11,8 +11,10 @@
 -- is two or four bytes wide, which is the whole of what the two helpers at the top do.
 local ffi = require("ffi")
 local test = require("lde-test")
+local jit = require("jit")
 local sfnt = require("wonderland.font.sfnt")
 local Registry = require("wonderland.font.registry")
+local scan = require("wonderland.font.scan")
 
 local isWindows = ffi.os == "Windows"
 
@@ -590,4 +592,62 @@ test.it("does not mind a directory that is not there", function()
 
 	test.equal(#registry:faces(), 0)
 	test.equal(registry:path("Inter"), nil)
+end)
+
+--- Whether a list of paths holds one.
+---@param paths string[]
+---@param path string
+local function holds(paths, path)
+	for _, held in ipairs(paths) do
+		if held == path then return true end
+	end
+
+	return false
+end
+
+-- A user's fonts are one directory of their data directory, and the rest of it -- icons, themes,
+-- applications -- is a walk of a machine's whole desktop. What is checked here is the path a scan
+-- asks for rather than a machine's own: the data directory below is the test's.
+test.skipIf(isWindows or jit.android)("looks for a user's fonts in the fonts directory of a data directory",
+	function()
+		local home = fontsDir({})
+		local data = home .. "/share"
+		local fonts = data .. "/fonts"
+		local icons = data .. "/icons/deep/tree"
+		local mkdir = (isWindows and "mkdir " or "mkdir -p ") .. '"'
+
+		sh(mkdir .. fonts .. '"')
+		sh(mkdir .. icons .. '"')
+
+		writeFile(fonts, "User.ttf", buildFont({ family = "User Sans" }))
+		writeFile(icons, "Deep.ttf", buildFont({ family = "Icon Sans" }))
+
+		local dirs = scan.dirs({ env = { HOME = home, XDG_DATA_HOME = data } })
+		local mine = {}
+
+		for _, dir in ipairs(dirs) do
+			if dir:sub(1, #home) == home then mine[#mine + 1] = dir end
+		end
+
+		test.truthy(holds(dirs, fonts), "the fonts directory of the data directory is looked in")
+		test.falsy(holds(dirs, data), "and the data directory itself is not")
+
+		local faces = Registry.new({ dirs = mine }):faces()
+
+		test.equal(#faces, 1, "a font under icons is not a font of the machine")
+		test.equal(faces[1].family, "User Sans")
+
+		removeDir(home)
+	end)
+
+test.skipIf(isWindows or jit.android)("takes the default data directory from the home directory", function()
+	local home = fontsDir({})
+	local dirs = scan.dirs({ env = { HOME = home } })
+
+	test.truthy(holds(dirs, home .. "/.local/share/fonts"),
+		"a data directory that is not set is the home directory's, and its fonts are under fonts")
+	test.falsy(holds(dirs, home .. "/.local/share"), "which is not the data directory itself")
+	test.truthy(holds(dirs, home .. "/.fonts"), "and fonts kept in the home directory itself are looked in")
+
+	removeDir(home)
 end)
