@@ -307,9 +307,19 @@ end
 
 --- A box an app draws shapes in. The screen makes it and hands it to the draw of a canvas element:
 --- what it is about is one element of one frame, and it is handed out again for the next.
+---
+--- What it is handed is the room inside the element's padding and border, and the shapes are drawn
+--- from that room's corner. An element's own box, and how round its corners are, are there too: a
+--- draw that paints the whole box -- a press's ripple covering the padding as well as the room --
+--- reads them rather than working out where the element's edges are.
 ---@class wonderland.Canvas
 ---@field width number # How wide the room it was given is, in pixels
 ---@field height number # And how tall
+---@field boxX number # Where the element's own box starts, from the room's corner: nought for an element with no padding
+---@field boxY number
+---@field boxWidth number # How big the element's own box is: the room plus its padding and border
+---@field boxHeight number
+---@field boxRadius number # How round its corners are, in pixels, as its style said
 ---@field store wonderland.Canvas.Store
 local Canvas = {}
 Canvas.__index = Canvas
@@ -355,6 +365,10 @@ function Canvas:draw(batch, clip, windowWidth, windowHeight, left, top, width, h
 	store.left, store.top, store.z, store.white = left, top, z, white
 
 	self.width, self.height = width, height
+
+	-- A canvas nobody said anything more about is its room: the screen tells it where the element's
+	-- own box is, and how round it is, before it hands the canvas over.
+	self.boxX, self.boxY, self.boxWidth, self.boxHeight, self.boxRadius = 0, 0, width, height, 0
 
 	return self
 end

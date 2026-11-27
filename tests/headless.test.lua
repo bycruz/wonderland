@@ -12,6 +12,7 @@ local test = require("lde-test")
 local image = require("image")
 local wonderland = require("wonderland")
 local Atlas = require("wonderland.font.atlas")
+local elements = require("wonderland.element")
 
 local div, text, sty = wonderland.div, wonderland.text, wonderland.sty
 
@@ -401,6 +402,33 @@ test.skipIf(not canRender)("a click goes to the box on top", function()
 	test.equal(message and message.type, "over", "the later, higher box is what the click reached")
 end)
 
+-- A layer that takes the pointer is what an open overlay is: the page under it is covered, even
+-- where the layer itself does nothing with the press, so nothing under the dim reacts.
+test.skipIf(not canRender)("a click does not reach the box under a box that takes the pointer", function()
+	---@type string[]
+	local seen = {}
+	local screen = wonderland.headless.new(function()
+		return div():style(sty():fill():column()):children({
+			div():style(sty():fill()):onClick({ type = "under" }),
+			div():style(sty():fill():offset(0, 0):z(10)):blockPointer():onClick({ type = "dismiss" }),
+		})
+	end, {
+		width = 300,
+		height = 300,
+		fontPath = assert(fontPath),
+		onMessage = function(received)
+			seen[#seen + 1] = received.type
+		end,
+	})
+
+	screen:draw()
+	screen:click(100, 100)
+	screen:close()
+
+	test.equal(#seen, 1, "one box answered the press")
+	test.equal(seen[1], "dismiss", "and it is the layer over the page, not the page")
+end)
+
 -- The colour a box is drawn in, at a point in it, so what the pointer does to it can be read.
 ---@param screen wonderland.Headless
 local function centrePixel(screen)
@@ -474,6 +502,232 @@ test.skipIf(not canRender)("a mouseLeave leaves nothing hovered where the pointe
 	test.equal(b, 0)
 
 	test.equal(screen.plugins.layout:pointer(screen.window), nil, "and the place it was is forgotten")
+
+	screen:close()
+end)
+
+-- A popup over a page: a layer that takes the pointer, holding three rows, over a button that
+-- sends `under`. The boxes are kept so a test can ask which of them the frame draws hovered.
+---@param messages table
+---@return wonderland.Headless screen
+---@return fun(): wonderland.Element?, wonderland.Element[]
+local function withPopup(messages)
+	local page, rows
+	local screen = wonderland.headless.new(function()
+		page = div():style(sty():size(200, 60)):hover(sty():size(200, 60):bg("#ff0000")):onClick({ type = "under" })
+		rows = {}
+		for at = 1, 3 do
+			rows[at] = div()
+				:style(sty():size(160, 40):bg("#101010"))
+				:hover(sty():size(160, 40):bg("#00ff00"))
+				:onClick({ type = "row", row = at })
+		end
+		return div():style(sty():fill():column()):children({
+			page,
+			div():style(sty():fill():offset(0, 0):z(10)):blockPointer():onClick({ type = "dismiss" })
+				:children({ div():style(sty():size(160, 120):offset(20, 100):column()):children(rows) }),
+		})
+	end, {
+		width = 300,
+		height = 300,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			messages[#messages + 1] = message
+		end,
+	})
+	return screen, function()
+		return page, rows
+	end
+end
+
+-- What the pointer is over in a frame with a popup in it: the row it is on is hovered, the page
+-- under the layer is not, and a move to another row owes a frame while a move within one owes
+-- none -- the rows are what the hover signature says changed.
+test.skipIf(not canRender)("a popup row follows the pointer and the page under its layer does not", function()
+	local messages = {}
+	local screen, boxes = withPopup(messages)
+	-- A frame is asked for at most once a frame's time: this is about which frame is drawn, so the
+	-- test asks for them as often as it likes.
+	screen.plugins.ui.frameInterval = 0
+
+	local function frame()
+		screen:event({ name = "redraw", window = screen.window })
+	end
+	local function moveTo(x, y)
+		screen:event({ name = "mouseMove", window = screen.window, x = x, y = y })
+	end
+	local function hovered(element)
+		return element ~= nil and element.flags & elements.HOVERED ~= 0
+	end
+	local function clear()
+		for at = #messages, 1, -1 do messages[at] = nil end
+	end
+
+	screen:draw()
+	screen.window.shouldRedraw = false
+
+	-- The page's button is under the layer, so it is not the pointer's even though the pointer is
+	-- inside it.
+	moveTo(100, 30)
+	test.truthy(screen.window.shouldRedraw, "the pointer arriving under the layer asks for a frame")
+	frame()
+	local page, rows = boxes()
+	test.falsy(hovered(page), "the button under the layer is not hovered")
+	test.falsy(hovered(rows[1]) or hovered(rows[2]) or hovered(rows[3]), "and no row is")
+
+	-- One row at a time: each move onto another row asks for a frame, and that frame marks it.
+	moveTo(100, 120)
+	test.truthy(screen.window.shouldRedraw, "the pointer arriving on the first row asks for one")
+	screen.window.shouldRedraw = false
+	frame()
+	_, rows = boxes()
+	test.truthy(hovered(rows[1]), "the row under the pointer is hovered")
+	test.falsy(hovered(rows[2]) or hovered(rows[3]), "and the others are not")
+
+	moveTo(101, 121)
+	test.falsy(screen.window.shouldRedraw, "moving within that row asks for no frame")
+	frame()
+	_, rows = boxes()
+	test.truthy(hovered(rows[1]), "and it is still the row under the pointer")
+
+	moveTo(100, 160)
+	test.truthy(screen.window.shouldRedraw, "arriving on the second row asks for one")
+	screen.window.shouldRedraw = false
+	frame()
+	_, rows = boxes()
+	test.truthy(hovered(rows[2]), "the second row is the one hovered")
+	test.falsy(hovered(rows[1]) or hovered(rows[3]), "and the others are not")
+
+	-- Three moves with no frame between them: the one frame after them is of where the pointer
+	-- ended, which is what says the signature is not of the set each move passed through.
+	moveTo(100, 120)
+	moveTo(100, 160)
+	moveTo(100, 200)
+	frame()
+	_, rows = boxes()
+	test.truthy(hovered(rows[3]), "the row the pointer came to is the one drawn hovered")
+	test.falsy(hovered(rows[1]) or hovered(rows[2]), "and the ones it passed over are not")
+
+	-- A press on a row is the row's, and a press under the layer is the layer's alone.
+	clear()
+	screen:click(100, 160)
+	test.equal(#messages, 1, "one box answered the press")
+	test.equal(messages[1] and messages[1].type, "row", "and it is the row under the pointer")
+	test.equal(messages[1] and messages[1].row, 2)
+
+	clear()
+	screen:click(100, 30)
+	test.equal(#messages, 1, "one box answered the press under the layer")
+	test.equal(messages[1] and messages[1].type, "dismiss", "and it is the layer, not the page")
+
+	screen:close()
+end)
+
+-- A hover style may lay a box out differently, and the frame that follows the pointer is built
+-- with it marked before the build: the box under the pointer is drawn at the size its style asks
+-- for on the frame it arrives in, and the frame after it, with the pointer still, keeps it.
+test.skipIf(not canRender)("a hover style that changes a box's size is solved for", function()
+	local rows
+	local screen = wonderland.headless.new(function()
+		rows = {}
+
+		for at = 1, 3 do
+			rows[at] = div():style(sty():wrel(1.0):h(20)):hover(sty():h(60))
+		end
+
+		return div():style(sty():fill():column()):children(rows)
+	end, { width = 200, height = 200, fontPath = assert(fontPath) })
+
+	local function nodeOf(element)
+		local scr = assert(screen.plugins.layout.contexts[screen.window].screen)
+
+		for at = 1, scr.count do
+			if scr:node(at).element == element.index then
+				return scr:node(at)
+			end
+		end
+	end
+
+	screen:draw()
+	test.equal(assert(nodeOf(rows[1])).height, 20, "the row is as tall as its own style says")
+
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 10 })
+	screen:draw()
+
+	test.equal(assert(nodeOf(rows[1])).height, 60, "and as tall as the style the pointer gives it")
+	test.equal(assert(nodeOf(rows[2])).y, 60, "the row after it is placed after the size it came out")
+
+	screen:draw()
+	test.equal(assert(nodeOf(rows[1])).height, 60, "the frame after it keeps the size")
+	test.equal(assert(nodeOf(rows[2])).y, 60)
+
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 70 })
+	screen:draw()
+
+	test.equal(assert(nodeOf(rows[1])).height, 20, "a row the pointer left goes back to its own size")
+	test.equal(assert(nodeOf(rows[2])).height, 60, "and the one it came to is the taller one")
+	test.equal(assert(nodeOf(rows[3])).y, 80, "placed after the two before it")
+
+	screen:close()
+end)
+
+-- A frame the pointer has not moved in, and that comes out to what the frame before it did, has
+-- nothing to ask the tree: what it is over is what the frame it was built from marked, and one
+-- solve is the whole of what a screen with a pointer on it costs. See `Layout:refreshView`.
+test.skipIf(not canRender)("a frame the pointer has not moved in solves the tree once", function()
+	local screen = withButton()
+
+	screen:draw()
+	screen:event({ name = "mouseMove", window = screen.window, x = 100, y = 60 })
+	screen:draw()
+
+	local scr = assert(screen.plugins.layout.contexts[screen.window].screen)
+	local Screen = getmetatable(scr).__index
+	local solves, realSolve = 0, Screen.solve
+
+	Screen.solve = function(self, w, h, provisional)
+		solves = solves + 1
+
+		return realSolve(self, w, h, provisional)
+	end
+
+	local ok, err = pcall(function()
+		screen:draw()
+		test.equal(solves, 1, "the pointer is still and the frame came out the same: one solve")
+
+		solves = 0
+		screen:draw()
+		test.equal(solves, 1, "and the frame after it")
+	end)
+
+	Screen.solve = realSolve
+	assert(ok, err)
+	screen:close()
+end)
+
+-- A move is told to the box painted last among those that answer one: what is drawn over another
+-- is what the pointer is on, and the box under it is not the one that hears about it.
+test.skipIf(not canRender)("the box painted over another is the one a move is told to", function()
+	local messages = {}
+	local screen = wonderland.headless.new(function()
+		return div():style(sty():fill():column()):children({
+			div():style(sty():fill()):onMouseMove(function() return { type = "under" } end),
+			div():style(sty():size(50, 50):offset(0, 0)):onMouseMove(function() return { type = "over" } end),
+		})
+	end, {
+		width = 200,
+		height = 200,
+		fontPath = assert(fontPath),
+		onMessage = function(message)
+			messages[#messages + 1] = message
+		end,
+	})
+
+	screen:draw()
+	screen:event({ name = "mouseMove", window = screen.window, x = 10, y = 10 })
+
+	test.equal(#messages, 1, "one box answered the move")
+	test.equal(messages[1] and messages[1].type, "over", "the one drawn over the other")
 
 	screen:close()
 end)

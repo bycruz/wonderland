@@ -203,6 +203,23 @@ for it where the platform has one: a window that lists what it draws in `cursors
 `sizewe` or `sizens`, and a window that lists nothing keeps the cursor it had -- a shape asked for by
 a name a backend does not know is one it falls over on rather than one it draws.
 
+## Covering the pointer
+
+An overlay covers the page under it with `:blockPointer()`: while the pointer is inside that box,
+nothing painted below it is hovered, pressed, wheeled, dragged, dropped on or asked for a context
+menu. What the box holds, and anything painted over it, stays live -- which is what makes a panel
+inside the layer work while the page around it does not.
+
+```lua
+div():style(sty():fill():offset(0, 0):z(10)):blockPointer()
+	:onClick({ type = "dismiss" })
+	:children({ panel })
+```
+
+What is below is the painter's order: a higher z first, and among boxes at one z the one painted
+later. A box that takes the pointer covers only the window if it is the size of the window, so the
+layer and the panel are two boxes -- the layer full-size, the panel one of its children.
+
 ## Devtools
 
 A panel over the app's own screen, drawn by the screen itself: what the frame came out to, what it

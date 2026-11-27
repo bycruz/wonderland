@@ -126,6 +126,26 @@ function UI:onTick(fn, window)
 	return ticker
 end
 
+--- A window has just come back on screen. What it asked to be called back for was kept to the
+--- slow tick of a window nothing is showing -- the pause it was left at, a track that ended
+--- while the app was away -- so every ticker of this window is due at once rather than up to a
+--- second from now. The loop is about to wait, and a wait that long is a window shown with the
+--- stale frame it was left with and a player still told it is in the background.
+---
+--- A ticker with no window yet is left alone: it is handed the first window the loop asks about,
+--- and it is already due the first time it is asked.
+---@param window wonderland.RenderWindow
+---@param self wonderland.plugin.UI
+function UI:resume(window)
+	local tickers = self.tickers
+	for at = 1, #tickers do
+		local ticker = tickers[at]
+		if not ticker.cancelled and ticker.window == window then
+			ticker.due = 0
+		end
+	end
+end
+
 --- A frame asked for now rather than at the display's own rate: what a screen that has just been
 --- given something new to show asks for. See `UI:requestRedraw`, which is the rationed one.
 ---
@@ -1262,8 +1282,15 @@ local function canvasQuads(here, node, x, y, z, clip)
 		local roomWidth = node.width - node.paddingLeft - node.paddingRight - node.borderLeft - node.borderRight
 		local roomHeight = node.height - node.paddingTop - node.paddingBottom - node.borderTop - node.borderBottom
 
-		draw(canvas:draw(walkBatch, clip, walkWidth, walkHeight, left, top, roomWidth, roomHeight, convertZ(z),
-			WHITE_TEXTURE))
+		-- The element's own box and its corners, from the room's corner: what a draw painting the
+		-- whole box -- a press's ripple over the padding too -- reads rather than guessing where
+		-- the element's edges are.
+		local drawn = canvas:draw(walkBatch, clip, walkWidth, walkHeight, left, top, roomWidth, roomHeight,
+			convertZ(z), WHITE_TEXTURE)
+		drawn.boxX, drawn.boxY = x - left, y - top
+		drawn.boxWidth, drawn.boxHeight, drawn.boxRadius = node.width, node.height, node.radius
+
+		draw(drawn)
 	end
 end
 

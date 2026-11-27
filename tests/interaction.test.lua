@@ -191,6 +191,44 @@ local function aPane(onScroll)
 		:onScroll(onScroll)
 end
 
+test.skipIf(not canRender)("claims a touch that starts on a box that drags, and leaves the rest to the platform", function()
+	local claims = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill():column()):children({
+			-- A box that answers the press and the moves after it: what a list that swipes its
+			-- rows away, or a row lifted to another place, is made of.
+			div():style(sty():w(200):h(40)):onMouseDown(function() end):onMouseMove(function() end),
+			-- A box that only answers a click: a track row or a button.
+			div():style(sty():w(200):h(40)):onClick({ type = "clicked" }),
+			-- A box that answers the press but not a drag: a colour picker's square.
+			div():style(sty():w(200):h(40)):onMouseDown(function() end),
+		})
+	end)
+
+	screen.window.captureTouch = function(_, hold, id)
+		claims[#claims + 1] = { hold = hold, id = id }
+		return true
+	end
+
+	send(screen, { name = "touchStart", id = 7, x = 20, y = 20, pressure = 1 })
+	test.equal(#claims, 1, "the box that drags took the touch")
+	test.equal(claims[1].hold, 0.35, "with the hold an app's own gesture times itself against")
+	test.equal(claims[1].id, 7, "for the finger that went down")
+
+	send(screen, { name = "touchStart", id = 2, x = 20, y = 60, pressure = 1 })
+	test.equal(#claims, 1, "a box that is only clicked does not: a long press there is still its menu")
+
+	send(screen, { name = "touchStart", id = 3, x = 20, y = 100, pressure = 1 })
+	test.equal(#claims, 1, "nor does one that takes a press and no drag")
+
+	screen.window.captureTouch = nil
+	send(screen, { name = "touchStart", id = 4, x = 20, y = 20, pressure = 1 })
+	test.equal(#claims, 1, "and a backend that does not read touches is simply not told")
+
+	screen:close()
+end)
+
 test.skipIf(not canRender)("sends a wheel to the box under the pointer that scrolls", function()
 	local said = {}
 
@@ -222,6 +260,32 @@ test.skipIf(not canRender)("sends a wheel to the box under the pointer that scro
 
 	test.falsy(send(screen, { name = "mouseScroll", dy = 1 }), "and a wheel elsewhere is nobody's here")
 	test.equal(#said, 1)
+
+	screen:close()
+end)
+
+-- A wheel over a layer that takes the pointer belongs to nothing under it: the page below an open
+-- overlay must not scroll as the wheel turns.
+test.skipIf(not canRender)("a wheel over a box that takes the pointer does not scroll under it", function()
+	local said = {}
+
+	local screen = aScreen(function()
+		return div():style(sty():fill():column()):children({
+			aPane(function(by, to)
+				local message = { type = "scroll", by = by, to = to }
+
+				said[#said + 1] = message
+
+				return message
+			end),
+			div():style(sty():fill():offset(0, 0):z(10)):blockPointer(),
+		})
+	end)
+
+	send(screen, { name = "mouseMove", x = 20, y = 20 })
+
+	test.falsy(send(screen, { name = "mouseScroll", dy = 1 }), "the layer swallows the wheel")
+	test.equal(#said, 0, "and the pane under it does not move")
 
 	screen:close()
 end)

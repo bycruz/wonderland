@@ -22,6 +22,7 @@ local wonderlandElement = require("wonderland.element")
 local pointers = wonderlandElement.pointers
 local runs = wonderlandElement.runs
 local HOVERED, PRESSED = wonderlandElement.HOVERED, wonderlandElement.PRESSED
+local BLOCKS = wonderlandElement.BLOCKS
 local ABS, REL, AUTO = style.ABS, style.REL, style.AUTO
 local PRESENT = style.PRESENT
 local SCROLLS = wonderlandElement.SCROLLS
@@ -323,6 +324,13 @@ local layout = {}
 ---@field markIndex ffi.cdata* # And the stack the pointer is marked down: a node and its place
 ---@field markX ffi.cdata*
 ---@field markY ffi.cdata*
+---@field markZ ffi.cdata* # And the z its boxes are painted in, as the pointer walk goes down
+---@field markHitElement ffi.cdata* # The boxes the pointer is inside, held until the whole walk says
+---@field markHitZ ffi.cdata* # which of them a box that takes the pointer does not cover
+---@field markHitOrder ffi.cdata*
+---@field markHitStyles ffi.cdata*
+---@field pointerHovered ffi.cdata* # The elements the pointer walk marked, in paint order
+---@field hoverCount number # How many of them the last walk marked
 ---@field buildElement ffi.cdata* # And the stack a screen is built on: an element, its parent, its child slot
 ---@field buildParent ffi.cdata*
 ---@field buildSlot ffi.cdata*
@@ -378,6 +386,12 @@ local function allocateStacks(screen, capacity)
 	screen.markIndex = ffi.new("uint32_t[?]", capacity)
 	screen.markX = ffi.new("double[?]", capacity)
 	screen.markY = ffi.new("double[?]", capacity)
+	screen.markZ = ffi.new("int32_t[?]", capacity)
+	screen.markHitElement = ffi.new("uint32_t[?]", capacity)
+	screen.markHitZ = ffi.new("int32_t[?]", capacity)
+	screen.markHitOrder = ffi.new("uint32_t[?]", capacity)
+	screen.markHitStyles = ffi.new("uint8_t[?]", capacity)
+	screen.pointerHovered = ffi.new("uint32_t[?]", capacity)
 
 	screen.buildElement = ffi.new("uint32_t[?]", capacity)
 	screen.buildParent = ffi.new("uint32_t[?]", capacity)
@@ -410,6 +424,7 @@ function layout.new(capacity)
 	changed = true,
 	runs = {},
 	root = 0,
+	hoverCount = 0,
 	}, Screen)
 
 	fillRefs(screen)
@@ -1314,7 +1329,9 @@ end
 local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	local refs = screen.refs
 	local childIndices = screen.childIndices
-	local markIndex, markX, markY = screen.markIndex, screen.markX, screen.markY
+	local markIndex, markX, markY, markZ = screen.markIndex, screen.markX, screen.markY, screen.markZ
+	local hitElements, hitZs, hitOrders = screen.markHitElement, screen.markHitZ, screen.markHitOrder
+	local hitStyles = screen.markHitStyles
 
 	-- The walk is a stack of nodes rather than a call a level, for the same reason the solve is:
 	-- a call a node is a level the recorder unrolls, and a tree of an album is deeper than it
@@ -1323,20 +1340,25 @@ local function markNode(screen, index, x, y, parentX, parentY, pressed)
 	markIndex[1] = index
 	markX[1] = parentX
 	markY[1] = parentY
+	markZ[1] = 0
 
-	local marked = false
-
-	-- The set the pointer hovers, as numbers rather than a table of elements: what says the next
-	-- move is a move within the same boxes is a comparison of these, which costs nothing a frame.
-	local hoverCount, hoverSum, hoverTag = 0, 0, 0
+	-- Each box the pointer is inside is held until the walk has run: a box that takes the pointer
+	-- covers everything painted below it, and which box that is is only known once every box has
+	-- been seen. The order is the painter's -- a node and its children before its next sibling --
+	-- so a z and an order say what is painted over what.
+	local hits = 0
+	local order = 0
+	local blockZ, blockOrder = 0, 0
 
 	while top > 0 do
 		local nodeIndex = markIndex[top]
-		local givenX, givenY = markX[top], markY[top]
+		local givenX, givenY, givenZ = markX[top], markY[top], markZ[top]
 		top = top - 1
 
 		local node = refs[nodeIndex]
 		local absX, absY = givenX + node.x, givenY + node.y
+		local z = node.zIndex > givenZ and node.zIndex or givenZ
+		order = order + 1
 
 		local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
 
@@ -1352,30 +1374,64 @@ local function markNode(screen, index, x, y, parentX, parentY, pressed)
 					markIndex[top] = childIndices[first + at - 1]
 					markX[top] = absX
 					markY[top] = absY
+					markZ[top] = z
 				end
 			end
 
 			if node.visible ~= 0 and inside then
 				local element = pointers[node.element]
 
-				-- The styles an element keeps for the pointer are its own, and whether one of them
-				-- is used for the state it is in is what a second build would change.
-				if element.hoverStyle ~= 0 or (pressed and element.activeStyle ~= 0) then
-					marked = true
+				if bit.band(element.flags, BLOCKS) ~= 0
+				and (blockOrder == 0 or z > blockZ or (z == blockZ and order > blockOrder)) then
+					blockZ, blockOrder = z, order
 				end
 
-				wonderlandElement.hovering(element, true)
-
-				if pressed then
-					wonderlandElement.pressing(element, true)
-				end
-
-				hoverCount = hoverCount + 1
-				hoverSum = hoverSum + node.element
-				hoverTag = bit.bxor(hoverTag, node.element)
+				hits = hits + 1
+				hitElements[hits] = node.element
+				hitZs[hits] = z
+				hitOrders[hits] = order
+				hitStyles[hits] = bit.bor(element.hoverStyle ~= 0 and 1 or 0, pressed and element.activeStyle ~= 0 and 2 or 0)
 			end
 		end
 	end
+
+	-- The set the pointer hovers, as numbers rather than a table of elements: what says the next
+	-- move is a move within the same boxes is a comparison of these, which costs nothing a frame.
+	-- The elements themselves are kept in the order the painter reaches them, which is what a
+	-- frame marks the next one from without solving to find out what is under the pointer again.
+	local marked = false
+	local hoverCount, hoverSum, hoverTag = 0, 0, 0
+	local hovered = screen.pointerHovered
+
+	for at = 1, hits do
+		local z, atOrder = hitZs[at], hitOrders[at]
+
+		-- What is painted above a box that takes the pointer is still reached -- the box itself,
+		-- the panel it holds, anything over either -- and what is painted below it is not.
+		if blockOrder == 0 or not (z < blockZ or (z == blockZ and atOrder < blockOrder)) then
+			local handle = hitElements[at]
+			local element = pointers[handle]
+
+			-- The styles an element keeps for the pointer are its own, and whether one of them is
+			-- used for the state it is in is what a second build would change.
+			if bit.band(hitStyles[at], 3) ~= 0 then
+				marked = true
+			end
+
+			wonderlandElement.hovering(element, true)
+
+			if pressed then
+				wonderlandElement.pressing(element, true)
+			end
+
+			hoverCount = hoverCount + 1
+			hoverSum = hoverSum + handle
+			hoverTag = bit.bxor(hoverTag, handle)
+			hovered[hoverCount] = handle
+		end
+	end
+
+	screen.hoverCount = hoverCount
 
 	return marked, hoverCount * 0x100000000 + hoverSum, hoverTag
 end
@@ -1524,7 +1580,9 @@ function Screen:fromElement(element)
 	return self.root
 end
 
---- What is under the pointer, and whether it is drawn differently for it.
+--- What is under the pointer, and whether it is drawn differently for it. What it marked is left
+--- in `pointerHovered`, in the order the painter reaches it, which is what a frame marks the next
+--- one from: see `Layout:refreshView`.
 ---@param x number
 ---@param y number
 ---@param pressed boolean
@@ -1533,6 +1591,8 @@ end
 ---@return number hoverTag
 function Screen:markPointer(x, y, pressed)
 	if self.count == 0 then
+		self.hoverCount = 0
+
 		return false, 0, 0
 	end
 

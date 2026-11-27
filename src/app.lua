@@ -490,8 +490,13 @@ function app.run(self)
 
 					-- Back on screen with the frame it was left with: a frame of what is there now
 					-- is asked for once, as a screen presented rather than a window the manager
-					-- asked for -- nothing else may happen to it to ask for one.
+					-- asked for -- nothing else may happen to it to ask for one. What the app asked
+					-- to be called back for is due at once too: it was kept to the hidden tick, and
+					-- the loop is about to wait for a second of it. See `UI:resume`.
 					if not isHidden then
+						if self.uiPlugin then
+							self.uiPlugin:resume(window --[[@as wonderland.RenderWindow]])
+						end
 						self:present(window)
 					end
 				end

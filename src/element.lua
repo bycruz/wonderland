@@ -29,6 +29,7 @@ ffi.cdef [[
 		                             // field that is sized by it: see `element.GROWS`
 		uint32_t childFirst, childCount, nextSibling;  // the children, as a chain
 		uint32_t onclick, onmousemove, onmousedown, onmouseup, ondblclick, oninput, onsubmit, onchange;
+		uint32_t onpress, onpressend;      // what draws a press hears of it, before the click
 		uint32_t onscroll, oncontextmenu;  // the wheel and the bar of a box that scrolls, and the
 		                                   // button that is not the left one
 		uint32_t ondrop;                   // the files a window was given, over this box
@@ -87,6 +88,13 @@ element.RESIZE = 512
 -- A box that shows only what is inside it, without being a pane that can be scrolled.
 element.CLIPS = 1024
 
+--- A box that takes the pointer for itself: while the pointer is inside it, nothing painted below
+--- it is hovered, pressed, wheeled, dragged, dropped on or asked for a context menu. It is how an
+--- overlay covers what is under it -- a dimmed page that still answers the pointer through the
+--- dim is the bug this exists to stop -- and it says nothing about what the box looks like, so a
+--- transparent layer with this on it still covers everything beneath it.
+element.BLOCKS = 2048
+
 --- The edges a box can be resized by, which is the name an app uses said as the number the
 --- element keeps: which way the pointer moves is which way the box grows, so dragging the left
 --- edge to the left and the right edge to the right both make it wider.
@@ -120,6 +128,8 @@ element.EDGE_BOTTOM = 3
 ---@field onmousemove number
 ---@field onmousedown number
 ---@field onmouseup number
+---@field onpress number # What a left press tells the box, before the click: see `:onPress`
+---@field onpressend number # And what the end of that press tells it: see `:onPressEnd`
 ---@field ondblclick number
 ---@field oninput number
 ---@field onchange number
@@ -153,8 +163,11 @@ element.EDGE_BOTTOM = 3
 ---@field resize fun(self: wonderland.Element, opts: wonderland.ResizeOpts<any>): wonderland.Element
 ---@field thumb fun(self: wonderland.Element): wonderland.Element
 ---@field scroll fun(self: wonderland.Element, offset: number): wonderland.Element
+---@field blockPointer fun(self: wonderland.Element): wonderland.Element
 ---@field onMouseMove fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onClick fun(self: wonderland.Element, message: any): wonderland.Element
+---@field onPress fun(self: wonderland.Element, cons: wonderland.PressHandler): wonderland.Element
+---@field onPressEnd fun(self: wonderland.Element, cons: fun()): wonderland.Element
 ---@field onMouseDown fun(self: wonderland.Element, cons: fun(x: number, y: number, elementWidth: number, elementHeight: number): any): wonderland.Element
 ---@field onMouseUp fun(self: wonderland.Element, message: any): wonderland.Element
 ---@field onDoubleClick fun(self: wonderland.Element, message: any): wonderland.Element
@@ -178,6 +191,13 @@ element.Element = Element
 --- What a box is asked when files are dropped on it: the paths, and where in the box they landed.
 --- It answers with the message the app is told.
 ---@alias wonderland.DropHandler fun(paths: string[], x: number, y: number): any?
+
+--- What a box that draws its own press is told when the left button goes down on it: where in the
+--- box the press landed, how big the box is, and whether a finger made it -- a touch screen reads
+--- a finger as the left button, so the flag is what tells one from a mouse. It is told before the
+--- click, so feedback starts even for the press that answers by changing what is on the screen, and
+--- what it answers is not a message: see `:onPress`.
+---@alias wonderland.PressHandler fun(x: number, y: number, width: number, height: number, touch: boolean): any?
 
 -- The calls live in their own table rather than on the element: a table is what an ffi
 -- metatype is given for `__index`, and a field of a struct is read before it is asked
@@ -574,6 +594,41 @@ function methods:onClick(message)
 	return self
 end
 
+--- What the box draws in answer to a press -- a ripple, a flash, the start of a drag of its own.
+--- It is told where the press landed, how big the box is, and whether a finger made it, and it is
+--- told before the click message is sent: a press that opens a page still shows its feedback on
+--- the frame that follows.
+---
+--- The handler answers nothing. A click answers with the message the app is told, and this is the
+--- feedback that comes before it rather than a second click: a box with a click of its own takes
+--- both, and one with only this still answers the pointer where a style says it does.
+---
+---   div():onPress(function(x, y, width, height, touch)
+---       ripple.press(x, y, width, height, touch)
+---   end)
+---@param cons wonderland.PressHandler
+---@return wonderland.Element
+---@param self wonderland.Element
+function methods:onPress(cons)
+	check(self)
+	self.onpress = pushCallback(cons)
+
+	return self
+end
+
+--- What the box is told when that press ends: it is over, and whatever it drew may stop. It is
+--- asked where the button was let go of, so a press dragged off the box ends where the box is no
+--- longer under it.
+---@param cons fun()
+---@return wonderland.Element
+---@param self wonderland.Element
+function methods:onPressEnd(cons)
+	check(self)
+	self.onpressend = pushCallback(cons)
+
+	return self
+end
+
 ---@generic T
 ---@param cons fun(x: number, y: number, elementWidth: number, elementHeight: number): T
 ---@return wonderland.Element
@@ -717,6 +772,22 @@ end
 function methods:clip()
 	check(self)
 	self.flags = bit.bor(self.flags, element.CLIPS)
+
+	return self
+end
+
+--- Takes the pointer for itself: while it is under the pointer, nothing painted below it is hovered,
+--- pressed, wheeled, dragged, dropped on or asked for a context menu. Everything it holds is still
+--- above it in the paint order, so a layer that covers the window and a panel inside it behave the
+--- way a modal screen does: the panel works, and the page under the layer does not.
+---
+--- What counts as below is the same order the painter uses -- the highest z first, and among boxes
+--- at one z the one painted later -- so a box above the layer stays as live as it was.
+---@return wonderland.Element
+---@param self wonderland.Element
+function methods:blockPointer()
+	check(self)
+	self.flags = bit.bor(self.flags, element.BLOCKS)
 
 	return self
 end

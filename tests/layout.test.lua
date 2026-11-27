@@ -59,6 +59,35 @@ test.it("a style that adds a background paints", function()
 	test.equal(node.bgG, 0.0)
 end)
 
+-- A box that takes the pointer covers what is painted under it: the page below an overlay's dim
+-- layer is not hovered, or every row under a menu would light up as the pointer crossed it.
+test.it("a box that takes the pointer covers what is painted below it", function()
+	local under = div():style(sty():fill()):hover(sty():bg("#ff0000"))
+	local over = div():style(sty():fill():offset(0, 0):z(10)):blockPointer()
+	local root = div():style(sty():fill():column()):children({ under, over })
+	local screen = solve(root, 400, 300)
+
+	screen:markPointer(200, 150, false)
+
+	test.equal(under.flags & wonderlandElement.HOVERED, 0, "the box below is not hovered")
+	test.truthy(over.flags & wonderlandElement.HOVERED ~= 0, "the box that takes the pointer is")
+end)
+
+-- What a box that takes the pointer holds is still reached: a panel inside a modal layer is what
+-- the pointer is on, and the page under the layer is not.
+test.it("what a box that takes the pointer holds is still hovered", function()
+	local panel = div():style(sty():size(100, 100):offset(20, 20)):hover(sty():bg("#00ff00"))
+	local under = div():style(sty():fill()):hover(sty():bg("#ff0000"))
+	local over = div():style(sty():fill():offset(0, 0):z(10)):blockPointer():children({ panel })
+	local root = div():style(sty():fill():column()):children({ under, over })
+	local screen = solve(root, 400, 300)
+
+	screen:markPointer(50, 50, false)
+
+	test.truthy(panel.flags & wonderlandElement.HOVERED ~= 0, "the panel is hovered")
+	test.equal(under.flags & wonderlandElement.HOVERED, 0, "and the page under the layer is not")
+end)
+
 -- Brightness is how a hover or active style usually says what it wants: the colours an element
 -- already has, lit differently, rather than a second set of them to keep in step.
 test.it("a bright style lights the colours the element already has", function()
@@ -525,4 +554,34 @@ test.it("a text property is inherited and a background is not", function()
 	test.equal(outer.fgR, 255)
 	test.equal(inner.bgB, 255, "and a background belongs to the box that has it")
 	test.equal(outer.paint, 0, "so the one that has none paints nothing")
+end)
+
+-- What a pointer walk marked is left in the order the painter reaches it, which is what a frame
+-- marks the next build from: the boxes the pointer is over, from the one at the root inward.
+test.it("a pointer walk leaves the boxes it marked in paint order", function()
+	local label = div():style(sty():size(20, 10)):hover(sty():bg("#00ff00"))
+	local row = div():style(sty():size(100, 40):column()):hover(sty():bg("#ff0000")):children({ label })
+	local root = div():style(sty():fill()):hover(sty():bg("#0000ff")):children({ row })
+	local screen = solve(root, 400, 300)
+
+	local marked = screen:markPointer(10, 10, false)
+
+	test.truthy(marked, "the styles stand in for the boxes the pointer is over")
+	test.equal(screen.hoverCount, 3, "the root, the row and the label in it")
+	test.equal(screen.pointerHovered[1], root.index, "the root first")
+	test.equal(screen.pointerHovered[2], row.index, "then the row")
+	test.equal(screen.pointerHovered[3], label.index, "then the label inside it")
+end)
+
+-- A box that takes the pointer is still left out of what is marked below it, and the boxes above
+-- it stay: what the frame marks the next build from is the set the styled boxes came out as.
+test.it("a pointer walk leaves out what a box that takes the pointer covers", function()
+	local under = div():style(sty():fill()):hover(sty():bg("#ff0000"))
+	local over = div():style(sty():fill():offset(0, 0):z(10)):blockPointer()
+	local screen = solve(div():style(sty():fill():column()):children({ under, over }), 400, 300)
+
+	screen:markPointer(200, 150, false)
+
+	test.equal(screen.hoverCount, 1, "only the box that takes the pointer is under it")
+	test.equal(screen.pointerHovered[1], over.index, "and it is the one that covers the rest")
 end)

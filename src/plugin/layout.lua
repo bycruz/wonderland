@@ -15,8 +15,20 @@ local TEXT_INPUT = wonderlandElement.TEXT_INPUT
 local MULTILINE = wonderlandElement.MULTILINE
 local SLIDE = wonderlandElement.SLIDE
 local RESIZE = wonderlandElement.RESIZE
+local BLOCKS = wonderlandElement.BLOCKS
 local EDGE_RIGHT, EDGE_LEFT, EDGE_TOP, EDGE_BOTTOM = wonderlandElement.EDGE_RIGHT, wonderlandElement.EDGE_LEFT,
 wonderlandElement.EDGE_TOP, wonderlandElement.EDGE_BOTTOM
+
+--- Whether a box at a place in the paint order is under the box that takes the pointer: a lower z,
+--- or one z and painted earlier. What is painted after is over it and still reached.
+---@param z number
+---@param order number
+---@param blockZ number
+---@param blockOrder number
+---@return boolean
+local function paintedBelow(z, order, blockZ, blockOrder)
+	return z < blockZ or (z == blockZ and order < blockOrder)
+end
 
 --- Where a node ended up, and which element it is.
 ---@class wonderland.plugin.Layout.Hit
@@ -26,6 +38,8 @@ wonderlandElement.EDGE_TOP, wonderlandElement.EDGE_BOTTOM
 ---@field depth number # How deep in the tree it is, which is what says which of two is innermost
 ---@field absX number
 ---@field absY number
+---@field z number? # Where it is in the paint order, which is what a blocking box compares against
+---@field order number?
 
 -- The nodes are an array, so a walk is an index and an offset rather than a tree of
 -- tables. Children are reached through the runs of child indices the layout keeps.
@@ -60,6 +74,14 @@ local function findElementAtPosition(screen, index, x, y, parentX, parentY, acce
 
 	state.order = state.order + 1
 	local order = state.order
+
+	-- The topmost box that takes the pointer: everything painted below it is out of reach, so the
+	-- walk records it and the answer is measured against it once the whole tree has been seen.
+	if node.visible ~= 0 and x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
+	and bit.band(pointers[node.element].flags, BLOCKS) ~= 0
+	and (state.blockZ == nil or z > state.blockZ or (z == state.blockZ and order > state.blockOrder)) then
+		state.blockZ, state.blockOrder = z, order
+	end
 
 	-- The same rank the painter walks: children after their parent, later siblings after earlier
 	-- ones. What is on top is the highest z, and among boxes at one z, the one painted last. A
@@ -112,30 +134,132 @@ end
 ---@param acceptFn? fun(element: wonderland.Element, absX: number, absY: number, node: wonderland.Node): boolean
 ---@return wonderland.plugin.Layout.TopHit?
 local function findTopmostAt(screen, root, x, y, acceptFn)
-	return findElementAtPosition(screen, root, x, y, 0, 0, acceptFn, 0, { order = 0})
+	local state = { order = 0 }
+	---@type wonderland.plugin.Layout.TopHit?
+	local found = findElementAtPosition(screen, root, x, y, 0, 0, acceptFn, 0, state)
+
+	-- A box that takes the pointer covers what is painted below it, so a box down there is not the
+	-- one a press, a context menu or a drop lands on: the layer is the last thing it reaches.
+	if found ~= nil and state.blockZ ~= nil
+	and paintedBelow(found.z or 0, found.order or 0, state.blockZ, state.blockOrder) then
+		return nil
+	end
+
+	return found
 end
 
+-- The walk a pointer move makes: one slot a box it is walking, and one a box the pointer is
+-- inside. They are kept beside the module because a move is an event of the pointer, and an array
+-- made for one is garbage the frame after has to collect -- a row of a list is found by a walk
+-- every time the pointer crosses it.
+local hoverStackIndex = ffi.new("uint32_t[?]", 256)
+local hoverStackX = ffi.new("double[?]", 256)
+local hoverStackY = ffi.new("double[?]", 256)
+local hoverStackZ = ffi.new("int32_t[?]", 256)
+local hoverHitIndex = ffi.new("uint32_t[?]", 256)
+local hoverHitX = ffi.new("double[?]", 256)
+local hoverHitY = ffi.new("double[?]", 256)
+local hoverHitZ = ffi.new("int32_t[?]", 256)
+local hoverHitOrder = ffi.new("uint32_t[?]", 256)
+local hoverCapacity = 256
+
+--- The boxes a point is inside, as numbers rather than a table of hits: the walk leaves them in
+--- `hoverHit*`, in the order the painter reaches them, and what paints over what -- and so what a
+--- box that takes the pointer covers -- is worked out by the caller from the z and the order.
+---
+--- A box that scrolls shows only what is inside it, so a point outside one is inside nothing it
+--- holds. Children are reached even where their box is not, since a child positioned relative to
+--- its parent may sit outside it and still be drawn.
+---
+--- The walk is a stack of nodes rather than a call a level, for the same reason the solve is: a
+--- call a node is a level the recorder unrolls, and a tree of an album is deeper than it will.
 ---@param screen wonderland.Layout.Screen
----@param index number
----@param results table<wonderland.Element, wonderland.plugin.Layout.Hit>
-local function findElementsAtPosition(screen, index, x, y, parentX, parentY, results)
-	local node = screen:node(index)
-	local absX, absY = parentX + node.x, parentY + node.y
+---@param root number
+---@param x number
+---@param y number
+---@return number hits
+---@return number blockZ # The z of the box that takes the pointer, nought with none
+---@return number blockOrder
+local function collectHover(screen, root, x, y)
+	-- One slot a box the walk is in, and one a box it found: a tree is no more boxes than the
+	-- screen has, so a bigger one grows both arrays.
+	local needed = screen.count + 1
 
-	if x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height then
-		local element = pointers[node.element]
+	if needed > hoverCapacity then
+		local capacity = hoverCapacity
 
-		results[element] = { element = element, node = node, absX = absX, absY = absY}
-	end
-
-	if node.scrolls ~= 0 and (x < absX or x > absX + node.width or y < absY or y > absY + node.height) then
-		return
-	end
-
-	-- Always recurse: relative-positioned children may extend outside parent bounds
-	for at = 0, node.childCount - 1 do
-			findElementsAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, results)
+		while capacity < needed do
+			capacity = capacity * 2
 		end
+
+		hoverStackIndex = ffi.new("uint32_t[?]", capacity)
+		hoverStackX = ffi.new("double[?]", capacity)
+		hoverStackY = ffi.new("double[?]", capacity)
+		hoverStackZ = ffi.new("int32_t[?]", capacity)
+		hoverHitIndex = ffi.new("uint32_t[?]", capacity)
+		hoverHitX = ffi.new("double[?]", capacity)
+		hoverHitY = ffi.new("double[?]", capacity)
+		hoverHitZ = ffi.new("int32_t[?]", capacity)
+		hoverHitOrder = ffi.new("uint32_t[?]", capacity)
+		hoverCapacity = capacity
+	end
+
+	local refs, childIndices = screen.refs, screen.childIndices
+	local stackIndex, stackX = hoverStackIndex, hoverStackX
+	local stackY, stackZ = hoverStackY, hoverStackZ
+	local hitIndex, hitX, hitY = hoverHitIndex, hoverHitX, hoverHitY
+	local hitZ, hitOrder = hoverHitZ, hoverHitOrder
+
+	local top = 1
+	stackIndex[1] = root
+	stackX[1], stackY[1], stackZ[1] = 0, 0, 0
+
+	local hits, order = 0, 0
+	local blockZ, blockOrder = 0, 0
+
+	while top > 0 do
+		local index = stackIndex[top]
+		local givenX, givenY, givenZ = stackX[top], stackY[top], stackZ[top]
+		top = top - 1
+
+		local node = refs[index]
+		local absX, absY = givenX + node.x, givenY + node.y
+		local z = node.zIndex > givenZ and node.zIndex or givenZ
+		order = order + 1
+
+		local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
+
+		if node.scrolls == 0 or inside then
+			local count = node.childCount
+
+			if count > 0 then
+				local first = node.firstChild
+
+				for at = count - 1, 0, -1 do
+					top = top + 1
+					stackIndex[top] = childIndices[first + at - 1]
+					stackX[top] = absX
+					stackY[top] = absY
+					stackZ[top] = z
+				end
+			end
+
+			if inside then
+				hits = hits + 1
+				hitIndex[hits] = index
+				hitX[hits], hitY[hits] = absX, absY
+				hitZ[hits], hitOrder[hits] = z, order
+
+				-- The topmost box that takes the pointer, which what it covers is measured against.
+				if node.visible ~= 0 and bit.band(pointers[node.element].flags, BLOCKS) ~= 0
+				and (blockOrder == 0 or z > blockZ or (z == blockZ and order > blockOrder)) then
+					blockZ, blockOrder = z, order
+				end
+			end
+		end
+	end
+
+	return hits, blockZ, blockOrder
 end
 
 --- The chain of boxes a point is inside, from the one at the root to the innermost one that
@@ -149,30 +273,78 @@ end
 ---@param parentX number
 ---@param parentY number
 ---@param depth number
+---@param parentZ number?
 ---@param into wonderland.plugin.Layout.Hit[]
-local function chainAtPosition(screen, index, x, y, parentX, parentY, depth, into)
+---@param state { order: number, blockZ: number?, blockOrder: number? }
+local function chainAtPosition(screen, index, x, y, parentX, parentY, depth, parentZ, into, state)
 	local node = screen:node(index)
 	local absX, absY = parentX + node.x, parentY + node.y
+	local z = math.max(node.zIndex, parentZ or 0)
 	local inside = x >= absX and x <= absX + node.width and y >= absY and y <= absY + node.height
-
-	if inside then
-		into[#into + 1] = {
-		element = pointers[node.element],
-		node = node,
-		index = index,
-		depth = depth,
-		absX = absX,
-		absY = absY,
-		}
-	end
 
 	if node.scrolls ~= 0 and not inside then
 		return
 	end
 
-	for at = 0, node.childCount - 1 do
-			chainAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, depth + 1, into)
+	state.order = state.order + 1
+	local order = state.order
+
+	if inside then
+		local element = pointers[node.element]
+
+		into[#into + 1] = {
+		element = element,
+		node = node,
+		index = index,
+		depth = depth,
+		absX = absX,
+		absY = absY,
+		z = z,
+		order = order,
+		}
+
+		if node.visible ~= 0 and bit.band(element.flags, BLOCKS) ~= 0
+		and (state.blockZ == nil or z > state.blockZ or (z == state.blockZ and order > state.blockOrder)) then
+			state.blockZ, state.blockOrder = z, order
 		end
+	end
+
+	for at = 0, node.childCount - 1 do
+			chainAtPosition(screen, screen.childIndices[node.firstChild + at - 1], x, y, absX, absY, depth + 1, z, into,
+			state)
+		end
+end
+
+--- The chain of boxes a point is inside, less the ones a box that takes the pointer covers. It is
+--- built as one walk and cut afterwards, since the topmost box over the point may be met after the
+--- boxes it covers -- a page is painted before the layer that dims it.
+---@param screen wonderland.Layout.Screen
+---@param root number
+---@param x number
+---@param y number
+---@return wonderland.plugin.Layout.Hit[]
+local function pointerChain(screen, root, x, y)
+	local chain = {}
+	local state = { order = 0 }
+
+	chainAtPosition(screen, root, x, y, 0, 0, 0, 0, chain, state)
+
+	local blockZ, blockOrder = state.blockZ, state.blockOrder
+	if blockZ ~= nil then
+		local kept = 1
+		for at = 1, #chain do
+			local hit = chain[at]
+			if not paintedBelow(hit.z, hit.order, blockZ, blockOrder) then
+				chain[kept] = hit
+				kept = kept + 1
+			end
+		end
+		for at = #chain, kept, -1 do
+			chain[at] = nil
+		end
+	end
+
+	return chain
 end
 
 --- A scroll bar being dragged: the box it belongs to, how far into the thumb it was taken hold
@@ -213,6 +385,11 @@ end
 ---@field caretAt number? # And when it last came or went
 ---@field hoverKey number? # The hovered set the frame the gpu has was built with: see `Screen:markPointer`
 ---@field hoverTag number? # And the other half of it, so two sets that agree on one still differ
+---@field hoverElements table<number, number>? # And the elements themselves, by the slot each was in
+---@field hoverCount number? # How many elements it holds, and whether the button was held with them
+---@field hoverPressed boolean?
+---@field hoverX number? # Where the pointer was when the set was found, which is what says a frame
+---@field hoverY number? # has to ask again what is under it at all: see `Layout:refreshView`
 ---@field hoverChanged boolean? # Whether the last pointer event changed what is hovered, which owes a frame
 ---@field pointerDraw boolean? # Whether an element under the pointer draws there, which is a frame without a rebuild
 ---@field frameCaret boolean? # Whether the frame the gpu was last given drew a caret
@@ -311,6 +488,8 @@ end
 ---@field contexts table<wonderland.RenderWindow, wonderland.plugin.Layout.Context>
 ---@field refreshView fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow)
 ---@field getCaret fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): wonderland.Element?, number?, number?, number?, number?
+---@field getInput fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): string?, number?
+---@field edit fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow, from: number, to: number, text: string, cursor: number?): any?
 ---@field getFocusedId fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): string?
 ---@field setFocus fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow, id: string?)
 ---@field getCursorPos fun(self: wonderland.plugin.Layout, window: wonderland.RenderWindow): number
@@ -378,6 +557,37 @@ function Layout:setFocus(window, id)
 	ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 end
 
+--- Keeps the elements a pointer walk found as the set the next frame marks its tree from, growing
+--- the array when a screen brings more of them than the last one did.
+---
+--- A frame builds the same tree again and hands every element the slot it had in the frame before,
+--- so the slot a box under the pointer was in is the slot it is in: what the last solve marked is
+--- what the next build marks, until a solve says the pointer is over something else.
+---@param ctx wonderland.plugin.Layout.Context
+---@param elements ffi.cdata* # The elements a walk marked, in the order the painter reaches them
+---@param count number
+local function keepHover(ctx, elements, count)
+	local kept = ctx.hoverElements
+
+	if kept == nil then
+		kept = {}
+		ctx.hoverElements = kept
+	end
+
+	-- Slots left from a bigger set are cleared rather than left as the numbers of an earlier
+	-- screen's boxes: what a frame reads is the first `count`, and a kept slot past it is a
+	-- slot this frame does not have.
+	for at = 1, count do
+		kept[at] = elements[at]
+	end
+
+	for at = count + 1, ctx.hoverCount or 0 do
+		kept[at] = nil
+	end
+
+	ctx.hoverCount = count
+end
+
 ---@param window wonderland.RenderWindow
 ---@param self wonderland.plugin.Layout
 function Layout:refreshView(window)
@@ -389,48 +599,150 @@ function Layout:refreshView(window)
 		return
 	end
 
+	local screen = assert(ctx.screen)
+	local pointer = ctx.pointer
+	local width, height = self:size(ctx.window)
+
+	-- What the pointer is over is worked out from the boxes a solve produced, and a style kept for
+	-- the pointer may lay an element out differently -- so a frame that uses one has to have it in
+	-- the tree before it is built. The frame on screen already answers what the pointer is over
+	-- where the pointer has not moved since, and the solve of this frame is what confirms it:
+	-- a frame where the pointer is still and nothing draws differently is solved once, which is
+	-- most frames and every frame of a benchmark.
+	--
+	-- A pointer that has moved is still over what it was over in the boxes the frame on screen was
+	-- solved to, until this frame's solve says otherwise: that set is what the build starts from,
+	-- so a pointer moving onto another row is not a reason to solve the tree twice.
+	local moved = pointer ~= nil
+	and (ctx.hoverCount == nil or pointer.x ~= ctx.hoverX or pointer.y ~= ctx.hoverY
+		or pointer.pressed ~= ctx.hoverPressed)
+
+	if moved then
+		if screen.root ~= 0 and screen.count > 0 then
+			screen:markPointer(pointer.x, pointer.y, pointer.pressed)
+			keepHover(ctx, screen.pointerHovered, screen.hoverCount)
+		else
+			ctx.hoverCount = 0
+		end
+	end
+
 	-- The tree the last repaint built is let go of before this one is built, which is what
 	-- lets a repaint build a screen out of the memory it already has. It is measured, then
 	-- laid out into the screen's array, which is reused from one repaint to the next.
 	wonderlandElement.beginFrame()
-	local screen = assert(ctx.screen)
 
 	ctx.ui = self.textPlugin:measure(self.view(window))
+
+	-- The element slots are handed out in the same order every frame, so the slot a box under the
+	-- pointer was in last frame holds it this one: the marks go on before the build, and a style
+	-- that lays the element out differently is solved for once. A slot this frame's tree did not
+	-- reach is not a box in it, whatever it holds.
+	local hoverCount = pointer ~= nil and ctx.hoverCount or 0
+
+	-- Whether the guess puts a style on the tree, which is what says a frame built with it is not
+	-- a frame built with the base styles: a box the pointer was over that has none is marked, but
+	-- the build it makes is the one it would have made without it.
+	local guessedMarked = false
+
+	if hoverCount > 0 then
+		local elements = ctx.hoverElements
+		local available = wonderlandElement.count()
+
+		for at = 1, hoverCount do
+			local index = elements[at]
+
+			if index <= available then
+				local element = pointers[index]
+
+				wonderlandElement.hovering(element, true)
+
+				if pointer.pressed then
+					wonderlandElement.pressing(element, true)
+				end
+
+				if element.hoverStyle ~= 0 or (pointer.pressed and element.activeStyle ~= 0) then
+					guessedMarked = true
+				end
+			end
+		end
+	end
+
 	ctx.root = screen:fromElement(ctx.ui)
 
 	-- What the app says the field holds is the truth again: what has been typed since the last frame
 	-- is a value the app has not been told about yet, and by this frame it has.
 	ctx.typed = nil
 
-	-- What the pointer is over is worked out from the boxes a solve produced, and a style kept for
-	-- the pointer may lay an element out differently -- so a screen where one of them is used is
-	-- built and solved again with it. Only the last solve is compared against the frame the gpu
-	-- has, which is what says whether a frame is needed at all: a first solve counted as a frame
-	-- would make every frame look like a change of the last one.
-	--
-	-- Both of those are only worth it when there is a pointer to have a state about: a screen
-	-- nobody is pointing at solves once, which is most frames and every frame of a benchmark.
-	local pointer = ctx.pointer
-
-	if pointer then
-		local width, height = self:size(ctx.window)
-
-		screen:solve(width, height, true)
-
-		local marked, hoverKey, hoverTag = screen:markPointer(pointer.x, pointer.y, pointer.pressed)
-
-		ctx.hoverKey, ctx.hoverTag = hoverKey, hoverTag
-
-		if marked then
-			ctx.root = screen:fromElement(ctx.ui)
-		end
-	else
-		ctx.hoverKey, ctx.hoverTag = 0, 0
-	end
-
-	local width, height = self:size(ctx.window)
-
 	screen:solve(width, height)
+
+	if pointer == nil then
+		ctx.hoverKey, ctx.hoverTag = 0, 0
+		ctx.hoverCount, ctx.hoverPressed = 0, false
+		ctx.hoverX, ctx.hoverY = nil, nil
+	elseif not moved and not screen.changed then
+		-- The frame is the one the gpu has and the pointer is where it was: what it is over is
+		-- still what the build was given, and the marks it put on are the ones that stand.
+	else
+		-- What the solve says the pointer is over, which is the set the frame is drawn with.
+		local marked, hoverKey, hoverTag = screen:markPointer(pointer.x, pointer.y, pointer.pressed)
+		local count = screen.hoverCount
+		local same = count == (ctx.hoverCount or 0)
+
+		if same then
+			-- The sets are compared by the slots themselves rather than by the numbers: two sets
+			-- that agree on the count still differ in which box is where, and a slot that changed
+			-- hands the hover style to another element. Both are in the painter's order, so a set
+			-- the same is one that matches element for element.
+			local guessed, found = ctx.hoverElements, screen.pointerHovered
+
+			for at = 1, count do
+				if guessed[at] ~= found[at] then
+					same = false
+					break
+				end
+			end
+		end
+
+		if same then
+			ctx.hoverKey, ctx.hoverTag = hoverKey, hoverTag
+		else
+			-- The frame was built with the boxes the pointer was over before this solve, and the
+			-- solve says it is over others: the styles that stood in for them are let go of, and
+			-- the frame is built again with what the solve found -- where either set put a style
+			-- on a box, since a mark with no style behind it is a frame that was already right.
+			local guessed = ctx.hoverElements
+			local available = wonderlandElement.count()
+			local guessedCount = ctx.hoverCount or 0
+
+			for at = 1, guessedCount do
+				local index = guessed[at]
+
+				if index <= available then
+					local element = pointers[index]
+
+					wonderlandElement.hovering(element, false)
+					wonderlandElement.pressing(element, false)
+				end
+			end
+
+			-- Marked again rather than read off the walk: an element both sets held has just been
+			-- let go of with the rest, and this is what puts it back.
+			marked, hoverKey, hoverTag = screen:markPointer(pointer.x, pointer.y, pointer.pressed)
+			count = screen.hoverCount
+
+			if guessedMarked or marked then
+				ctx.root = screen:fromElement(ctx.ui)
+				screen:solve(width, height)
+			end
+
+			keepHover(ctx, screen.pointerHovered, count)
+
+			ctx.hoverKey, ctx.hoverTag = hoverKey, hoverTag
+		end
+
+		ctx.hoverPressed = pointer.pressed
+		ctx.hoverX, ctx.hoverY = pointer.x, pointer.y
+	end
 
 	-- A line too wide for the room it has is cut to that room, which is a question only the solve
 	-- can answer: how much room a box has is what the layout worked out, and the line it holds was
@@ -611,6 +923,14 @@ local function hasMouseUp(e)
 	return e.onmouseup ~= 0
 end
 
+--- Whether a box draws its own press and wants to hear where the button was let go of. It is a
+--- separate question from `hasMouseUp`: one answers with a message and the other is feedback, and
+--- a box may have either without the other.
+---@param e wonderland.Element
+local function hasPressEnd(e)
+	return e.onpressend ~= 0
+end
+
 ---@param e wonderland.Element
 local function hasDrop(e)
 	return e.ondrop ~= 0
@@ -624,7 +944,22 @@ end
 ---@param e wonderland.Element
 local function hasMouseDownOrClick(e)
 	return bit.band(e.flags, TEXT_INPUT) ~= 0 or bit.band(e.flags, SLIDE) ~= 0
-	or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0
+	or e.onmousedown ~= 0 or e.onclick ~= 0 or e.ondblclick ~= 0 or e.onpress ~= 0
+end
+
+-- How long a finger rests on a box that drags before moving it is the box's gesture rather than
+-- the list under it being scrolled: the hold an app's own gesture times itself against, handed to
+-- a backend that classifies touches so the two agree on the moment. It is a phone's long press, a
+-- little shorter, so a row comes up under the hand before the system would call it a menu.
+local TOUCH_HOLD = 0.35
+
+--- Whether a box takes a touch for itself. What answers both the press and the moves after it is a
+--- box that is dragged -- a list that swipes its rows away, a row lifted to another place -- and a
+--- box with only a click is not: a track row, a button, a menu item keep the platform's touch, so
+--- a long press on one is still its menu.
+---@param e wonderland.Element
+local function hasTouchDrag(e)
+	return e.onmousedown ~= 0 and e.onmousemove ~= 0
 end
 
 --- Whether a point is on the edge of a box that resizes: within the grab of that edge, inside the
@@ -792,10 +1127,7 @@ end
 ---@param x number
 ---@param y number
 local function wheelTarget(ctx, x, y)
-	---@type wonderland.plugin.Layout.Hit[]
-	local chain = {}
-
-	chainAtPosition(assert(ctx.screen), assert(ctx.root), x, y, 0, 0, 0, chain)
+	local chain = pointerChain(assert(ctx.screen), assert(ctx.root), x, y)
 
 	local found = nil
 
@@ -1249,6 +1581,77 @@ function Layout:getCaret(window)
 	return element, line, cursor - (start - 1), math.min(anchor, at), math.max(anchor, at)
 end
 
+--- The value of the field that has the keyboard and where its caret is, as a byte of that value.
+--- It is what another editor has to know to type into a field it does not draw itself: an
+--- on-screen keyboard with an edit box of its own sends what it typed through `edit`, and reads
+--- this to know what it is typing into. Nothing is returned where no field has the keyboard.
+---@param window wonderland.RenderWindow
+---@return string? value
+---@return number? cursor # The byte the caret comes before, from nought
+---@param self wonderland.plugin.Layout
+function Layout:getInput(window)
+	local ctx = self.contexts[window]
+
+	if not ctx or not ctx.focusedName or ctx.ui == nil then
+		return nil, nil
+	end
+
+	local element = findElementById(assert(ctx.ui), ctx.focusedName)
+
+	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
+		return nil, nil
+	end
+
+	-- The value as the keys before this frame have left it, as everywhere else a key is handled.
+	local value = ctx.typed or wonderlandElement.inputOf(element)
+	local cursor = math.min(math.max(caretOf(ctx, element), 0), #value)
+
+	return value, cursor
+end
+
+--- Apply an edit another input source made to the field that has the keyboard: `from` and `to`
+--- are byte offsets into the value `getInput` reports, `text` is what replaces them, and `cursor`
+--- is the byte the caret is left before. An on-screen keyboard with an edit box of its own sends
+--- what it typed through here, and hears the field the way a key hears it: the field's `oninput`
+--- is called with the value the edit left, and what it answers is returned as a message.
+---@param window wonderland.RenderWindow
+---@param from number
+---@param to number
+---@param text string
+---@param cursor number? # Where the caret goes afterwards; the end of the inserted text by default
+---@return any? message
+---@param self wonderland.plugin.Layout
+function Layout:edit(window, from, to, text, cursor)
+	local ctx = self.contexts[window]
+
+	if not ctx or not ctx.focusedName or ctx.ui == nil then
+		return nil
+	end
+
+	local element = findElementById(assert(ctx.ui), ctx.focusedName)
+
+	if element == nil or bit.band(element.flags, TEXT_INPUT) == 0 then
+		return nil
+	end
+
+	local value = ctx.typed or wonderlandElement.inputOf(element)
+	local limit = #value
+
+	from = math.min(math.max(from, 0), limit)
+	to = math.min(math.max(to, from), limit)
+
+	local edited = value:sub(1, from) .. text .. value:sub(to + 1)
+
+	ctx.typed = edited
+	ctx.cursorPos = math.min(math.max(cursor or (from + #text), 0), #edited)
+	ctx.anchorPos = nil
+	ctx.caretAtEnd = nil
+
+	local handler = callbacks[element.oninput]
+
+	return handler and handler(edited) or { type = "_inputRefresh"}
+end
+
 --- A press on a scroll bar, as the message it comes to: the bar is the box's own, so what it does
 --- is scroll that box. Taking hold of the thumb drags it; pressing the track beside it takes the
 --- thumb to the pointer, which is what a track is for.
@@ -1258,9 +1661,7 @@ end
 ---@return any? message
 ---@param self wonderland.plugin.Layout
 function Layout:barPress(ctx, x, y)
-	local chain = {}
-
-	chainAtPosition(assert(ctx.screen), assert(ctx.root), x, y, 0, 0, 0, chain)
+	local chain = pointerChain(assert(ctx.screen), assert(ctx.root), x, y)
 
 	local screen = assert(ctx.screen)
 
@@ -1781,6 +2182,23 @@ function Layout:event(event)
 			-- away comes back as a release that nothing is repeating.
 			ctx.repeatKey, ctx.repeatMods, ctx.repeatAt, ctx.repeatTyped = nil, nil, nil, nil
 		end
+	elseif event.name == "touchStart" then
+		-- A touch that goes down on a box that drags is that box's, where the backend can be told:
+		-- the press then goes down with the finger, so a hold is that press staying down rather
+		-- than the right button's menu, and the moves after the hold go to the box rather than
+		-- scrolling the list under it. What does not claim keeps the platform's touch exactly as it
+		-- was. See `captureTouch`, which is what a backend that reads touches offers.
+		local ctx = self.contexts[event.window]
+		local window = event.window
+		local capture = window ~= nil and window.captureTouch or nil
+
+		if ctx ~= nil and capture ~= nil then
+			local hit = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y, hasTouchDrag)
+
+			if hit ~= nil then
+				(capture --[[@as fun(self: any, hold: number?, id: number?): boolean?]])(window, TOUCH_HOLD, event.id)
+			end
+		end
 	elseif event.name == "mouseLeave" then
 		-- The pointer is not in the window any more, so nothing is under it. A touch has no
 		-- hover: once the finger that stood in for a pointer is off the glass, the place it last
@@ -1834,67 +2252,90 @@ function Layout:event(event)
 			return nil
 		end
 
-		---@type table<wonderland.Element, wonderland.plugin.Layout.Hit>
-		local hoveredElements = {}
-		findElementsAtPosition(assert(ctx.screen), assert(ctx.root), event.x, event.y, 0, 0, hoveredElements)
+		-- What the pointer is over, by one numeric walk of the solved tree: the boxes it is inside,
+		-- then the answers the event needs from them in the painter's order. A box that takes the
+		-- pointer covers what is painted below it -- a page under a dim layer is not over, even
+		-- though the pointer's place is inside it -- and what is over the layer stays.
+		local screen = assert(ctx.screen)
+		local hits, blockZ, blockOrder = collectHover(screen, assert(ctx.root), event.x, event.y)
+		local refs = screen.refs
 
 		-- The set the pointer is over, in the numbers `Screen:markPointer` gives the frame it
 		-- built: two moves that agree on them are over the same boxes, which is no frame at all.
 		-- A count, a sum and a mix of the element indices, because two different sets that agree
 		-- on all three are not a set this screen can hold.
 		local hoverCount, hoverSum, hoverTag = 0, 0, 0
+		local anyWithMouseDown, anyTextInput = false, false
+		local edge, edgeZ, edgeOrder = nil, 0, 0
+		local handler, handlerX, handlerY = nil, 0, 0
+		local handlerWidth, handlerHeight = 0, 0
+		local handlerZ, handlerOrder = 0, 0
 
-		for _, hit in pairs(hoveredElements) do
-			if hit.node.visible ~= 0 then
-				local elementIndex = hit.node.element
+		for at = 1, hits do
+			local z, order = hoverHitZ[at], hoverHitOrder[at]
 
-				hoverCount = hoverCount + 1
-				hoverSum = hoverSum + elementIndex
-				hoverTag = bit.bxor(hoverTag, elementIndex)
+			if blockOrder == 0 or not paintedBelow(z, order, blockZ, blockOrder) then
+				local node = refs[hoverHitIndex[at]]
+				local element = pointers[node.element]
+				local flags = element.flags
+
+				if node.visible ~= 0 then
+					local elementIndex = node.element
+
+					hoverCount = hoverCount + 1
+					hoverSum = hoverSum + elementIndex
+					hoverTag = bit.bxor(hoverTag, elementIndex)
+				end
+
+				-- An edge that can be dragged is the one shape that is not the pointer: which way it
+				-- is dragged is which way its cursor points across the screen or down it. The
+				-- topmost one is what a press would take hold of, as it is for everything else.
+				if bit.band(flags, RESIZE) ~= 0
+				and (edge == nil or z > edgeZ or (z == edgeZ and order > edgeOrder))
+				and onResizeEdge(element, event.x, event.y, hoverHitX[at], hoverHitY[at], node) then
+					edge = (element.resizeEdge == EDGE_RIGHT or element.resizeEdge == EDGE_LEFT) and "sizewe" or "sizens"
+					edgeZ, edgeOrder = z, order
+				end
+
+				if bit.band(flags, TEXT_INPUT) ~= 0 then
+					anyTextInput = true
+				end
+				if bit.band(flags, TEXT_INPUT) ~= 0 or bit.band(flags, SLIDE) ~= 0
+				or element.onmousedown ~= 0 or element.onclick ~= 0 then
+					anyWithMouseDown = true
+				end
+
+				-- What answers a move is the box painted last among those that do: what is drawn
+				-- over another is what the pointer is on, and a box drawn under it is not the one
+				-- that hears about it.
+				if element.onmousemove ~= 0
+				and (handler == nil or z > handlerZ or (z == handlerZ and order > handlerOrder)) then
+					handler = element
+					handlerX, handlerY = hoverHitX[at], hoverHitY[at]
+					handlerWidth, handlerHeight = node.width, node.height
+					handlerZ, handlerOrder = z, order
+				end
 			end
 		end
 
 		ctx.hoverChanged = hoverCount * 0x100000000 + hoverSum ~= (ctx.hoverKey or 0)
 		or hoverTag ~= (ctx.hoverTag or 0)
 
-		local anyWithMouseDown = false
-		local anyTextInput = false
-		local edge = nil
-
-		for el, hit in pairs(hoveredElements) do
-				if bit.band(el.flags, RESIZE) ~= 0 and onResizeEdge(el, event.x, event.y, hit.absX, hit.absY, hit.node) then
-					-- An edge that can be dragged is the one shape that is not the pointer: which way it
-					-- is dragged is which way its cursor points across the screen or down it.
-					edge = (el.resizeEdge == EDGE_RIGHT or el.resizeEdge == EDGE_LEFT) and "sizewe" or "sizens"
-					break
-				end
-
-				if bit.band(el.flags, TEXT_INPUT) ~= 0 then
-					anyTextInput = true
-				end
-				if bit.band(el.flags, TEXT_INPUT) ~= 0 or bit.band(el.flags, SLIDE) ~= 0
-				or el.onmousedown ~= 0 or el.onclick ~= 0 then
-					anyWithMouseDown = true
-				end
-			end
-
 		-- A field is typed in, not pressed: the I-beam says so even when the field or its row
 		-- also answers a click.
 		setShape(ctx, edge or (anyTextInput and "text" or anyWithMouseDown and "hand2" or nil))
 
-		for el, layout in pairs(hoveredElements) do
-				local handler = callbacks[el.onmousemove]
+		if handler ~= nil then
+			local tell = callbacks[handler.onmousemove]
 
-				if handler then
-					-- An element that answers the pointer draws where it is, which is a frame of
-					-- the screen already built: `UI:event` walks it again and does not build it.
-					ctx.pointerDraw = true
+			if tell then
+				-- An element that answers the pointer draws where it is, which is a frame of
+				-- the screen already built: `UI:event` walks it again and does not build it.
+				ctx.pointerDraw = true
 
-					local relX = event.x - layout.absX
-					local relY = event.y - layout.absY
-					return handler(relX, relY, layout.node.width, layout.node.height, ctx.modifiers)
-				end
+				return tell(event.x - handlerX, event.y - handlerY, handlerWidth, handlerHeight, ctx.modifiers)
 			end
+		end
 	elseif event.name == "mousePress" then
 		local ctx = self.contexts[event.window]
 		setPointer(ctx, event.x, event.y, true)
@@ -2001,6 +2442,17 @@ function Layout:event(event)
 		end
 
 		if info then
+			-- The box that draws its own press hears about it before the click does: the click is
+			-- what a press is for, and a press that changes the screen still shows its feedback for
+			-- the frames that follow. What the handler answers is nothing, so the click below is
+			-- still the message the app is told.
+			local drew = callbacks[info.element.onpress]
+
+			if drew ~= nil then
+				drew(event.x - info.absX, event.y - info.absY, info.node.width, info.node.height,
+					event.touch == true)
+			end
+
 			local now = time.now()
 			local isTextInput = bit.band(info.element.flags, TEXT_INPUT) ~= 0
 			local isDblClick = (info.element.ondblclick ~= 0 or isTextInput)
@@ -2196,6 +2648,19 @@ function Layout:event(event)
 		if drag then
 			ctx.dragging = nil
 			return report(drag, event.x, event.y)
+		end
+
+		-- A box that drew the press hears that it is over. It is asked of what is under the
+		-- pointer now rather than of what the press landed on: a press dragged off the box it began
+		-- on is one whose feedback should stop, and a box it was dragged onto never began one.
+		local ended = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y, hasPressEnd)
+
+		if ended ~= nil then
+			local tell = callbacks[ended.element.onpressend]
+
+			if tell ~= nil then
+				tell()
+			end
 		end
 
 		local info = findTopmostAt(assert(ctx.screen), assert(ctx.root), event.x, event.y, hasMouseUp)

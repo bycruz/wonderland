@@ -20,6 +20,17 @@ local shaderExt = backend.shaderExt
 -- every depth attachment of this plugin is made in.
 local DEPTH_FORMATS = backend.isVulkan and { "depth24plus", "depth32float" } or { "depth24plus" }
 
+-- The formats a swapchain of this library's is made in, in the order tried, and the same on every
+-- platform so the look does not depend on what a driver happens to list first. What this library's
+-- shaders write is sRGB-encoded colour: a theme's colour is the bytes of its hex string, a picture
+-- is uploaded as rgba8unorm, and the fragment shader converts between encoded and linear nowhere.
+-- The swapchain must therefore store those bytes as they are -- an unorm format -- rather than an
+-- `-srgb` one, which would make the hardware encode every value a second time: that is the
+-- washed-out look. B8G8R8A8 is what desktop drivers present natively, R8G8B8A8 what Android's
+-- surface offers.
+---@type hood.TextureFormat[]
+local SURFACE_FORMATS = { "bgra8unorm", "rgba8unorm" }
+
 ---@class wonderland.plugin.Render.Context
 ---@field window wonderland.RenderWindow
 ---@field swapchain hood.Swapchain?
@@ -307,7 +318,10 @@ function RenderPlugin:register(window)
 	local windowCtx = self.windowPlugin:getContext(window)
 	assert(windowCtx, "Window context not found for render plugin")
 
-	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }) --[[@as hood.Swapchain?]]
+	local swapchain = windowCtx.surface:configure(self:getDevice(), {
+		presentMode = self.presentMode,
+		preferredFormats = SURFACE_FORMATS,
+	}) --[[@as hood.Swapchain?]]
 
 	return (self.createContext --[[@as fun(self: wonderland.plugin.Render, window: wonderland.RenderWindow, swapchain: hood.Swapchain?): wonderland.plugin.Render.Context]])(self, window, swapchain)
 end
@@ -874,7 +888,10 @@ end
 ---@return boolean resized # Whether there is a swapchain this frame can be drawn into
 function RenderPlugin:resize(ctx)
 	local windowCtx = assert(self.windowPlugin:getContext(ctx.window))
-	local swapchain = windowCtx.surface:configure(self:getDevice(), { presentMode = self.presentMode }, ctx.swapchain)
+	local swapchain = windowCtx.surface:configure(self:getDevice(), {
+		presentMode = self.presentMode,
+		preferredFormats = SURFACE_FORMATS,
+	}, ctx.swapchain)
 	---@cast swapchain hood.Swapchain?
 
 	if not swapchain then
